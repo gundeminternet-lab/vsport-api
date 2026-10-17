@@ -1,0 +1,20 @@
+{
+  "name": "vsport-functions",
+  "description": "vSport API: ücretli AI analizi, bahis ihtimalleri, maç simülasyonu ve kuponlar (Render sunucusu ya da Cloud Functions)",
+  "type": "module",
+  "main": "index.js",
+  "private": true,
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "deploy": "firebase deploy --only functions",
+    "logs": "firebase functions:log"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.0",
+    "firebase-functions": "^6.0.0"
+  }
+}

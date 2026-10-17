@@ -1,0 +1,109 @@
+// Bağımsız HTTP API (Render vb. ücretsiz Node.js barındırma için). Firebase'e doğrudan bağlı değildir;
+// kimlik doğrulama ve servisler dışarıdan verilir, bu yüzden bilgisayarda test edilebilir (test/app.test.js).
+//
+//   GET  /health                      → 200 "ok"  (uyku önleme / sağlık kontrolü)
+//   POST /api/{ad}  { data: {...} }   → 200 { result } | 4xx/5xx { error: { code, message } }
+//        ad: unlockContent | getContent | getReview | unlockCoupon
+//   Authorization: Bearer <Firebase ID token>   (uygulama her istekte gönderir)
+
+import { AppError } from './logic.js';
+
+const STATUS = {
+  'invalid-argument': 400,
+  unauthenticated: 401,
+  'permission-denied': 403,
+  'not-found': 404,
+  'failed-precondition': 409,
+  'resource-exhausted': 429,
+  internal: 500,
+};
+
+export function createApi({ verifyToken, service, coupons, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
+  const routes = {
+    unlockContent: (d) => service.unlock(d),
+    getContent: (d) => service.get(d),
+    getReview: (d) => service.review(d),
+    unlockCoupon: (d) => coupons.unlock(d),
+  };
+
+  // Kullanıcı başına dakikada en fazla [rateLimit] istek (bellekte; tek örnek için yeterli).
+  const hits = new Map();
+  const limited = (uid) => {
+    const minute = Math.floor(Date.now() / 60000);
+    const h = hits.get(uid);
+    if (!h || h.minute !== minute) {
+      hits.set(uid, { minute, n: 1 });
+      if (hits.size > 10000) hits.clear();
+      return false;
+    }
+    h.n++;
+    return h.n > rateLimit;
+  };
+
+  const send = (res, status, body) => {
+    const json = JSON.stringify(body);
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(json);
+  };
+  const fail = (res, code, message) => send(res, STATUS[code] ?? 500, { error: { code, message } });
+
+  const readBody = (req) =>
+    new Promise((resolve, reject) => {
+      let size = 0;
+      const chunks = [];
+      req.on('data', (c) => {
+        size += c.length;
+        if (size > maxBodyBytes) {
+          reject(new AppError('invalid-argument', 'İstek çok büyük.'));
+          req.destroy();
+        } else chunks.push(c);
+      });
+      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      req.on('error', reject);
+    });
+
+  return async function handler(req, res) {
+    const url = new URL(req.url, 'http://localhost');
+    if (req.method === 'GET' && (url.pathname === '/health' || url.pathname === '/')) {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      return res.end('ok');
+    }
+    const m = /^\/api\/([A-Za-z]+)$/.exec(url.pathname);
+    if (!m || !Object.hasOwn(routes, m[1])) return fail(res, 'not-found', 'Bulunamadı.');
+    if (req.method !== 'POST') return fail(res, 'invalid-argument', 'Yalnızca POST.');
+
+    try {
+      // Kimlik: Firebase ID token. Sahte ya da süresi geçmiş belge reddedilir.
+      const auth = req.headers.authorization ?? '';
+      const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+      if (!token) return fail(res, 'unauthenticated', 'Giriş yapmalısınız.');
+      let uid;
+      try {
+        uid = await verifyToken(token);
+      } catch {
+        return fail(res, 'unauthenticated', 'Oturum doğrulanamadı; lütfen tekrar giriş yapın.');
+      }
+      if (!uid) return fail(res, 'unauthenticated', 'Giriş yapmalısınız.');
+      if (limited(uid)) return fail(res, 'resource-exhausted', 'Çok fazla istek; biraz sonra tekrar deneyin.');
+
+      let data = {};
+      const raw = await readBody(req);
+      if (raw) {
+        let parsed;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          return fail(res, 'invalid-argument', 'Geçersiz istek.');
+        }
+        if (parsed && typeof parsed.data === 'object' && parsed.data !== null && !Array.isArray(parsed.data)) data = parsed.data;
+      }
+      // uid her zaman doğrulanmış belgeden gelir; istemcinin gönderdiği uid yok sayılır.
+      const result = await routes[m[1]]({ ...data, uid });
+      return send(res, 200, { result });
+    } catch (e) {
+      if (e instanceof AppError) return fail(res, e.code, e.message);
+      log.error?.(e);
+      return fail(res, 'internal', 'İşlem tamamlanamadı, lütfen tekrar deneyin.');
+    }
+  };
+}
