@@ -21,6 +21,7 @@ import { createStore } from './store.js';
 import { createApi } from './app.js';
 import { MatchWatcher } from './watcher.js';
 import { createLeagueStore, previousWeekId } from './league.js';
+import { createProgressStore, XP } from './progress.js';
 
 function serviceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -33,13 +34,24 @@ function serviceAccount() {
 initializeApp({ credential: cert(serviceAccount()) });
 const db = getFirestore();
 const auth = getAuth();
-const store = createStore(db, FieldValue);
+const baseStore = createStore(db, FieldValue);
+const progress = createProgressStore(db, FieldValue);
+// Ücretli içerik açıldığında seviye/rozet ilerlemesi
+const store = {
+  ...baseStore,
+  async purchase(args) {
+    const r = await baseStore.purchase(args);
+    if (r.charged) progress.add(args.uid, { unlocks: 1, xp: XP.unlock }).catch(() => {});
+    return r;
+  },
+};
 
 const espn = new EspnClient();
 const api = createApi({
   verifyToken: async (token) => (await auth.verifyIdToken(token)).uid,
   service: new PaidContentService({ store, espn }),
   coupons: new CouponService({ store }),
+  progress,
 });
 
 const port = Number(process.env.PORT ?? 8080);
@@ -47,7 +59,7 @@ http.createServer(api).listen(port, () => console.log(`vSport API ${port} portun
 
 // ---- Canlı maç bildirimleri ----
 const messaging = getMessaging();
-const league = createLeagueStore(db, FieldValue);
+const league = createLeagueStore(db, FieldValue, progress);
 let awardedWeek = null; // bellekte: aynı hafta için her dakika işlem açılmasın
 const watcher = new MatchWatcher({
   store,

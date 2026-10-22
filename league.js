@@ -49,7 +49,7 @@ export function previousWeekId(nowMs) {
 }
 
 /** Firestore'a yazan kısım. db: Admin Firestore, FieldValue: firebase-admin/firestore. */
-export function createLeagueStore(db, FieldValue) {
+export function createLeagueStore(db, FieldValue, progress = null) {
   return {
     /** Biten maçın tahminlerini puanlar. Maç başladıktan sonra değiştirilen tahminler 0 puan alır (geçersiz). */
     async scoreMatch({ key, homeGoals, awayGoals, kickoffMs }) {
@@ -84,6 +84,18 @@ export function createLeagueStore(db, FieldValue) {
           scored++;
         }
         await batch.commit();
+        // Seviye/rozet ilerlemesi (başarısız olsa da puanlama geçerli kalır)
+        if (progress) {
+          for (const doc of q.docs) {
+            const p = doc.data();
+            const at = p.updatedAt?.toMillis?.() ?? 0;
+            if (!at || at >= kickoffMs) continue;
+            const { points, exact } = scorePrediction(p, { home: homeGoals, away: awayGoals });
+            try {
+              await progress.add(doc.id, { predictions: 1, exact: exact ? 1 : 0, leaguePoints: points, xp: 5 + points * 10 });
+            } catch {}
+          }
+        }
         if (q.size < 200) break;
       }
       return scored;
@@ -114,6 +126,15 @@ export function createLeagueStore(db, FieldValue) {
           winners.push({ uid: d.id, rank: i + 1, amount, username: d.data().username ?? null, points: d.data().points });
         });
         tx.set(marker, { awarded: true, winners, awardedAt: FieldValue.serverTimestamp() }, { merge: true });
+        return winners;
+      }).then(async (winners) => {
+        if (progress) {
+          for (const w of winners) {
+            try {
+              await progress.add(w.uid, { podiums: 1, wins: w.rank === 1 ? 1 : 0, xp: [200, 100, 50][w.rank - 1] ?? 0 });
+            } catch {}
+          }
+        }
         return winners;
       });
     },
