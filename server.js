@@ -20,6 +20,7 @@ import { CouponService } from './coupons.js';
 import { createStore } from './store.js';
 import { createApi } from './app.js';
 import { MatchWatcher } from './watcher.js';
+import { createLeagueStore, previousWeekId } from './league.js';
 
 function serviceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -46,9 +47,22 @@ http.createServer(api).listen(port, () => console.log(`vSport API ${port} portun
 
 // ---- Canlı maç bildirimleri ----
 const messaging = getMessaging();
+const league = createLeagueStore(db, FieldValue);
+let awardedWeek = null; // bellekte: aynı hafta için her dakika işlem açılmasın
 const watcher = new MatchWatcher({
   store,
   espn,
+  // Tahmin ligi: biten maçın tahminleri puanlanır
+  onFinished: (m) => league.scoreMatch(m),
+  // Pazartesi (Türkiye saati) geçen haftanın ilk üçüne token ödülü; tekrar dağıtılmaz
+  onTick: async (now) => {
+    // Pazar gecesi biten maçlar da puanlansın diye Pazartesi 06:00'dan sonra dağıtılır.
+    const week = previousWeekId(now - 6 * 3600e3);
+    if (awardedWeek === week) return;
+    const winners = await league.awardWeek(week);
+    if (winners.length) console.log(`[league] ${week} ödülleri:`, winners.map((w) => `${w.rank}. ${w.username} +${w.amount}`).join(', '));
+    awardedWeek = week;
+  },
   send: ({ topic, title, body, data }) =>
     messaging.send({
       topic,

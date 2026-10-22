@@ -28,6 +28,7 @@ export function readSummary(json) {
     name: str(c.team?.shortDisplayName ?? c.team?.displayName ?? c.team?.name) || '?',
   });
   return {
+    date: Date.parse(comp.date ?? json?.header?.date ?? '') || null,
     home: team(home),
     away: team(away),
     score: [num(home.score) ?? 0, num(away.score) ?? 0],

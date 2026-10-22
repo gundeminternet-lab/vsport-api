@@ -121,3 +121,26 @@ test('izleyici: konu adı, durum kaydı, ligi geçersiz ve bitmiş maçları atl
   assert.equal(sent[0].data.type, 'kickoff');
   assert.equal(saved.get('tur_1_100').phases.kickoff, true);
 });
+
+test('izleyici: biten maçta tahminler bir kez puanlanır', async () => {
+  const finished = [];
+  const saved = new Map();
+  const ended = summary({ state: 'post', name: 'STATUS_FULL_TIME', period: 2, clock: "90'", score: [2, 1], completed: true });
+  ended.header.competitions[0].date = '2026-10-18T17:00Z';
+  const item = { key: 'tur_1_100', league: 'tur.1', eventId: '100', state: { phases: { kickoff: true, half_time: true, second_half: true }, seen: [], score: [2, 1] } };
+  const w = new MatchWatcher({
+    store: { listWatched: async () => [item], saveWatchState: async (k, s) => saved.set(k, s) },
+    espn: { getSummary: async () => ended },
+    send: async () => {},
+    onFinished: async (m) => finished.push(m),
+    log: { error() {} },
+  });
+  await w.tick();
+  assert.deepEqual(finished, [{ key: 'tur_1_100', homeGoals: 2, awayGoals: 1, kickoffMs: Date.parse('2026-10-18T17:00Z') }]);
+  assert.equal(saved.get('tur_1_100').scored, true);
+  assert.equal(saved.get('tur_1_100').done, true);
+  // Kayıtlı durum: bitti + puanlandı → bir daha bakılmaz
+  item.state = saved.get('tur_1_100');
+  await w.tick();
+  assert.equal(finished.length, 1);
+});
