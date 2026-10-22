@@ -26,6 +26,7 @@ import { createPollStore } from './polls.js';
 import { CouponSettler, createSettleStore } from './settle.js';
 import { CouponCheckService } from './check.js';
 import { createRewardStore } from './rewards.js';
+import { createAdminService } from './admin.js';
 
 function serviceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -62,6 +63,7 @@ const api = createApi({
   service: paidService,
   checker: new CouponCheckService({ paid: paidService, store }),
   rewards,
+  admin: createAdminService({ db, FieldValue, auth }),
   coupons: new CouponService({ store }),
   progress,
 });

@@ -33,9 +33,18 @@ export function createStore(db, FieldValue) {
     async saveWatchState(key, state) {
       await db.doc(`watched/${key}`).update({ state, checkedAt: FieldValue.serverTimestamp() });
     },
+    // Maçın editör yorumları: eski tekli belge (editor_comments/{key}) + editör başına belgeler ({key}_{uid}).
     async getEditorComment(key) {
-      const s = await db.doc(`editor_comments/${key}`).get();
-      return s.exists ? (s.data().text ?? null) : null;
+      const [legacy, q] = await Promise.all([
+        db.doc(`editor_comments/${key}`).get(),
+        db.collection('editor_comments').where('matchKey', '==', key).limit(10).get(),
+      ]);
+      const parts = [];
+      if (legacy.exists && legacy.get('text')) parts.push({ name: legacy.get('editorName'), text: legacy.get('text') });
+      for (const d of q.docs) if (d.get('text')) parts.push({ name: d.get('editorName'), text: d.get('text') });
+      if (!parts.length) return null;
+      if (parts.length === 1) return parts[0].text;
+      return parts.map((p) => `${p.name ?? 'Editör'}: ${p.text}`).join('\n\n');
     },
     async getTokens(uid) {
       const s = await db.doc(`users/${uid}`).get();
