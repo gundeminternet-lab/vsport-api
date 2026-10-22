@@ -24,6 +24,7 @@ import { createLeagueStore, previousWeekId } from './league.js';
 import { createProgressStore, XP } from './progress.js';
 import { createPollStore } from './polls.js';
 import { CouponSettler, createSettleStore } from './settle.js';
+import { CouponCheckService } from './check.js';
 
 function serviceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -46,12 +47,18 @@ const store = {
     if (r.charged) progress.add(args.uid, { unlocks: 1, xp: XP.unlock }).catch(() => {});
     return r;
   },
+  // Kupon kontrol sonuçları kullanıcının geçmişine (yalnızca kendisi okur)
+  async saveCheck(uid, id, result) {
+    await db.doc(`users/${uid}/checks/${id}`).set({ ...result, createdAt: FieldValue.serverTimestamp() });
+  },
 };
 
 const espn = new EspnClient();
+const paidService = new PaidContentService({ store, espn });
 const api = createApi({
   verifyToken: async (token) => (await auth.verifyIdToken(token)).uid,
-  service: new PaidContentService({ store, espn }),
+  service: paidService,
+  checker: new CouponCheckService({ paid: paidService, store }),
   coupons: new CouponService({ store }),
   progress,
 });

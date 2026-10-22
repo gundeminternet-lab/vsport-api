@@ -19,13 +19,14 @@ const STATUS = {
   unavailable: 503,
 };
 
-export function createApi({ verifyToken, service, coupons, progress = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
+export function createApi({ verifyToken, service, coupons, progress = null, checker = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
   const routes = {
     unlockContent: (d) => service.unlock(d),
     getContent: (d) => service.get(d),
     getReview: (d) => service.review(d),
     unlockCoupon: (d) => coupons.unlock(d),
     ...(progress ? { checkIn: (d) => progress.checkIn(d) } : {}),
+    ...(checker ? { checkCoupon: (d) => checker.check(d) } : {}),
   };
 
   // Kullanıcı başına dakikada en fazla [rateLimit] istek (bellekte; tek örnek için yeterli).
