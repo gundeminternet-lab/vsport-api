@@ -2,13 +2,16 @@
 //   watched/{matchKey}: uygulama bir maçı favoriye eklediğinde oluşturur (lig, maç no, başlama saati).
 //   Takip: başlamadan 10 dk önce → başladıktan 4 saat sonrasına kadar ya da maç bitene kadar.
 
-import { evaluate } from './notify.js';
+import { evaluate, readSummary } from './notify.js';
 import { LEAGUES } from './logic.js';
 
 const KEY_RE = /^[A-Za-z0-9_]{3,80}$/;
 
 export class MatchWatcher {
-  constructor({ store, espn, send, now = () => Date.now(), log = console, leagues = LEAGUES, concurrency = 4 }) {
+  constructor({ store, espn, send, onFinished = null, onTick = null, onNote = null, now = () => Date.now(), log = console, leagues = LEAGUES, concurrency = 4 }) {
+    this.onFinished = onFinished; // async ({key, homeGoals, awayGoals, kickoffMs}) — tahmin ligi puanlaması
+    this.onTick = onTick; // her turda (haftalık ödül kontrolü)
+    this.onNote = onNote; // async ({key, note}) — maç odasında otomatik anket
     this.store = store;
     this.espn = espn;
     this.send = send; // async ({topic, title, body, data}) => void
@@ -24,9 +27,17 @@ export class MatchWatcher {
 
   async tick() {
     const now = this.now();
-    const list = await this.store.listWatched(new Date(now - 4 * 3600e3), new Date(now + 10 * 60e3));
+    if (this.onTick) {
+      try {
+        await this.onTick(now);
+      } catch (e) {
+        this.log.error?.(`[watcher] periyodik görev başarısız: ${e?.message ?? e}`);
+      }
+    }
+    // Maç bitip tahminler puanlanana kadar izlenir (sunucu bir süre kapalı kaldıysa 8 saate kadar telafi eder).
+    const list = await this.store.listWatched(new Date(now - 8 * 3600e3), new Date(now + 10 * 60e3));
     const todo = list.filter(
-      (w) => w.state?.done !== true && this.leagues.has(w.league) && /^[0-9A-Za-z-]{1,30}$/.test(w.eventId) && KEY_RE.test(w.key),
+      (w) => !(w.state?.done === true && w.state?.scored !== false) && this.leagues.has(w.league) && /^[0-9A-Za-z-]{1,30}$/.test(w.eventId) && KEY_RE.test(w.key),
     );
     this.active = todo.length;
     let i = 0;
@@ -45,7 +56,25 @@ export class MatchWatcher {
       this.log.error?.(`[watcher] ${w.key} özet alınamadı: ${e?.message ?? e}`);
       return;
     }
-    const { notes, state, changed } = evaluate(summary, w.state);
+    const result = evaluate(summary, w.state);
+    const { notes, state } = result;
+    let changed = result.changed;
+    // Maç bitti: tahmin ligi puanlaması (başarısız olursa sonraki turda tekrar denenir).
+    if (state.done) {
+      const s = readSummary(summary);
+      if (s.completed && this.onFinished && w.state?.scored !== true) {
+        try {
+          await this.onFinished({ key: w.key, homeGoals: s.score[0], awayGoals: s.score[1], kickoffMs: s.date ?? this.now() });
+          state.scored = true;
+        } catch (e) {
+          state.scored = false;
+          this.log.error?.(`[watcher] ${w.key} tahminler puanlanamadı: ${e?.message ?? e}`);
+        }
+      } else {
+        state.scored = true;
+      }
+      changed = changed || state.scored !== w.state?.scored;
+    }
     for (const n of notes) {
       try {
         await this.send({
@@ -57,6 +86,13 @@ export class MatchWatcher {
         this.sent++;
       } catch (e) {
         this.log.error?.(`[watcher] ${w.key} bildirim gönderilemedi: ${e?.message ?? e}`);
+      }
+      if (this.onNote) {
+        try {
+          await this.onNote({ key: w.key, note: n });
+        } catch (e) {
+          this.log.error?.(`[watcher] ${w.key} anket açılamadı: ${e?.message ?? e}`);
+        }
       }
     }
     if (changed) {

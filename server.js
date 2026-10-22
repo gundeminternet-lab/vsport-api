@@ -11,7 +11,7 @@
 import http from 'node:http';
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-import { getFirestore, FieldValue } from 'firebase-admin/firestore';
+import { getFirestore, FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 
 import { EspnClient } from './engine/espn.js';
@@ -22,6 +22,7 @@ import { createApi } from './app.js';
 import { MatchWatcher } from './watcher.js';
 import { createLeagueStore, previousWeekId } from './league.js';
 import { createProgressStore, XP } from './progress.js';
+import { createPollStore } from './polls.js';
 
 function serviceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -60,10 +61,13 @@ http.createServer(api).listen(port, () => console.log(`vSport API ${port} portun
 // ---- Canlı maç bildirimleri ----
 const messaging = getMessaging();
 const league = createLeagueStore(db, FieldValue, progress);
+const polls = createPollStore(db, FieldValue, Timestamp);
 let awardedWeek = null; // bellekte: aynı hafta için her dakika işlem açılmasın
 const watcher = new MatchWatcher({
   store,
   espn,
+  // Penaltı, kırmızı kart, VAR, gol iptali: maç sohbetinde otomatik anket
+  onNote: (n) => polls.autoPoll(n),
   // Tahmin ligi: biten maçın tahminleri puanlanır
   onFinished: (m) => league.scoreMatch(m),
   // Pazartesi (Türkiye saati) geçen haftanın ilk üçüne token ödülü; tekrar dağıtılmaz
