@@ -25,6 +25,7 @@ import { createProgressStore, XP } from './progress.js';
 import { createPollStore } from './polls.js';
 import { CouponSettler, createSettleStore } from './settle.js';
 import { CouponCheckService } from './check.js';
+import { createRewardStore } from './rewards.js';
 
 function serviceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -38,7 +39,8 @@ initializeApp({ credential: cert(serviceAccount()) });
 const db = getFirestore();
 const auth = getAuth();
 const baseStore = createStore(db, FieldValue);
-const progress = createProgressStore(db, FieldValue);
+const rewards = createRewardStore(db, FieldValue);
+const progress = createProgressStore(db, FieldValue, undefined, rewards);
 // Ücretli içerik açıldığında seviye/rozet ilerlemesi
 const store = {
   ...baseStore,
@@ -59,6 +61,7 @@ const api = createApi({
   verifyToken: async (token) => (await auth.verifyIdToken(token)).uid,
   service: paidService,
   checker: new CouponCheckService({ paid: paidService, store }),
+  rewards,
   coupons: new CouponService({ store }),
   progress,
 });

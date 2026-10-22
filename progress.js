@@ -58,7 +58,7 @@ export function checkInDelta(prev, nowMs) {
   return { delta: { streak: streak - Number(prev?.streak ?? 0), xp: XP.checkIn + bonus }, lastDay: today, streak };
 }
 
-export function createProgressStore(db, FieldValue, now = () => Date.now()) {
+export function createProgressStore(db, FieldValue, now = () => Date.now(), rewards = null) {
   const ref = (uid) => db.doc(`user_stats/${uid}`);
   return {
     async add(uid, delta) {
@@ -77,8 +77,11 @@ export function createProgressStore(db, FieldValue, now = () => Date.now()) {
         if (!c) return { already: true, streak: Number(prev.streak ?? 0), earned: [] };
         const { stats, earned } = applyProgress(prev, c.delta);
         stats.lastDay = c.lastDay;
+        // Günlük token ödülü aynı işlemde (bir günde bir kez)
+        const userSnap = rewards ? await tx.get(db.doc(`users/${uid}`)) : null;
         tx.set(ref(uid), { ...stats, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
-        return { already: false, streak: c.streak, xp: c.delta.xp, earned };
+        const tokens = rewards && userSnap?.exists ? rewards.grantDaily(tx, uid, c.streak, c.lastDay) : 0;
+        return { already: false, streak: c.streak, xp: c.delta.xp, tokens, earned };
       });
     },
   };
