@@ -23,6 +23,7 @@ import { MatchWatcher } from './watcher.js';
 import { createLeagueStore, previousWeekId } from './league.js';
 import { createProgressStore, XP } from './progress.js';
 import { createPollStore } from './polls.js';
+import { CouponSettler, createSettleStore } from './settle.js';
 
 function serviceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -62,6 +63,8 @@ http.createServer(api).listen(port, () => console.log(`vSport API ${port} portun
 const messaging = getMessaging();
 const league = createLeagueStore(db, FieldValue, progress);
 const polls = createPollStore(db, FieldValue, Timestamp);
+const settler = new CouponSettler({ store: createSettleStore(db, FieldValue), espn });
+let lastSettle = 0;
 let awardedWeek = null; // bellekte: aynı hafta için her dakika işlem açılmasın
 const watcher = new MatchWatcher({
   store,
@@ -72,6 +75,11 @@ const watcher = new MatchWatcher({
   onFinished: (m) => league.scoreMatch(m),
   // Pazartesi (Türkiye saati) geçen haftanın ilk üçüne token ödülü; tekrar dağıtılmaz
   onTick: async (now) => {
+    // Kuponlar 10 dakikada bir sonuçlandırılır (editör karnesi)
+    if (now - lastSettle >= 10 * 60e3) {
+      lastSettle = now;
+      settler.run().then((n) => n && console.log(`[settle] ${n} kupon sonuçlandı`)).catch((e) => console.error('[settle]', e?.message ?? e));
+    }
     // Pazar gecesi biten maçlar da puanlansın diye Pazartesi 06:00'dan sonra dağıtılır.
     const week = previousWeekId(now - 6 * 3600e3);
     if (awardedWeek === week) return;
