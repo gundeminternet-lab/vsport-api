@@ -12,12 +12,14 @@ import http from 'node:http';
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
+import { getMessaging } from 'firebase-admin/messaging';
 
 import { EspnClient } from './engine/espn.js';
 import { PaidContentService } from './logic.js';
 import { CouponService } from './coupons.js';
 import { createStore } from './store.js';
 import { createApi } from './app.js';
+import { MatchWatcher } from './watcher.js';
 
 function serviceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -32,11 +34,34 @@ const db = getFirestore();
 const auth = getAuth();
 const store = createStore(db, FieldValue);
 
+const espn = new EspnClient();
 const api = createApi({
   verifyToken: async (token) => (await auth.verifyIdToken(token)).uid,
-  service: new PaidContentService({ store, espn: new EspnClient() }),
+  service: new PaidContentService({ store, espn }),
   coupons: new CouponService({ store }),
 });
 
 const port = Number(process.env.PORT ?? 8080);
 http.createServer(api).listen(port, () => console.log(`vSport API ${port} portunda çalışıyor`));
+
+// ---- Canlı maç bildirimleri ----
+const messaging = getMessaging();
+const watcher = new MatchWatcher({
+  store,
+  espn,
+  send: ({ topic, title, body, data }) =>
+    messaging.send({
+      topic,
+      notification: { title, body },
+      data,
+      android: { priority: 'high', notification: { channelId: 'match_events', sound: 'default' } },
+    }),
+});
+watcher.start(60000);
+
+// Ücretsiz Render servisi 15 dk istek gelmezse uyur ve maçları izleyemez. Sunucu 9 dakikada bir kendi adresini
+// çağırarak uyanık kalır (tek servis için aylık 750 ücretsiz saat buna yeter). RENDER_EXTERNAL_URL'i Render verir.
+const selfUrl = process.env.RENDER_EXTERNAL_URL;
+if (selfUrl) {
+  setInterval(() => fetch(`${selfUrl}/health`).catch(() => {}), 9 * 60 * 1000);
+}

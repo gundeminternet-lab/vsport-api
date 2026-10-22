@@ -25,6 +25,14 @@ export function createStore(db, FieldValue) {
         throw e;
       }
     },
+    // ---- Canlı bildirim takibi (watched/{matchKey}) ----
+    async listWatched(from, to) {
+      const q = await db.collection('watched').where('kickoffAt', '>=', from).where('kickoffAt', '<=', to).limit(300).get();
+      return q.docs.map((d) => ({ key: d.id, league: d.get('league'), eventId: String(d.get('eventId') ?? ''), state: d.get('state') ?? null }));
+    },
+    async saveWatchState(key, state) {
+      await db.doc(`watched/${key}`).update({ state, checkedAt: FieldValue.serverTimestamp() });
+    },
     async getEditorComment(key) {
       const s = await db.doc(`editor_comments/${key}`).get();
       return s.exists ? (s.data().text ?? null) : null;

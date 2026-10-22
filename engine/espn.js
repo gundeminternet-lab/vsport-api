@@ -114,6 +114,15 @@ export function parseEvents(json, { league = null, includeUpcoming = false } = {
   return out;
 }
 
+/** summary?event= yanıtındaki maç başlığını fikstürdeki maç biçimine çevirir. */
+export function parseSummaryEvent(json, { league = null, eventId = null } = {}) {
+  const comp = json?.header?.competitions?.[0];
+  if (!comp) return null;
+  const id = String(json.header.id ?? comp.id ?? eventId);
+  const [m] = parseEvents({ events: [{ id, date: comp.date, competitions: [comp] }] }, { league, includeUpcoming: true });
+  return m ?? null;
+}
+
 export class EspnClient {
   constructor({ fetchImpl = globalThis.fetch, cacheTtlMs = ESPN.cacheTtlMs, timeoutMs = ESPN.timeoutMs, retries = ESPN.retries } = {}) {
     if (!fetchImpl) throw new Error('fetch bulunamadı (Node 18+ gerekir)');
@@ -124,21 +133,28 @@ export class EspnClient {
     this.cache = new Map();
   }
 
-  async _getJson(url) {
+  async _getJson(url, { maxAgeMs = this.cacheTtlMs } = {}) {
     const hit = this.cache.get(url);
-    if (hit && Date.now() - hit.t < this.cacheTtlMs) return hit.json;
+    if (hit && Date.now() - hit.t < maxAgeMs) return hit.json;
 
     let lastError;
     for (let attempt = 0; attempt <= this.retries; attempt++) {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
       try {
-        const res = await this.fetchImpl(url, { signal: ctrl.signal, headers: { accept: 'application/json' } });
+        const res = await this.fetchImpl(url, {
+          signal: ctrl.signal,
+          // Bazı sunucular tanımsız istemcileri reddeder; sıradan bir tarayıcı gibi tanıtılır.
+          headers: { accept: 'application/json', 'user-agent': 'Mozilla/5.0 (vSport API)' },
+        });
         clearTimeout(timer);
         if (res.status === 404) throw Object.assign(new Error(`ESPN 404: ${url}`), { fatal: true });
         if (!res.ok) throw new Error(`ESPN ${res.status}`);
         const json = await res.json();
+        // Uzun süre çalışan sunucuda bellek şişmesin: en eski kayıtlar atılır.
+        this.cache.delete(url);
         this.cache.set(url, { t: Date.now(), json });
+        while (this.cache.size > 400) this.cache.delete(this.cache.keys().next().value);
         return json;
       } catch (e) {
         clearTimeout(timer);
@@ -163,6 +179,17 @@ export class EspnClient {
     const q = season ? `?season=${season}` : '';
     const json = await this._getJson(`${ESPN.siteApi}/${league}/teams/${teamId}/schedule${q}`);
     return parseEvents(json, { league });
+  }
+
+  // Maçın ham özet verisi (canlı takip için kısa önbellekle).
+  async getSummary(league, eventId, { maxAgeMs = 20000 } = {}) {
+    return this._getJson(`${ESPN.siteApi}/${league}/summary?event=${encodeURIComponent(eventId)}`, { maxAgeMs });
+  }
+
+  // Tek maç, kimliğiyle (tarihten bağımsız). Bulunamazsa null.
+  async getEvent(league, eventId) {
+    const json = await this._getJson(`${ESPN.siteApi}/${league}/summary?event=${encodeURIComponent(eventId)}`);
+    return parseSummaryEvent(json, { league, eventId });
   }
 
   // Gün aralığındaki fikstür. from/to: Date nesnesi
