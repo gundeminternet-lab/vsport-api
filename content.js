@@ -4,13 +4,16 @@
 //   odds : kazanabilecek bahis ihtimalleri (MS, çifte şans, KG, alt/üst, İY, en olası skorlar, adil oran)
 //   sim  : 60 saniyelik simülasyon; oyuncu/top konumları kare kare hazırlanır, telefon yalnızca çizer
 
-import { scoreMatrix } from './engine/analysis.js';
-import { simulateMatch } from './engine/simulator.js';
+import { scoreMatrix, scoresForOutcome } from './engine/analysis.js';
+import { simulateMatch, simulateToScore } from './engine/simulator.js';
+import { createRng } from './engine/rng.js';
+import { MODEL } from './engine/config.js';
 import { buildChoreography } from './engine/animation/choreography.js';
 import { buildPlayers } from './engine/animation/players.js';
 
 export const PRICES = { ai: 50, odds: 50, sim: 100 };
-export const CONTENT_VERSION = 1;
+// 2: lig geneli güç modeli, belirsizlik katmanı, tahminle tutarlı skor ve simülasyon
+export const CONTENT_VERSION = 2;
 
 const pct = (p) => Math.round(p * 100);
 const r2 = (x) => Math.round(x * 100) / 100;
@@ -24,10 +27,10 @@ function sumMatrix(m, pred) {
   return s;
 }
 
-export function markets(lambdaHome, lambdaAway) {
-  const ft = scoreMatrix(lambdaHome, lambdaAway);
+export function markets(lambdaHome, lambdaAway, sigma = 0) {
+  const ft = scoreMatrix(lambdaHome, lambdaAway, MODEL.dcRho, 10, sigma);
   // İlk yarıda gollerin ~%45'i atılır.
-  const ht = scoreMatrix(lambdaHome * 0.45, lambdaAway * 0.45);
+  const ht = scoreMatrix(lambdaHome * 0.45, lambdaAway * 0.45, MODEL.dcRho, 10, sigma);
   const p = {
     ms1: sumMatrix(ft, (i, j) => i > j),
     msX: sumMatrix(ft, (i, j) => i === j),
@@ -50,7 +53,8 @@ export function markets(lambdaHome, lambdaAway) {
 const fairOdd = (p) => (p > 0.01 ? Math.round((1 / p) * 100) / 100 : null);
 
 export function buildOdds(analysis) {
-  const { p, topScores } = markets(analysis.lambdaHome, analysis.lambdaAway);
+  const { p, topScores } = markets(analysis.lambdaHome, analysis.lambdaAway, analysis.sigma);
+  const predicted = predictedScore(analysis);
   const row = (key, label, prob) => ({ key, label, pct: pct(prob), fairOdd: fairOdd(prob) });
   const groups = [
     { title: 'Maç sonucu', items: [row('ms1', 'MS 1', p.ms1), row('msX', 'MS X', p.msX), row('ms2', 'MS 2', p.ms2)] },
@@ -82,6 +86,7 @@ export function buildOdds(analysis) {
     groups,
     highlights: all.slice(0, 4),
     topScores: topScores.map((s) => ({ score: s.score, pct: Math.round(s.p * 1000) / 10 })),
+    predictedScore: predicted.score,
     expectedGoals: { home: r2(analysis.lambdaHome), away: r2(analysis.lambdaAway) },
     note: 'Olasılıklar istatistik modelinden hesaplanır; adil oran = 1 / olasılık. Gerçek sonucu veya kazancı garanti etmez.',
   };
@@ -96,6 +101,19 @@ const formWord = (pts, n) => {
   return r >= 0.73 ? 'çok iyi' : r >= 0.53 ? 'iyi' : r >= 0.33 ? 'orta' : 'kötü';
 };
 
+/** Skor tablosu: model belirsizliği dahil, tahmin için kullanılan tek tablo. */
+export function matrixOf(analysis) {
+  return scoreMatrix(analysis.lambdaHome, analysis.lambdaAway, MODEL.dcRho, 10, analysis.sigma ?? 0);
+}
+
+/**
+ * "En olası skor": tahmin edilen sonuçla (1/X/2) uyumlu en olası skor. Tablonun genel zirvesi çoğu zaman 1-1 olur;
+ * model "ev sahibi kazanır" derken 1-1 göstermek tutarsızdır.
+ */
+export function predictedScore(analysis) {
+  return scoresForOutcome(matrixOf(analysis), predictedOutcome(analysis))[0];
+}
+
 export function predictedOutcome(analysis) {
   const { homeWin, draw, awayWin } = analysis.probabilities;
   if (homeWin >= draw && homeWin >= awayWin) return '1';
@@ -109,7 +127,7 @@ export function buildAi(analysis, { editorComment = null } = {}) {
   const pH = analysis.home.profile;
   const pA = analysis.away.profile;
   const pr = analysis.probabilities;
-  const { p } = markets(analysis.lambdaHome, analysis.lambdaAway);
+  const { p } = markets(analysis.lambdaHome, analysis.lambdaAway, analysis.sigma);
   const sections = [];
 
   // Genel bakış
@@ -165,8 +183,8 @@ export function buildAi(analysis, { editorComment = null } = {}) {
   sections.push({
     title: 'Öne çıkan tercih',
     text: best
-      ? `Modelin en güvendiği tercih: ${best.label} (%${best.pct}). En olası skor ${odds.topScores[0].score}.`
-      : `Belirgin bir tercih yok; en olası skor ${odds.topScores[0].score}.`,
+      ? `Modelin en güvendiği tercih: ${best.label} (%${best.pct}). Tahmin edilen skor ${odds.predictedScore}.`
+      : `Belirgin bir tercih yok; tahmin edilen skor ${odds.predictedScore}.`,
   });
 
   const conf = analysis.dataQuality.confidence;
@@ -180,7 +198,7 @@ export function buildAi(analysis, { editorComment = null } = {}) {
   return {
     pick: predictedOutcome(analysis),
     probabilities: { home: pct(pr.homeWin), draw: pct(pr.draw), away: pct(pr.awayWin) },
-    topScore: odds.topScores[0].score,
+    topScore: odds.predictedScore,
     confidence: conf,
     sections,
     editorComment,
@@ -200,8 +218,23 @@ const qZ = (z) => Math.max(0, Math.min(65535, Math.round(Math.min(1, Math.max(0,
 /** Bir karedeki değer sırası: top x,y,z · 11 ev sahibi (x,y,yön) · 11 deplasman (x,y,yön) · hakem x,y  = 71 değer */
 export const VALUES_PER_FRAME = 3 + 11 * 3 * 2 + 2;
 
+/**
+ * Simülasyonun varacağı skor. AI'nın tahmin ettiği sonucla (1/X/2) uyumlu, makul skorlar arasından, olasılığa göre
+ * (en olası skorlara öncelik verilerek) seçilir; böylece ekranda izlenen maç, AI'nın anlattığı hikâyeyle çelişmez
+ * ve 6-0 gibi aşırı uçlar çıkmaz. Aynı tohum her zaman aynı skoru verir.
+ */
+export function pickSimTarget(analysis, seed) {
+  const cands = scoresForOutcome(matrixOf(analysis), predictedOutcome(analysis));
+  const best = cands[0].p;
+  const plausible = cands.filter((c) => c.p >= best * 0.25);
+  const weights = plausible.map((c) => c.p ** 1.6);
+  const rng = createRng(`${seed}|hedef`);
+  return rng.pickWeighted(plausible, weights);
+}
+
 export function buildSim(analysis, { seed, durationSeconds = 60 } = {}) {
-  const timeline = simulateMatch(analysis, { seed });
+  const target = pickSimTarget(analysis, seed);
+  const timeline = simulateToScore(analysis, { seed, target: { home: target.home, away: target.away } });
   const choreo = buildChoreography(timeline, { durationSeconds });
   const form = (l) => (l >= 1.6 ? '4-3-3' : '4-4-2');
   const players = buildPlayers(choreo, { homeFormation: form(analysis.lambdaHome), awayFormation: form(analysis.lambdaAway) });
