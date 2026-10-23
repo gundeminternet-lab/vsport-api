@@ -326,6 +326,24 @@ export function simulateMatch(analysis, { seed, rng: external } = {}) {
   };
 }
 
+/**
+ * Maçı, istenen skorla bitene dek (farklı ama tohuma bağlı, yani tekrarlanabilir) denemelerle oynatır. Maçın akışı
+ * (şutlar, kornerler, kartlar, gol dakikaları) simülatörün kendi sürecinden gelir; yalnızca son skor seçilir.
+ * Hiç denemede tutmazsa aynı sonuçla (1/X/2) biten en yakın deneme, o da yoksa ilk deneme döner.
+ */
+export function simulateToScore(analysis, { seed, target, maxTries = 800 } = {}) {
+  let fallback = null;
+  let sameOutcome = null;
+  const outcome = (s) => Math.sign(s.home - s.away);
+  for (let k = 0; k < maxTries; k++) {
+    const t = simulateMatch(analysis, { seed: k === 0 ? seed : `${seed}#${k}` });
+    if (t.score.home === target.home && t.score.away === target.away) return Object.assign(t, { conditioned: { target, tries: k + 1, hit: true } });
+    fallback ??= t;
+    if (!sameOutcome && outcome(t.score) === outcome(target)) sameOutcome = t;
+  }
+  return Object.assign(sameOutcome ?? fallback, { conditioned: { target, tries: maxTries, hit: false } });
+}
+
 // Aynı analizle çok sayıda maç oynatıp dağılımı özetler (güven aralığı / kalibrasyon için)
 export function simulateMany(analysis, n = 2000, seed = 'monte-carlo') {
   const rng = createRng(seed);

@@ -2,6 +2,7 @@
 // iki takımın bu maçtaki "beklenen gol" (λ) değerlerini ve sonuç olasılıklarını hesaplar.
 
 import { MODEL, LEAGUES } from './config.js';
+import { ratingLambdas } from './ratings.js';
 
 const DAY = 86400000;
 export const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
@@ -27,12 +28,19 @@ export function buildTeamProfile({ teamId, matches = [], tableEntry = null, leag
     .slice(0, MODEL.maxMatches)
     .map((m) => {
       const isHome = String(m.homeId) === id;
+      const ha = MODEL.homeAdvantage;
+      // Evde atılan goller ev avantajıyla şişiktir; ağırlıklı ortalamalar tarafsız sahaya çevrilir.
+      const f = !MODEL.venueAdjust ? 1 : isHome ? 1 + ha : 1 - ha;
+      const gf = isHome ? m.homeGoals : m.awayGoals;
+      const ga = isHome ? m.awayGoals : m.homeGoals;
       return {
         id: m.id,
         timestamp: m.timestamp,
         isHome,
-        gf: isHome ? m.homeGoals : m.awayGoals,
-        ga: isHome ? m.awayGoals : m.homeGoals,
+        gf,
+        ga,
+        nGf: gf / f,
+        nGa: ga / (2 - f),
       };
     });
 
@@ -40,12 +48,16 @@ export function buildTeamProfile({ teamId, matches = [], tableEntry = null, leag
   let sw = 0;
   let sgf = 0;
   let sga = 0;
+  let rgf = 0;
+  let rga = 0;
   perspective.forEach((m, i) => {
     const ageDays = Math.max(0, (now - m.timestamp) / DAY);
     const w = 0.5 ** (i / MODEL.halfLifeMatches) * 0.5 ** (ageDays / MODEL.halfLifeDays);
     sw += w;
-    sgf += w * m.gf;
-    sga += w * m.ga;
+    sgf += w * m.nGf;
+    sga += w * m.nGa;
+    rgf += w * m.gf;
+    rga += w * m.ga;
   });
 
   // Az maç varsa lig ortalamasına doğru çek (6-0'lık tek maç yıldız yapmasın)
@@ -76,8 +88,9 @@ export function buildTeamProfile({ teamId, matches = [], tableEntry = null, leag
     id,
     attack: att / leagueAvg,
     defense: def / leagueAvg, // 1'den büyük = rakibe fazla gol verir
-    goalsForPerGame: att,
-    goalsAgainstPerGame: def,
+    // Ekranda gösterilen (ham) ağırlıklı ortalamalar; model ise sahaya göre düzeltilmiş değerleri kullanır
+    goalsForPerGame: (rgf + k * leagueAvg) / (sw + k),
+    goalsAgainstPerGame: (rga + k * leagueAvg) / (sw + k),
     form: {
       string: last5.map((m) => letter(m.gf, m.ga)).join(''),
       points: formPoints,
@@ -139,7 +152,33 @@ function pmf(lambda, maxG) {
   return p;
 }
 
-export function scoreMatrix(lh, la, rho = MODEL.dcRho, maxG = 10) {
+// Belirsizlik karışımı için 5 noktalı Gauss-Hermite düğümleri (standart normal)
+const GH = [
+  [-2.856970013872805, 0.011257411327720],
+  [-1.355626179974266, 0.222075922005613],
+  [0, 0.533333333333333],
+  [1.355626179974266, 0.222075922005613],
+  [2.856970013872805, 0.011257411327720],
+];
+
+/**
+ * Skor olasılık tablosu. sigma > 0 ise güç farkındaki belirsizlik hesaba katılır: ev sahibi beklentisi e^(sigma*z),
+ * deplasman beklentisi e^(-sigma*z) ile çarpılıp (z ~ N(0,1)) tablolar ortalanır. Ortalama beklenen gol değişmez,
+ * ama kuyruk (büyük farklı skorlar, sürpriz sonuçlar) gerçekçi biçimde kalınlaşır.
+ */
+export function scoreMatrix(lh, la, rho = MODEL.dcRho, maxG = 10, sigma = 0) {
+  if (!(sigma > 0)) return baseMatrix(lh, la, rho, maxG);
+  const norm = Math.exp(-(sigma * sigma) / 2);
+  let out = null;
+  for (const [z, w] of GH) {
+    const m = baseMatrix(lh * norm * Math.exp(sigma * z), la * norm * Math.exp(-sigma * z), rho, maxG);
+    if (!out) out = m.map((row) => row.map(() => 0));
+    for (let i = 0; i < m.length; i++) for (let j = 0; j < m[i].length; j++) out[i][j] += w * m[i][j];
+  }
+  return out;
+}
+
+function baseMatrix(lh, la, rho, maxG) {
   const ph = pmf(lh, maxG);
   const pa = pmf(la, maxG);
   const m = [];
@@ -161,8 +200,8 @@ export function scoreMatrix(lh, la, rho = MODEL.dcRho, maxG = 10) {
   return m;
 }
 
-export function matchProbabilities(lh, la) {
-  const m = scoreMatrix(lh, la);
+export function matchProbabilities(lh, la, sigma = 0) {
+  const m = scoreMatrix(lh, la, MODEL.dcRho, 10, sigma);
   let homeWin = 0;
   let draw = 0;
   let awayWin = 0;
@@ -194,6 +233,22 @@ export function matchProbabilities(lh, la) {
   };
 }
 
+const outcomeOfScore = (i, j) => (i > j ? '1' : i < j ? '2' : 'X');
+
+/**
+ * Tahmin edilen sonuçla (1/X/2) uyumlu skor adayları, olasılığa göre sıralı. "En olası skor" tüm tablonun zirvesi değil,
+ * tahminle çelişmeyen en olası skordur: model "ev sahibi kazanır" derken "1-1" demek tutarsızlıktır.
+ */
+export function scoresForOutcome(matrix, outcome) {
+  const list = [];
+  for (let i = 0; i < matrix.length; i++) {
+    for (let j = 0; j < matrix[i].length; j++) {
+      if (outcomeOfScore(i, j) === outcome) list.push({ home: i, away: j, score: `${i}-${j}`, p: matrix[i][j] });
+    }
+  }
+  return list.sort((a, b) => b.p - a.p);
+}
+
 // ---------------------------------------------------------------------------
 // Ana fonksiyon
 // ---------------------------------------------------------------------------
@@ -208,7 +263,9 @@ export function analyzeMatch({
   homeLeague = null,
   awayLeague = null,
   elo = null, // { home: 1650, away: 1580 } isteğe bağlı
+  ratings = null, // fitRatings() çıktısı: aynı ligdeki iki takım için lig geneli güç
   neutral = false,
+  uncertainty = true, // false: belirsizlik katmanı kapalı (karşılaştırma/deney için)
   now = Date.now(),
 }) {
   const lgH = homeTable?.leagueAvgGoals ?? MODEL.defaultLeagueAvg;
@@ -237,25 +294,37 @@ export function analyzeMatch({
   const attA = pA.attack * formMult(pA) ** MODEL.formAttackExp;
   const defA = pA.defense * formMult(pA) ** MODEL.formDefenseExp;
 
-  const ha = neutral ? 0 : MODEL.homeAdvantage;
-  let lambdaHome = base * (1 + ha) * attH * defA;
-  let lambdaAway = base * (1 - ha) * attA * defH;
-  const factors = { base, homeAdvantage: ha };
+  // Aynı ligdeki iki takım: lig geneli (rakibe göre düzeltilmiş) güç varsa o kullanılır
+  const rl = ratingLambdas(ratings, home.id, away.id, { neutral });
+  let lambdaHome;
+  let lambdaAway;
+  let factors;
+  if (rl) {
+    const fm = (p) => 1 + MODEL.ratingFormWeight * (p.form.index - MODEL.formNeutral);
+    lambdaHome = rl.lh * fm(pH);
+    lambdaAway = rl.la * fm(pA);
+    factors = { model: 'lig-gücü', base: round(ratings.mu, 3), homeAdvantage: round(rl.homeAdvantage, 3), attackHome: round(rl.home.attack, 3), defenseHome: round(rl.home.defense, 3), attackAway: round(rl.away.attack, 3), defenseAway: round(rl.away.defense, 3) };
+  } else {
+    const ha = neutral ? 0 : MODEL.homeAdvantage;
+    lambdaHome = base * (1 + ha) * attH * defA;
+    lambdaAway = base * (1 - ha) * attA * defH;
+    factors = { model: 'takım-geçmişi', base, homeAdvantage: ha };
 
-  // Puan durumu eğilimi (puan ortalaması farkı)
-  if (pH.ppg !== null && pA.ppg !== null) {
-    const tilt = clamp(MODEL.tableTilt * (pH.ppg - pA.ppg), -MODEL.tableTiltMax, MODEL.tableTiltMax);
-    lambdaHome *= 1 + tilt;
-    lambdaAway *= 1 - tilt;
-    factors.tableTilt = round(tilt, 3);
-  }
+    // Puan durumu eğilimi (puan ortalaması farkı)
+    if (pH.ppg !== null && pA.ppg !== null) {
+      const tilt = clamp(MODEL.tableTilt * (pH.ppg - pA.ppg), -MODEL.tableTiltMax, MODEL.tableTiltMax);
+      lambdaHome *= 1 + tilt;
+      lambdaAway *= 1 - tilt;
+      factors.tableTilt = round(tilt, 3);
+    }
 
-  // Farklı ligler: lig gücü oranı
-  if (homeLeague && awayLeague && homeLeague !== awayLeague) {
-    const ratio = (leagueStrength(homeLeague) / leagueStrength(awayLeague)) ** MODEL.leagueStrengthExp;
-    lambdaHome *= ratio;
-    lambdaAway /= ratio;
-    factors.leagueRatio = round(ratio, 3);
+    // Farklı ligler: lig gücü oranı
+    if (homeLeague && awayLeague && homeLeague !== awayLeague) {
+      const ratio = (leagueStrength(homeLeague) / leagueStrength(awayLeague)) ** MODEL.leagueStrengthExp;
+      lambdaHome *= ratio;
+      lambdaAway /= ratio;
+      factors.leagueRatio = round(ratio, 3);
+    }
   }
 
   // İsteğe bağlı Elo
@@ -269,7 +338,7 @@ export function analyzeMatch({
   // H2H: az ağırlıkla karıştır (gol ortalamalarına doğru hafifçe çek)
   const h2h = summarizeHeadToHead(h2hMatches, home.id, now);
   if (h2h.n > 0) {
-    const w = Math.min(MODEL.h2hMaxWeight, MODEL.h2hWeightPerMatch * h2h.n);
+    const w = Math.min(rl ? MODEL.ratingH2hMaxWeight : MODEL.h2hMaxWeight, MODEL.h2hWeightPerMatch * h2h.n);
     lambdaHome = (1 - w) * lambdaHome + w * h2h.homeGoalsAvg;
     lambdaAway = (1 - w) * lambdaAway + w * h2h.awayGoalsAvg;
     factors.h2hWeight = round(w, 3);
@@ -278,9 +347,14 @@ export function analyzeMatch({
   lambdaHome = clamp(lambdaHome, MODEL.lambdaMin, MODEL.lambdaMax);
   lambdaAway = clamp(lambdaAway, MODEL.lambdaMin, MODEL.lambdaMax);
 
-  const probabilities = matchProbabilities(lambdaHome, lambdaAway);
+  // Güç farkı belirsizliği: etkin maç sayısı azaldıkça artar
+  const effective = rl ? Math.min(rl.effHome, rl.effAway) : Math.min(pH.matchesUsed, pA.matchesUsed) * 0.55;
+  const sigma = !uncertainty ? 0 : clamp(MODEL.uncBase + MODEL.uncScale / Math.sqrt(effective + 2), MODEL.uncMin, MODEL.uncMax);
+  factors.sigma = round(sigma, 3);
 
-  const minMatches = Math.min(pH.matchesUsed, pA.matchesUsed);
+  const probabilities = matchProbabilities(lambdaHome, lambdaAway, sigma);
+
+  const minMatches = rl ? Math.min(rl.effHome, rl.effAway) : Math.min(pH.matchesUsed, pA.matchesUsed);
   const confidence = minMatches >= 12 ? 'yüksek' : minMatches >= 5 ? 'orta' : 'düşük';
 
   const insights = buildInsights({ home, away, pH, pA, h2h, lambdaHome, lambdaAway, probabilities, neutral });
@@ -290,13 +364,15 @@ export function analyzeMatch({
     away: { id: String(away.id), name: away.name, profile: pA },
     lambdaHome: round(lambdaHome, 3),
     lambdaAway: round(lambdaAway, 3),
+    sigma: round(sigma, 3),
     probabilities,
     h2h,
     factors,
     insights,
     dataQuality: {
-      homeMatches: pH.matchesUsed,
-      awayMatches: pA.matchesUsed,
+      homeMatches: rl ? Math.round(rl.effHome) : pH.matchesUsed,
+      awayMatches: rl ? Math.round(rl.effAway) : pA.matchesUsed,
+      model: factors.model,
       h2hMatches: h2h.n,
       tableAvailable: Boolean(homeTable && awayTable),
       confidence,

@@ -35,6 +35,7 @@ export const MODEL = {
   shrinkMatches: 4, // az maçta lig ortalamasına çekme gücü (sahte maç sayısı)
   tableWeight: 0.35, // sezon tablosundaki gol verisinin payı
 
+  venueAdjust: true, // geçmiş maçlardaki goller ev/deplasman etkisinden arındırılır
   homeAdvantage: 0.13, // ev sahibi +%13, deplasman -%13 (oran ≈ 1.30)
 
   // Form
@@ -55,8 +56,23 @@ export const MODEL = {
   leagueStrengthExp: 0.6,
   eloK: 0.0008, // her iki takıma yarı yarıya uygulanan Elo farkı katsayısı
 
-  lambdaMin: 0.25,
-  lambdaMax: 4.2,
+  // Lig geneli takım gücü (engine/ratings.js)
+  ratingHalfLifeDays: 300, // maçın ağırlığı her ~10 ayda yarıya iner
+  ratingMaxAgeDays: 620, // bundan eski maçlar kullanılmaz
+  ratingPrior: 8, // az maçı olan takımı lig ortalamasına çeken "sahte maç" sayısı
+  ratingMinWeight: 5, // takımın ligde en az bu kadar (ağırlıklı) maçı olmalı, yoksa eski yönteme dönülür
+  ratingFormWeight: 0.1, // güç zaten güncel maçlara ağırlık verir; son 5 maç formu yalnızca hafif etkiler
+  ratingH2hMaxWeight: 0.06,
+
+  // Belirsizlik: iki takımın güç farkı kesin bilinmez. Olasılıklar bu belirsizlik üzerinden ortalanır
+  // (aşırı iddialı %80'lik tahminleri gerçeğe yaklaştırır). sigma = uncBase + uncScale / sqrt(etkin maç + 2)
+  uncBase: 0.07,
+  uncScale: 0.55,
+  uncMin: 0.1,
+  uncMax: 0.3,
+
+  lambdaMin: 0.3,
+  lambdaMax: 3.8,
   dcRho: -0.06, // Dixon-Coles düşük skor düzeltmesi (yalnızca olasılık tablosunda)
 };
 

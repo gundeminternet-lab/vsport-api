@@ -192,6 +192,59 @@ export class EspnClient {
     return parseSummaryEvent(json, { league, eventId });
   }
 
+  /**
+   * Bir ligin son `days` gündeki TAMAMLANMIŞ maçları (lig geneli güç hesabı için). Gün aralıklı skor tablosu çağrıları
+   * 30'ar günlük dilimlerle yapılır; tek bir dilim yanıtı kırpılsa bile (ESPN sınırı) diğer dilimler etkilenmez.
+   * Sonuç lig başına bellekte tutulur (varsayılan 2 saat).
+   */
+  async getLeagueMatches(league, { days = 620, now = Date.now(), maxAgeMs = 2 * 3600 * 1000 } = {}) {
+    this.leagueCache ??= new Map();
+    const hit = this.leagueCache.get(league);
+    if (hit && Date.now() - hit.t < maxAgeMs && hit.days >= days) return hit.matches;
+    if (hit?.pending && hit.days >= days) return hit.pending;
+
+    const pending = (async () => {
+      const DAY = 86400000;
+      const fmt = (t) => new Date(t).toISOString().slice(0, 10).replaceAll('-', '');
+      const windows = [];
+      for (let end = now; end > now - days * DAY; end -= 30 * DAY) windows.push([Math.max(end - 30 * DAY + DAY, now - days * DAY), end]);
+      const byId = new Map();
+      let failed = 0;
+      let truncated = 0;
+      let next = 0;
+      const worker = async () => {
+        while (next < windows.length) {
+          const [from, to] = windows[next++];
+          try {
+            const json = await this._getJson(`${ESPN.siteApi}/${league}/scoreboard?dates=${fmt(from)}-${fmt(to)}&limit=500`, {
+              // Geçmiş dilimler değişmez; son dilim sık yenilenir
+              maxAgeMs: to >= now - DAY ? 20 * 60 * 1000 : 6 * 3600 * 1000,
+            });
+            if ((json?.events?.length ?? 0) >= 495) truncated++;
+            for (const m of parseEvents(json, { league })) byId.set(m.id, m);
+          } catch {
+            failed++;
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: 4 }, worker));
+      // Çoğu dilim alınamadıysa veri güvenilmez: üst katman eski yönteme döner
+      if (failed > windows.length / 3) throw new Error(`${league} lig verisi eksik alındı (${failed}/${windows.length} dilim başarısız)`);
+      const matches = [...byId.values()].sort((a, b) => a.timestamp - b.timestamp);
+      matches.meta = { windows: windows.length, failed, truncated };
+      return matches;
+    })();
+    this.leagueCache.set(league, { t: Date.now(), days, pending });
+    try {
+      const matches = await pending;
+      this.leagueCache.set(league, { t: Date.now(), days, matches });
+      return matches;
+    } catch (e) {
+      this.leagueCache.delete(league);
+      throw e;
+    }
+  }
+
   // Gün aralığındaki fikstür. from/to: Date nesnesi
   async getFixtures(league, from, to = from) {
     const fmt = (d) => d.toISOString().slice(0, 10).replaceAll('-', '');

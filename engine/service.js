@@ -3,6 +3,7 @@
 import { EspnClient } from './espn.js';
 import { TeamMemory } from './memory.js';
 import { analyzeMatch } from './analysis.js';
+import { fitRatings } from './ratings.js';
 import { simulateMatch, simulateMany } from './simulator.js';
 import { playTimeline } from './playback.js';
 
@@ -48,6 +49,20 @@ export class MatchSimulator {
     }
   }
 
+  // Yerel ligler ("tur.1", "eng.2" gibi) için lig geneli güç; kupalar ve Avrupa turnuvaları için kullanılmaz.
+  async _ratings(league, now, warnings) {
+    if (!/^[a-z]{3}\.\d$/.test(league) || typeof this.espn.getLeagueMatches !== 'function') return null;
+    try {
+      const matches = await this.espn.getLeagueMatches(league);
+      const ratings = fitRatings(matches, { now });
+      if (!ratings) warnings.push(`${league} için yeterli lig verisi yok; takım geçmişi kullanıldı`);
+      return ratings;
+    } catch (e) {
+      warnings.push(`${league} lig verisi alınamadı: ${e.message}`);
+      return null;
+    }
+  }
+
   // Maç öncesi analiz. awayLeague farklıysa (ör. Avrupa maçı) lig gücü oranı uygulanır.
   // now: analizde yalnızca bu andan ÖNCEKİ maçlar kullanılır (biten maçın tahminini sonradan dürüstçe üretmek için).
   async prepare({ league, homeId, awayId, homeName, awayName, awayLeague = league, elo = null, neutral = false, now = Date.now() }) {
@@ -67,6 +82,9 @@ export class MatchSimulator {
       this.syncTeam(awayLeague, awayId, awayName, warnings),
     ]);
 
+    // Aynı ligdeki (yerel lig) iki takım için lig geneli güç; alınamazsa eski yönteme dönülür.
+    const ratings = awayLeague === league ? await this._ratings(league, now, warnings) : null;
+
     const analysis = analyzeMatch({
       home: { id: homeId, name: homeName },
       away: { id: awayId, name: awayName },
@@ -78,6 +96,7 @@ export class MatchSimulator {
       homeLeague: league,
       awayLeague,
       elo,
+      ratings,
       neutral,
       now,
     });
