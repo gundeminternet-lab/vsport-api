@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { evaluate, classifyEvent, readSummary } from '../notify.js';
+import { evaluate, classifyEvent, readSummary, NOTIFY_TYPES, SOUND_CHANNELS, DEFAULT_CHANNEL, channelFor, fcmMessage } from '../notify.js';
 import { MatchWatcher } from '../watcher.js';
 
 function summary({ state = 'in', name = 'STATUS_FIRST_HALF', period = 1, clock = "10'", score = [0, 0], completed = false, events = [] } = {}) {
@@ -143,4 +143,46 @@ test('izleyici: biten maçta tahminler bir kez puanlanır', async () => {
   item.state = saved.get('tur_1_100');
   await w.tick();
   assert.equal(finished.length, 1);
+});
+
+test('olay sesleri: her ses ayrı kanalda, geçerli türler için', () => {
+  const types = Object.keys(SOUND_CHANNELS);
+  assert.deepEqual([...types].sort(), ['full_time', 'goal', 'half_time', 'kickoff', 'penalty', 'red_card', 'second_half']);
+  for (const t of types) assert.ok(NOTIFY_TYPES.includes(t), `${t} geçerli bir bildirim türü değil`);
+  const ids = types.map((t) => SOUND_CHANNELS[t].channelId);
+  const sounds = types.map((t) => SOUND_CHANNELS[t].sound);
+  assert.equal(new Set(ids).size, ids.length, 'kanal kimlikleri benzersiz olmalı');
+  assert.equal(new Set(sounds).size, sounds.length, 'ses dosyaları benzersiz olmalı');
+  for (const id of ids) assert.match(id, /^ev_[a-z_]+_v\d+$/);
+  for (const snd of sounds) assert.match(snd, /^snd_[a-z_]+$/); // Android kaynak adı: küçük harf, rakam, alt çizgi
+  assert.ok(!ids.includes(DEFAULT_CHANNEL.channelId));
+});
+
+test('özel sesi olmayan türler varsayılan kanalı kullanır', () => {
+  for (const t of ['var', 'goal_disallowed', 'added_time', 'bilinmeyen', undefined]) {
+    assert.deepEqual(channelFor(t), DEFAULT_CHANNEL);
+  }
+  assert.equal(DEFAULT_CHANNEL.channelId, 'match_events');
+});
+
+test('FCM mesajı olay türüne göre kanal ve ses taşır', () => {
+  const m = fcmMessage({ topic: 'tur_1_77_goal', title: 'GOL', body: '23\' Icardi', data: { matchKey: 'tur_1_77', type: 'goal' } });
+  assert.equal(m.topic, 'tur_1_77_goal');
+  assert.deepEqual(m.notification, { title: 'GOL', body: "23' Icardi" });
+  assert.equal(m.data.type, 'goal');
+  assert.equal(m.android.priority, 'high');
+  assert.deepEqual(m.android.notification, { channelId: 'ev_goal_v1', sound: 'snd_goal' });
+
+  const v = fcmMessage({ topic: 't', title: 'VAR', body: '', data: { type: 'var' } });
+  assert.deepEqual(v.android.notification, { channelId: 'match_events', sound: 'default' });
+  // veri olmasa da çökmez
+  assert.equal(fcmMessage({ topic: 't', title: 'x', body: 'y' }).android.notification.channelId, 'match_events');
+});
+
+test('izleyici bildirimini olay türüyle gönderir (kanal seçimi için)', async () => {
+  // evaluate çıktısındaki her tür, uygulamadaki bildirim türlerinden biri olmalı
+  let r = evaluate(summary({ state: 'pre', name: 'STATUS_SCHEDULED', period: 0, clock: "0'" }), null);
+  r = evaluate(summary({ state: 'in', clock: "1'" }), r.state);
+  assert.equal(r.notes[0].type, 'kickoff');
+  assert.equal(channelFor(r.notes[0].type).channelId, 'ev_kickoff_v1');
 });

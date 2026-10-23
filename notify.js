@@ -9,6 +9,39 @@ export const NOTIFY_TYPES = [
   'kickoff', 'goal', 'goal_disallowed', 'var', 'penalty', 'red_card', 'half_time', 'second_half', 'added_time', 'full_time',
 ];
 
+/**
+ * Olay başına Android bildirim kanalı ve özel ses. Android 8+ sesi kanal belirler, bu yüzden her sesin ayrı kanalı vardır;
+ * kanallar uygulamada oluşturulur (android/app/src/main/kotlin/.../MainActivity.kt) ve ses dosyaları
+ * android/app/src/main/res/raw/<ses>.ogg içindedir. Ses ya da kanal değişirse kanal adının sonundaki sürümü artırın
+ * (Android bir kanalın sesini sonradan değiştirmeye izin vermez).
+ * `sound` Android 7 ve altında bildirimin kendi sesidir (uzantısız dosya adı).
+ */
+export const SOUND_CHANNELS = {
+  goal: { channelId: 'ev_goal_v1', sound: 'snd_goal' },
+  red_card: { channelId: 'ev_red_card_v1', sound: 'snd_red_card' },
+  penalty: { channelId: 'ev_penalty_v1', sound: 'snd_penalty' },
+  kickoff: { channelId: 'ev_kickoff_v1', sound: 'snd_kickoff' },
+  half_time: { channelId: 'ev_half_time_v1', sound: 'snd_half_time' },
+  second_half: { channelId: 'ev_second_half_v1', sound: 'snd_second_half' },
+  full_time: { channelId: 'ev_full_time_v1', sound: 'snd_full_time' },
+};
+
+/** Özel sesi olmayan türler (VAR, gol iptali, uzatma) varsayılan bildirim sesini kullanır. */
+export const DEFAULT_CHANNEL = { channelId: 'match_events', sound: 'default' };
+
+export const channelFor = (type) => SOUND_CHANNELS[type] ?? DEFAULT_CHANNEL;
+
+/** FCM mesajı: konuya giden bildirim + olay türüne uygun kanal ve ses. `data.type` bildirim türüdür. */
+export function fcmMessage({ topic, title, body, data }) {
+  const { channelId, sound } = channelFor(data?.type);
+  return {
+    topic,
+    notification: { title, body },
+    data,
+    android: { priority: 'high', notification: { channelId, sound } },
+  };
+}
+
 const str = (v) => (v === null || v === undefined ? '' : String(v)).trim();
 const num = (v) => {
   const n = Number(typeof v === 'object' && v !== null ? v.value ?? v.displayValue : v);

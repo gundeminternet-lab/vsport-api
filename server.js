@@ -20,6 +20,7 @@ import { CouponService } from './coupons.js';
 import { createStore } from './store.js';
 import { createApi } from './app.js';
 import { MatchWatcher } from './watcher.js';
+import { fcmMessage } from './notify.js';
 import { createLeagueStore, previousWeekId } from './league.js';
 import { createProgressStore, XP } from './progress.js';
 import { createPollStore } from './polls.js';
@@ -101,13 +102,7 @@ const watcher = new MatchWatcher({
     if (winners.length) console.log(`[league] ${week} ödülleri:`, winners.map((w) => `${w.rank}. ${w.username} +${w.amount}`).join(', '));
     awardedWeek = week;
   },
-  send: ({ topic, title, body, data }) =>
-    messaging.send({
-      topic,
-      notification: { title, body },
-      data,
-      android: { priority: 'high', notification: { channelId: 'match_events', sound: 'default' } },
-    }),
+  send: (message) => messaging.send(fcmMessage(message)),
 });
 watcher.start(60000);
 
