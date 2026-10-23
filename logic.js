@@ -21,10 +21,21 @@ export class AppError extends Error {
   }
 }
 
-/** Uygulamadaki MatchItem.key ile aynı: "tur_1_401888391" */
-/** Uygulamada gösterilen ligler (lib/services/espn_service.dart ile aynı). Başka lig için içerik üretilmez. */
-export const LEAGUES = ['tur.1', 'uefa.champions', 'uefa.europa', 'eng.1', 'esp.1', 'ita.1', 'ger.1', 'fra.1', 'por.1', 'ned.1'];
+/** Uygulamada gösterilen ligler (lib/models/league_catalog.dart ile aynı olmalı; Flutter testi bunu denetler). Başka lig için içerik üretilmez. */
+export const LEAGUES = [
+  'tur.1', 'tur.2', 'uefa.champions', 'uefa.europa', 'uefa.europa.conf', 'eng.1',
+  'eng.2', 'eng.fa', 'eng.league_cup', 'eng.3', 'eng.4', 'esp.1',
+  'esp.copa_del_rey', 'esp.2', 'ita.1', 'ita.coppa_italia', 'ita.2', 'ger.1',
+  'ger.dfb_pokal', 'ger.2', 'fra.1', 'fra.coupe_de_france', 'fra.2', 'por.1',
+  'ned.1', 'bel.1', 'sco.1', 'gre.1', 'rus.1', 'aut.1',
+  'sui.1', 'den.1', 'swe.1', 'nor.1', 'usa.1', 'mex.1',
+  'bra.1', 'arg.1', 'conmebol.libertadores', 'conmebol.sudamericana', 'concacaf.champions', 'col.1',
+  'chi.1', 'uru.1', 'ksa.1', 'jpn.1', 'kor.1', 'chn.1',
+  'aus.1', 'afc.champions', 'caf.champions', 'uefa.nations', 'fifa.friendly', 'fifa.world',
+  'uefa.euro',
+];
 
+/** Uygulamadaki MatchItem.key ile aynı: "tur_1_401888391" */
 export const matchKey = (league, id) => `${String(league).replace(/[^a-zA-Z0-9]/g, '_')}_${String(id).replace(/[^a-zA-Z0-9]/g, '_')}`;
 
 const DAY = 86400000;
@@ -46,21 +57,35 @@ export class PaidContentService {
     if (needType && !Object.hasOwn(PRICES, type)) throw new AppError('invalid-argument', 'Geçersiz içerik türü.');
   }
 
-  /** Maçı ESPN'den doğrular (istemcinin gönderdiği takım/saat bilgisine güvenilmez). ESPN günleri ABD Doğu saatine
-   *  göre saydığı için maçın UTC günü ve bir önceki gün denenir. */
+  /** Maçı ESPN'den doğrular (istemcinin gönderdiği takım/saat bilgisine güvenilmez). Önce maç kimliğiyle
+   *  doğrudan aranır; olmazsa fikstürde (ESPN günleri ABD Doğu saatine göre saydığı için ±1 gün) aranır. */
   async findMatch({ league, eventId, kickoff }) {
+    const errors = [];
+    if (typeof this.espn.getEvent === 'function') {
+      try {
+        const m = await this.espn.getEvent(league, eventId);
+        if (m && String(m.id) === String(eventId)) return m;
+      } catch (e) {
+        errors.push(e);
+      }
+    }
     const t = Date.parse(kickoff);
-    for (const d of [utcDay(t), utcDay(t - DAY), utcDay(t + DAY)]) {
+    const days = [utcDay(t), utcDay(t - DAY), utcDay(t + DAY)];
+    for (const d of days) {
       let list;
       try {
         list = await this.espn.getFixtures(league, d);
-      } catch {
+      } catch (e) {
+        errors.push(e);
         continue;
       }
       const m = list.find((e) => String(e.id) === String(eventId));
       if (m) return m;
     }
-    throw new AppError('not-found', 'Maç ESPN\'de bulunamadı.');
+    if (errors.length) console.error(`[findMatch] ${league}/${eventId}:`, errors.map((e) => e?.message ?? e).join(' | '));
+    // Tüm istekler başarısızsa sorun maçta değil, ESPN'e erişimde.
+    if (errors.length > days.length) throw new AppError('unavailable', 'Maç verisine şu an ulaşılamıyor. Biraz sonra tekrar deneyin.');
+    throw new AppError('not-found', 'Maç bilgisi bulunamadı.');
   }
 
   /** İçerik maç başına bir kez üretilir ve saklanır; herkes aynı analizi ve aynı simülasyonu görür. */

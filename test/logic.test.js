@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { DemoEspn } from '../engine/demo.js';
-import { PaidContentService, AppError, matchKey } from '../logic.js';
+import { PaidContentService, AppError, matchKey, LEAGUES } from '../logic.js';
 import { PRICES, VALUES_PER_FRAME, markets, buildReview } from '../content.js';
 
 const NOW = Date.UTC(2026, 9, 17, 12, 0);
@@ -159,4 +159,25 @@ test('karşılaştırma kuralları', () => {
   assert.equal(r.ai.outcomeHit, true);
   assert.equal(r.ai.scoreHit, true);
   assert.equal(r.sim.outcomeHit, false);
+});
+
+test('lig listesi: yinelenen yok, kodlar geçerli ve Firestore kuralındaki 30 karakter sınırı içinde', () => {
+  assert.equal(new Set(LEAGUES).size, LEAGUES.length);
+  for (const code of LEAGUES) {
+    assert.match(code, /^[a-z0-9]+(\.[a-z0-9_]+)+$/, code);
+    assert.ok(code.length <= 30, code);
+    // Firestore belge kimliği ve izleme anahtarı güvenli olmalı
+    assert.match(matchKey(code, '401888391'), /^[A-Za-z0-9_]{3,80}$/);
+  }
+  for (const code of ['tur.1', 'uefa.champions', 'uefa.europa', 'eng.1', 'esp.1', 'ita.1', 'ger.1', 'fra.1', 'por.1', 'ned.1']) {
+    assert.ok(LEAGUES.includes(code), `${code} eski listede vardı, kaybolmamalı`);
+  }
+});
+
+test('genişletilmiş ligler sunucuda geçerli sayılır (içerik isteği "Geçersiz lig" ile reddedilmez)', () => {
+  const svc = new PaidContentService({ store: {}, espn: makeEspn() });
+  for (const code of ['eng.2', 'usa.1', 'conmebol.libertadores', 'uefa.europa.conf', 'ksa.1', 'eng.fa']) {
+    assert.ok(svc.leagues.has(code), code);
+  }
+  assert.ok(!svc.leagues.has('xyz.9'));
 });
