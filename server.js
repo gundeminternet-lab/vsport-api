@@ -26,6 +26,7 @@ import { createProgressStore, XP } from './progress.js';
 import { createPollStore } from './polls.js';
 import { CouponSettler, createSettleStore } from './settle.js';
 import { TrackService, createTrackStore } from './track.js';
+import { LineupService } from './lineup.js';
 import { CouponCheckService } from './check.js';
 import { createRewardStore } from './rewards.js';
 import { createAdminService } from './admin.js';
@@ -81,6 +82,7 @@ const api = createApi({
   coupons: new CouponService({ store }),
   progress,
   track: trackService,
+  lineup: new LineupService({ paid: paidService, espn }),
 });
 
 const port = Number(process.env.PORT ?? 8080);
