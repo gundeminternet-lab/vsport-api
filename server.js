@@ -28,6 +28,7 @@ import { CouponSettler, createSettleStore } from './settle.js';
 import { TrackService, createTrackStore } from './track.js';
 import { LineupService } from './lineup.js';
 import { BulletinService } from './bulletin.js';
+import { narratorFromEnv } from './narrator.js';
 import { CouponCheckService } from './check.js';
 import { createRewardStore } from './rewards.js';
 import { createAdminService } from './admin.js';
@@ -78,7 +79,7 @@ const api = createApi({
   rewards,
   admin: createAdminService({ db, FieldValue, auth }),
   tts: createTts({ db, FieldValue }),
-  assistant: new AssistantService({ paid: paidService, store }),
+  assistant: new AssistantService({ paid: paidService, store, narrator: narratorFromEnv() }),
   featured: createFeaturedService({ db, FieldValue, Timestamp, paid: paidService }),
   coupons: new CouponService({ store }),
   progress,

@@ -11,6 +11,7 @@ import { importanceOf } from './importance.js';
 import { SPECIAL_TOPICS } from './special.js';
 import { ASSISTANT_DAILY_LIMIT, dayKeyTr, hasAssistantAccess } from './subscription.js';
 import { intentOf, followUpAnswer, SUGGESTIONS } from './chat.js';
+import { Narrator } from './narrator.js';
 import { scoreMatrix } from './engine/analysis.js';
 import { MODEL } from './engine/config.js';
 
@@ -339,9 +340,10 @@ const spokenScore = (s) => {
 // Servis
 // ---------------------------------------------------------------------------------------------------
 export class AssistantService {
-  constructor({ paid, store, now = () => Date.now(), dailyLimit = ASSISTANT_DAILY_LIMIT }) {
+  constructor({ paid, store, now = () => Date.now(), dailyLimit = ASSISTANT_DAILY_LIMIT, narrator = new Narrator() }) {
     this.paid = paid;
     this.store = store;
+    this.narrator = narrator;
     this.now = now;
     this.dailyLimit = dailyLimit;
   }
@@ -411,6 +413,11 @@ export class AssistantService {
       ? { headline: `${match.homeName} - ${match.awayName}`, answer: follow.answer, scenes: [] }
       : buildAssistantReply({ match, content, model, specials, importance, live, focus, seed: key, state });
     const suggestions = follow ? follow.suggestions : SUGGESTIONS.general;
+    // Anlatım: şablon yanıtı dil modeliyle yeniden yazılabilir (kapalıysa aynen kalır). Rakamlar motordan gelir.
+    const narrated = await this.narrator.rewrite({
+      draft: reply.answer,
+      facts: narrationFacts({ match, state, live, content, model, importance }),
+    });
     const bumped = await this.store.bumpAssistantUsage(uid, day, this.dailyLimit);
 
     return {
@@ -430,9 +437,26 @@ export class AssistantService {
       suggestions,
       live: live ? { minute: live.minute, home: live.home, away: live.away, halftime: live.halftime } : null,
       headline: reply.headline,
-      answer: reply.answer,
+      answer: narrated.text,
+      narration: narrated.source,
       scenes: reply.scenes,
       usage: { used: bumped.used, limit: this.dailyLimit },
     };
   }
+}
+
+/** Anlatıcıya verilen veri: yalnızca motorun ürettiği değerler (metin olarak, virgüllü ondalıkla). */
+export function narrationFacts({ match, state, live, content, model, importance }) {
+  const r1 = (x) => (Math.round(x * 10) / 10).toFixed(1).replace('.', ',');
+  const pr = content.ai.probabilities;
+  const facts = {
+    maç: `${match.homeName} - ${match.awayName}`,
+    durum: state,
+    olasılıklar: `ev ${pr.home} / beraberlik ${pr.draw} / deplasman ${pr.away}`,
+    tahminiSkor: content.ai.topScore,
+    beklenenGol: `${r1(model.lambdaHome)} / ${r1(model.lambdaAway)}`,
+    önem: `${importance.label} ${importance.score}/100`,
+  };
+  if (live) facts.canlı = `${live.home}-${live.away}, ${live.minute}. dakika`;
+  return facts;
 }
