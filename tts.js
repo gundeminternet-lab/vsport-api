@@ -14,26 +14,60 @@ export const VOICES = {
   female: { name: 'tr-TR-EmelNeural', rate: '-4%', pitch: '+0%' },
   male: { name: 'tr-TR-AhmetNeural', rate: '-6%', pitch: '-2%' },
 };
+/**
+ * Sahnenin havası: anlatım hızı ve ses tonu temel değerin üstüne yüzde olarak eklenir; nefes payı da değişir.
+ * "warm" eski davranışla birebir aynıdır (önbellekteki sesler geçerli kalır).
+ */
+export const MOODS = {
+  warm: { rate: 0, pitch: 0, pause: 320 },
+  calm: { rate: -3, pitch: -1, pause: 380 },
+  excited: { rate: 7, pitch: 4, pause: 240 },
+  serious: { rate: -6, pitch: -3, pause: 440 },
+};
+export const moodOf = (mood) => (MOODS[mood] ? mood : 'warm');
+
+const pctNum = (s) => Number.parseFloat(String(s)) || 0;
+const signed = (n, unit) => `${n >= 0 ? '+' : ''}${n}${unit}`;
+
+/** Sesin temel değerine havanın payını ekler. Azure: yüzde; Edge: tek <prosody> olduğu için Hz (yaklaşık 2 Hz ≈ %1). */
+export function prosodyFor(voiceKey = 'female', mood = 'warm') {
+  const v = VOICES[voiceKey] ?? VOICES.female;
+  const m = MOODS[moodOf(mood)];
+  const rate = pctNum(v.rate) + m.rate;
+  const pitch = pctNum(v.pitch) + m.pitch;
+  return {
+    rate: signed(rate, '%'),
+    pitch: signed(pitch, '%'),
+    edgeRate: signed(rate, '%'),
+    edgePitch: signed(Math.round(pitch * 2), 'Hz'),
+    pause: m.pause,
+  };
+}
 export const MAX_CHARS = 1500;
 export const MONTHLY_LIMIT = 480000; // ücretsiz kotanın (500.000) biraz altı
 
 const xml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 
 /** Metni sıcak ve doğal bir anlatıma uygun SSML'e çevirir: cümle aralarında kısa nefes payları. */
-export function buildSsml(text, voiceKey = 'female') {
+export function buildSsml(text, voiceKey = 'female', mood = 'warm') {
   const v = VOICES[voiceKey] ?? VOICES.female;
+  const pr = prosodyFor(voiceKey, mood);
   const body = xml(text.trim())
-    // Cümle sonlarında kısa duraklama (doğal nefes)
-    .replace(/([.!?])\s+/g, '$1<break time="320ms"/> ')
+    // Cümle sonlarında kısa duraklama (doğal nefes); havaya göre kısalır ya da uzar
+    .replace(/([.!?])\s+/g, `$1<break time="${pr.pause}ms"/> `)
     .replace(/:\s+/g, ':<break time="180ms"/> ');
+  // Eski değerlerle birebir uyum: "warm" için rate/pitch temel değerlerdir ("-4%", "+0%")
   return (
     `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="tr-TR">` +
-    `<voice name="${v.name}"><prosody rate="${v.rate}" pitch="${v.pitch}">${body}</prosody></voice></speak>`
+    `<voice name="${v.name}"><prosody rate="${pr.rate}" pitch="${pr.pitch}">${body}</prosody></voice></speak>`
   );
 }
 
-export function cacheKey(text, voiceKey) {
-  return crypto.createHash('sha1').update(`${voiceKey}|${VOICES[voiceKey]?.name}|${text.trim()}`).digest('hex');
+/** Önbellek anahtarı: "warm" eski anahtarla aynıdır; diğer havalar ayrı ses üretir. */
+export function cacheKey(text, voiceKey, mood = 'warm') {
+  const m = moodOf(mood);
+  const tail = m === 'warm' ? '' : `|${m}`;
+  return crypto.createHash('sha1').update(`${voiceKey}|${VOICES[voiceKey]?.name}|${text.trim()}${tail}`).digest('hex');
 }
 
 export const EDGE_DAILY_LIMIT = 300000; // günlük karakter: hizmeti yormamak için
@@ -59,12 +93,13 @@ export function createTts({
   return {
     enabled: azure || edge,
 
-    async speak({ text, voice = 'female' }) {
+    async speak({ text, voice = 'female', mood = 'warm' }) {
       if (!azure && !edge) throw new AppError('unavailable', 'İnsansı ses şu an kullanılamıyor.');
       if (typeof text !== 'string' || !text.trim()) throw new AppError('invalid-argument', 'Metin boş.');
       if (text.length > MAX_CHARS) throw new AppError('invalid-argument', `Metin en fazla ${MAX_CHARS} karakter olabilir.`);
       const voiceKey = VOICES[voice] ? voice : 'female';
-      const k = cacheKey(text, voiceKey);
+      const moodKey = moodOf(mood);
+      const k = cacheKey(text, voiceKey, moodKey);
       if (memory.has(k)) return { audio: memory.get(k), format: 'mp3', cached: true };
 
       const ref = db.doc(`tts_cache/${k}`);
@@ -89,7 +124,7 @@ export function createTts({
               'X-Microsoft-OutputFormat': 'audio-24khz-48kbitrate-mono-mp3',
               'User-Agent': 'vsport-api',
             },
-            body: buildSsml(text, voiceKey),
+            body: buildSsml(text, voiceKey, moodKey),
           });
           if (res.ok) {
             bytes = Buffer.from(await res.arrayBuffer());
@@ -104,7 +139,7 @@ export function createTts({
         const used = (await dayRef.get()).get?.('chars') ?? 0;
         if (used + text.length > EDGE_DAILY_LIMIT) throw new AppError('resource-exhausted', 'Bugünkü insansı ses sınırı doldu; telefon sesi kullanılacak.');
         try {
-          bytes = await edgeImpl(text, voiceKey);
+          bytes = await edgeImpl(text, voiceKey, { mood: moodKey });
           await dayRef.set({ chars: FieldValue.increment(text.length) }, { merge: true });
         } catch (e) {
           console.error('[tts] edge:', e?.message ?? e);
@@ -114,7 +149,7 @@ export function createTts({
       if (!bytes?.length) throw new AppError('unavailable', 'İnsansı ses şu an üretilemedi; telefon sesi kullanılacak.');
       const audio = bytes.toString('base64');
       // Firestore belge sınırı 1 MB: büyük sesler yalnızca bellekte tutulur
-      if (audio.length < 900000) await ref.set({ audio, voice: voiceKey, chars: text.length, createdAt: FieldValue.serverTimestamp() });
+      if (audio.length < 900000) await ref.set({ audio, voice: voiceKey, mood: moodKey, chars: text.length, createdAt: FieldValue.serverTimestamp() });
       remember(k, audio);
       return { audio, format: 'mp3', cached: false };
     },

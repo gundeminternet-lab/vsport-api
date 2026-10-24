@@ -115,7 +115,7 @@ export class PaidContentService {
       createdAt: new Date(this.now()).toISOString(),
       // true: içerik maç başlamadan üretildi (biri maç öncesi satın aldı). false: maç bittikten sonra, yalnızca maç öncesi veriyle üretildi.
       generatedBeforeKickoff: this.now() < match.timestamp,
-      ai: buildAi(analysis),
+      ai: buildAi(analysis, { seed: key }),
       odds: buildOdds(analysis),
       sim: buildSim(analysis, { seed: key }),
     };

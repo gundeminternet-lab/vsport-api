@@ -42,6 +42,17 @@ export function ssmlMessage(text, voiceKey = 'female', { rate = '-6%', pitch = '
   return `X-RequestId:${id}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${stamp()}Z\r\nPath:ssml\r\n\r\n${ssml}`;
 }
 
+/** Edge için hız/ton: tts.js'teki hava tablosundan (döngüsel içe aktarmayı önlemek için burada yerel kopya). */
+const EDGE_BASE = { female: { rate: -4, pitch: 0 }, male: { rate: -6, pitch: -2 } };
+const EDGE_MOOD = { warm: [0, 0], calm: [-3, -1], excited: [7, 4], serious: [-6, -3] };
+export function edgeProsody(voiceKey = 'female', mood = 'warm') {
+  const b = EDGE_BASE[voiceKey] ?? EDGE_BASE.female;
+  const [r, p] = EDGE_MOOD[mood] ?? EDGE_MOOD.warm;
+  const rate = b.rate + r;
+  const pitch = Math.round((b.pitch + p) * 2);
+  return { rate: `${rate >= 0 ? '+' : ''}${rate}%`, pitch: `${pitch >= 0 ? '+' : ''}${pitch}Hz` };
+}
+
 /** İkili mesaj: ilk 2 bayt başlık uzunluğu (big-endian), sonra başlık, sonra ses. Ses değilse null. */
 export function audioFromBinary(buf) {
   if (buf.length < 2) return null;
@@ -52,7 +63,7 @@ export function audioFromBinary(buf) {
 }
 
 /** Metni MP3'e çevirir (Buffer). ws paketi gerekir (package.json). */
-export async function edgeSynthesize(text, voiceKey = 'female', { timeoutMs = 20000, WebSocketImpl } = {}) {
+export async function edgeSynthesize(text, voiceKey = 'female', { timeoutMs = 20000, WebSocketImpl, mood = 'warm' } = {}) {
   const WS = WebSocketImpl ?? (await import('ws')).default;
   const url =
     `${WSS}?TrustedClientToken=${TRUSTED_CLIENT_TOKEN}&Sec-MS-GEC=${secMsGec()}` +
@@ -82,7 +93,7 @@ export async function edgeSynthesize(text, voiceKey = 'female', { timeoutMs = 20
     };
     ws.on('open', () => {
       ws.send(speechConfigMessage());
-      ws.send(ssmlMessage(text, voiceKey));
+      ws.send(ssmlMessage(text, voiceKey, edgeProsody(voiceKey, mood)));
     });
     ws.on('message', (data, isBinary) => {
       if (isBinary) {

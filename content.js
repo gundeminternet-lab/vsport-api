@@ -6,14 +6,15 @@
 
 import { scoreMatrix, scoresForOutcome } from './engine/analysis.js';
 import { simulateMatch, simulateToScore } from './engine/simulator.js';
-import { createRng } from './engine/rng.js';
+import { createRng, seedToInt } from './engine/rng.js';
 import { MODEL } from './engine/config.js';
 import { buildChoreography } from './engine/animation/choreography.js';
 import { buildPlayers } from './engine/animation/players.js';
 
 export const PRICES = { ai: 50, odds: 50, sim: 100 };
 // 2: lig geneli güç modeli, belirsizlik katmanı, tahminle tutarlı skor ve simülasyon
-export const CONTENT_VERSION = 2;
+// 3: zengin anlatım dili (cümle çeşitliliği, seri/form yorumları, "Maçın anahtarı" bölümü)
+export const CONTENT_VERSION = 3;
 
 const pct = (p) => Math.round(p * 100);
 const r2 = (x) => Math.round(x * 100) / 100;
@@ -121,78 +122,303 @@ export function predictedOutcome(analysis) {
   return 'X';
 }
 
-export function buildAi(analysis, { editorComment = null } = {}) {
+// ---------------------------------------------------------------------------------------------------
+// Anlatım dili: aynı bilgi her maçta aynı kalıpla söylenmesin
+// ---------------------------------------------------------------------------------------------------
+
+/**
+ * Kararlı cümle seçici: aynı tohum ve anahtar her zaman aynı seçeneği verir (aynı maçın analizi hep aynı okunur),
+ * farklı maçlar farklı kalıplarla anlatılır. Şablonlarda `{ad}` yer tutucuları doldurulur.
+ * Takım adlarına ek getirilmez: adlar özne olarak ya da ayrı yazılan sözcüklerle ("ile", "için") kullanılır.
+ */
+export function phraser(seed) {
+  return (key, options, vars = {}) => {
+    const i = seedToInt(`${seed}|${key}`) % options.length;
+    return options[i].replace(/\{(\w+)\}/g, (m, k) => (vars[k] ?? m));
+  };
+}
+
+/** Form dizisinden (eskiden yeniye "GGBMG") seri bilgisi. */
+export function streakOf(form = '') {
+  if (!form) return null;
+  const last = form[form.length - 1];
+  let run = 0;
+  for (let i = form.length - 1; i >= 0 && form[i] === last; i--) run++;
+  let unbeaten = 0;
+  for (let i = form.length - 1; i >= 0 && form[i] !== 'M'; i--) unbeaten++;
+  let winless = 0;
+  for (let i = form.length - 1; i >= 0 && form[i] !== 'G'; i--) winless++;
+  return { last, run, unbeaten, winless };
+}
+
+function streakNote(say, key, team, form) {
+  const st = streakOf(form);
+  if (!st) return '';
+  const v = { T: team };
+  if (st.last === 'G' && st.run >= 3) {
+    return say(`${key}.win`, ['{T} üst üste {k} galibiyet aldı.', '{T} son {k} maçını da kazandı.', '{T} {k} maçlık galibiyet serisinde.'], { ...v, k: st.run });
+  }
+  if (st.unbeaten >= 4) return say(`${key}.unb`, ['{T} {k} maçtır yenilmiyor.', '{T} son {k} maçta mağlubiyet yüzü görmedi.'], { ...v, k: st.unbeaten });
+  if (st.last === 'M' && st.run >= 2) return say(`${key}.loss`, ['{T} son {k} maçını kaybetti.', '{T} {k} maçlık mağlubiyet serisinde.'], { ...v, k: st.run });
+  if (st.winless >= 4) return say(`${key}.nowin`, ['{T} {k} maçtır galibiyet yüzü göremiyor.', '{T} son {k} maçta kazanamadı.'], { ...v, k: st.winless });
+  return '';
+}
+
+/** Öne çıkan öngörülerin düz Türkçe karşılığı (sunucudaki sınıflandırma anahtarından). */
+function pickPhrase(key, H, A) {
+  const map = {
+    ms1: `${H} galibiyeti`,
+    msX: 'beraberlik',
+    ms2: `${A} galibiyeti`,
+    cs1X: `${H} kazanır ya da berabere kalır`,
+    cs12: 'maçın berabere bitmemesi',
+    csX2: `${A} kazanır ya da berabere kalır`,
+    kgVar: 'iki takımın da gol bulması',
+    kgYok: 'en az bir takımın gol bulamaması',
+    o15: 'en az iki gol atılması',
+    u15: 'en fazla bir gol atılması',
+    o25: 'en az üç gol atılması',
+    u25: 'en fazla iki gol atılması',
+    o35: 'en az dört gol atılması',
+    u35: 'en fazla üç gol atılması',
+    iy1: `ilk yarıda ${H} üstünlüğü`,
+    iyX: 'ilk yarıda beraberlik',
+    iy2: `ilk yarıda ${A} üstünlüğü`,
+    iyO05: 'ilk yarıda en az bir gol',
+  };
+  return map[key] ?? null;
+}
+
+export function buildAi(analysis, { editorComment = null, seed = null } = {}) {
   const H = analysis.home.name;
   const A = analysis.away.name;
   const pH = analysis.home.profile;
   const pA = analysis.away.profile;
   const pr = analysis.probabilities;
   const { p } = markets(analysis.lambdaHome, analysis.lambdaAway, analysis.sigma);
+  const say = phraser(seed ?? `${analysis.home.id}|${analysis.away.id}`);
   const sections = [];
+  const hp = pct(pr.homeWin);
+  const dp = pct(pr.draw);
+  const ap = pct(pr.awayWin);
 
   // Genel bakış
   const gap = pr.homeWin - pr.awayWin;
-  const fav =
-    Math.abs(gap) < 0.08
-      ? `İki takım birbirine çok yakın görünüyor (1: %${pct(pr.homeWin)}, X: %${pct(pr.draw)}, 2: %${pct(pr.awayWin)}). Beraberlik ciddi bir ihtimal.`
-      : `${gap > 0 ? H : A} ${Math.abs(gap) > 0.25 ? 'açık' : 'hafif'} favori: kazanma ihtimali %${pct(gap > 0 ? pr.homeWin : pr.awayWin)}, ` +
-        `beraberlik %${pct(pr.draw)}, ${gap > 0 ? A : H} %${pct(gap > 0 ? pr.awayWin : pr.homeWin)}.`;
-  sections.push({ title: 'Genel bakış', text: fav });
+  let overview;
+  if (Math.abs(gap) < 0.08) {
+    overview = say(
+      'ov.even',
+      [
+        'Kâğıt üzerinde iki takım birbirine çok yakın: {H} %{h}, beraberlik %{d}, {A} %{a}. Beraberlik ciddi bir ihtimal.',
+        'Bu maçta net bir favori yok. {H} %{h}, beraberlik %{d}, {A} %{a}; küçük detaylar sonucu belirleyebilir.',
+        'Güçler dengede: {H} için %{h}, {A} için %{a}, beraberlik için %{d} ihtimal görünüyor. Sürprize açık bir karşılaşma.',
+      ],
+      { H, A, h: hp, d: dp, a: ap },
+    );
+  } else {
+    const fav = gap > 0 ? H : A;
+    const other = gap > 0 ? A : H;
+    const fp = gap > 0 ? hp : ap;
+    const op = gap > 0 ? ap : hp;
+    overview =
+      Math.abs(gap) > 0.25
+        ? say(
+            'ov.big',
+            [
+              '{F} bu maça açık favori olarak giriyor: kazanma ihtimali %{f}, beraberlik %{d}, {O} %{o}.',
+              'Tablo {F} lehine net: %{f} kazanma ihtimali var; beraberlik %{d}, {O} %{o}.',
+              'Model {F} tarafında: galibiyet ihtimali %{f}. {O} için %{o}, beraberlik için %{d}.',
+            ],
+            { F: fav, O: other, f: fp, o: op, d: dp },
+          )
+        : say(
+            'ov.small',
+            [
+              '{F} hafif favori: kazanma ihtimali %{f}, beraberlik %{d}, {O} %{o}.',
+              'İbre {F} tarafına hafifçe kayıyor (%{f}); ama {O} (%{o}) de sürpriz yapabilir, beraberlik %{d}.',
+              '{F} bir adım önde başlıyor: %{f}. Beraberlik %{d}, {O} ise %{o}.',
+            ],
+            { F: fav, O: other, f: fp, o: op, d: dp },
+          );
+  }
+  sections.push({ title: 'Genel bakış', text: overview });
 
   // Form
-  sections.push({
-    title: 'Form durumu',
-    text:
-      `${H} son ${pH.form.matches} maçta ${pH.form.points} puan topladı (${pH.form.string || '-'}; ${formWord(pH.form.points, pH.form.matches)}). ` +
-      `${A} ise ${pA.form.points} puan aldı (${pA.form.string || '-'}; ${formWord(pA.form.points, pA.form.matches)}).`,
-  });
+  const formPart = (T, prof, key) => {
+    if (!prof.form.matches) return say(`${key}.none`, ['{T} için yeterli maç verisi yok.', '{T} tarafında form okumak için yeterli veri yok.'], { T });
+    const intro = say(
+      `${key}.intro`,
+      [
+        '{T} son {n} maçta {pts} puan topladı ({str}; {w} formda).',
+        '{T} son {n} maçı {pts} puanla kapattı ({str}; {w} formda).',
+        '{T} için son {n} maçın hesabı {pts} puan ({str}; {w} formda).',
+      ],
+      { T, n: prof.form.matches, pts: prof.form.points, str: prof.form.string || '-', w: formWord(prof.form.points, prof.form.matches) },
+    );
+    return `${intro} ${streakNote(say, key, T, prof.form.string)}`.trim();
+  };
+  const fi = (x) => (Number.isFinite(x) ? x : null);
+  let formCmp = '';
+  if (fi(pH.form.index) !== null && fi(pA.form.index) !== null && pH.form.matches >= 3 && pA.form.matches >= 3) {
+    const d = pH.form.index - pA.form.index;
+    if (Math.abs(d) >= 0.25) {
+      formCmp = say('form.cmp', ['Formda {T} bir adım önde.', 'Son haftaların tablosu {T} lehine.', 'Form grafiği {T} tarafında.'], { T: d > 0 ? H : A });
+    } else {
+      formCmp = say('form.even', ['Formlar birbirine yakın.', 'İki takımın son haftalardaki performansı benzer.']);
+    }
+  }
+  sections.push({ title: 'Form durumu', text: [formPart(H, pH, 'fh'), formPart(A, pA, 'fa'), formCmp].filter(Boolean).join(' ') });
 
   // Gol profili
+  const lH = analysis.lambdaHome;
+  const lA = analysis.lambdaAway;
+  const total = lH + lA;
+  const goalTone =
+    total >= 3
+      ? say('gp.high', ['Bol gollü bir karşılaşma bekleniyor.', 'Kaleler rahat etmeyebilir; gol yağabilir.'])
+      : total <= 2.1
+        ? say('gp.low', ['Savunmaların öne çıkacağı, gollerin zor geleceği bir maç olabilir.', 'Kapalı geçmesi muhtemel bir maç; tek gol belirleyici olabilir.'])
+        : say('gp.mid', ['Gol sayısı açısından orta tempolu bir maç görünüyor.', 'Ne çok gollü ne de çok kapalı; dengeli tempolu bir maç bekleniyor.']);
   sections.push({
     title: 'Gol profili',
     text:
-      `${H} maç başına ${r2(pH.goalsForPerGame)} gol atıp ${r2(pH.goalsAgainstPerGame)} gol yiyor; ` +
-      `${A} ${r2(pA.goalsForPerGame)} atıp ${r2(pA.goalsAgainstPerGame)} yiyor. ` +
-      `Model bu maç için ${H} ${r2(analysis.lambdaHome)} – ${r2(analysis.lambdaAway)} ${A} gol bekliyor ` +
-      `(2.5 üst %${pct(p.over25)}, KG var %${pct(p.kgVar)}).`,
+      say(
+        'gp.rates',
+        [
+          '{H} maç başına {a} gol atıp {b} gol yiyor; {A} {c} atıp {d} yiyor.',
+          'Hücum ve savunma karnesi: {H} maçta {a} gol atıyor, {b} gol yiyor; {A} ise {c} atıp {d} yiyor.',
+        ],
+        { H, A, a: r2(pH.goalsForPerGame), b: r2(pH.goalsAgainstPerGame), c: r2(pA.goalsForPerGame), d: r2(pA.goalsAgainstPerGame) },
+      ) +
+      ` Model bu maç için ${H} ${r2(lH)} – ${r2(lA)} ${A} gol bekliyor. ${goalTone} ` +
+      `En az üç gol atılma ihtimali %${pct(p.over25)}; iki takımın da gol bulma ihtimali %${pct(p.kgVar)}.`,
   });
 
   // Lig durumu
   if (pH.rank && pA.rank) {
+    const ppg = (x) => (Number.isFinite(x) && x > 0 ? ` (maç başı ${r2(x)} puan)` : '');
+    const rd = Math.abs(pH.rank - pA.rank);
+    const cmp =
+      rd >= 8
+        ? say('ld.far', ['Aralarında {d} basamak var; ama sıralama tek başına sonucu belirlemez.', 'Tabloda {d} basamak fark var, yine de bu fark sahaya her zaman yansımaz.'], { d: rd })
+        : rd <= 2
+          ? say('ld.near', ['İki takım tabloda yan yana; bu maç sıralamayı doğrudan etkileyebilir.', 'Tabloda komşular, kazanan taraf sıralamada fark atabilir.'])
+          : '';
     sections.push({
       title: 'Lig durumu',
-      text:
-        `${H} ligde ${pH.rank}. sırada (maç başı ${r2(pH.ppg ?? 0)} puan), ${A} ${pA.rank}. sırada (maç başı ${r2(pA.ppg ?? 0)} puan).`,
+      text: `${H} ligde ${pH.rank}. sırada${ppg(pH.ppg)}, ${A} ${pA.rank}. sırada${ppg(pA.ppg)}. ${cmp}`.trim(),
     });
   }
 
   // Aralarındaki maçlar
   const h = analysis.h2h;
-  sections.push({
-    title: 'Aralarındaki maçlar',
-    text:
-      h.n > 0
-        ? `Son ${h.n} karşılaşmada ${H} ${h.homeWins} galibiyet, ${h.draws} beraberlik, ${h.awayWins} mağlubiyet aldı; ` +
-          `ortalama skor ${r2(h.homeGoalsAvg)}-${r2(h.awayGoalsAvg)}.`
-        : 'İki takımın yakın geçmişte karşılaşması bulunamadı; tahmin form ve lig verisine dayanıyor.',
-  });
+  let h2hText;
+  if (h.n > 0) {
+    const avgTotal = (h.homeGoalsAvg ?? 0) + (h.awayGoalsAvg ?? 0);
+    const tone =
+      h.homeWins >= h.awayWins + 2
+        ? say('h2h.h', ['Geçmişte üstünlük {T} tarafında.', 'Bu eşleşmede {T} daha çok gülmüş.'], { T: H })
+        : h.awayWins >= h.homeWins + 2
+          ? say('h2h.a', ['Geçmişte üstünlük {T} tarafında.', 'Bu eşleşmede {T} daha çok gülmüş.'], { T: A })
+          : say('h2h.even', ['Rekabet dengeli.', 'Geçmişte kimse net bir üstünlük kuramamış.']);
+    const flow = avgTotal >= 3 ? ' Maçlar genelde gollü geçiyor.' : avgTotal <= 2 ? ' Maçlar genelde az gollü geçiyor.' : '';
+    h2hText =
+      `Son ${h.n} karşılaşmada ${H} ${h.homeWins} galibiyet, ${h.draws} beraberlik, ${h.awayWins} mağlubiyet aldı; ` +
+      `ortalama skor ${r2(h.homeGoalsAvg)}-${r2(h.awayGoalsAvg)}. ${tone}${flow}`;
+  } else {
+    h2hText = say('h2h.none', [
+      'İki takımın yakın geçmişte karşılaşması bulunamadı; tahmin form ve lig verisine dayanıyor.',
+      'Aralarında yakın tarihli bir maç yok, bu yüzden tahmin form ve lig verilerinden besleniyor.',
+    ]);
+  }
+  sections.push({ title: 'Aralarındaki maçlar', text: h2hText });
+
+  // Maçın anahtarı
+  const factors = [];
+  for (const [T, O, mine, theirs, k] of [
+    [H, A, pH, pA, 'h'],
+    [A, H, pA, pH, 'a'],
+  ]) {
+    if (fi(mine.attack) !== null && fi(theirs.defense) !== null && mine.attack >= 1.2 && theirs.defense >= 1.1) {
+      factors.push({
+        w: mine.attack - 1 + (theirs.defense - 1),
+        text: say(`kf.atk.${k}`, ['{T} hücumu, {O} savunmasının açık verdiği noktalara denk geliyor.', '{T} hücum gücü, {O} savunmasının zayıf karnını yoklayabilir.'], { T, O }),
+      });
+    }
+    if (fi(mine.defense) !== null && mine.defense <= 0.8) {
+      factors.push({
+        w: 1 - mine.defense,
+        text: say(`kf.def.${k}`, ['{T} savunması sağlam; kolay gol yemiyor.', '{T} defansı lig ortalamasının belirgin biçimde iyisinde.'], { T }),
+      });
+    }
+    const gapForm = (mine.form.index ?? NaN) - (theirs.form.index ?? NaN);
+    if (mine.form.matches >= 3 && theirs.form.matches >= 3 && gapForm >= 0.3) {
+      factors.push({
+        w: gapForm,
+        text: say(`kf.form.${k}`, ['{T} formda bir adım önde; son maçlardaki özgüven sahaya yansıyabilir.', '{T} son haftalarda daha formda, bu özgüven fark yaratabilir.'], { T }),
+      });
+    }
+  }
+  const under = Math.min(pr.homeWin, pr.awayWin);
+  if (Math.abs(gap) > 0.2 && under >= 0.2) {
+    factors.push({
+      w: 0.3,
+      text: say('kf.upset', ['Sürpriz payı küçümsenmemeli: {T} için kazanma ihtimali %{p}.', '{T} için %{p} gibi bir ihtimal var, sürpriz kapıda olabilir.'], {
+        T: gap > 0 ? A : H,
+        p: pct(under),
+      }),
+    });
+  }
+  if (pr.draw >= 0.3) {
+    factors.push({ w: pr.draw, text: say('kf.draw', ['Beraberlik ihtimali yüksek; iki takım da risk almak yerine puanı seçebilir.', 'Beraberlik güçlü bir senaryo; temkinli bir maç olabilir.']) });
+  }
+  factors.sort((x, y) => y.w - x.w);
+  const firstHome = Math.round((lH / (lH + lA)) * 100);
+  const firstTeam = firstHome >= 50 ? H : A;
+  const firstPct = firstHome >= 50 ? firstHome : 100 - firstHome;
+  const firstGoal = say(
+    'kf.first',
+    [
+      'İlk golün {T} tarafından gelme ihtimali yaklaşık %{p}; erken gol maçın planını baştan değiştirebilir.',
+      'Gol gelirse ilk golü {T} atar diyorum (%{p}); skoru ilk açan taraf maçı rahatlatabilir.',
+    ],
+    { T: firstTeam, p: firstPct },
+  );
+  const keyTexts = factors.slice(0, 2).map((f) => f.text);
+  if (!keyTexts.length) keyTexts.push(say('kf.none', ['Maçı küçük detaylar belirleyebilir: duran toplar ve ilk gol kritik olacak.', 'Net bir fark görünmüyor; kilit detaylar duran toplarda ve ilk golde saklı.']));
+  sections.push({ title: 'Maçın anahtarı', text: `${keyTexts.join(' ')} ${firstGoal}` });
 
   // Öne çıkan tercih
   const odds = buildOdds(analysis);
   const best = odds.highlights[0];
+  const phrase = best ? pickPhrase(best.key, H, A) : null;
   sections.push({
     title: 'Öne çıkan tercih',
-    text: best
-      ? `Modelin en güvendiği tercih: ${best.label} (%${best.pct}). Tahmin edilen skor ${odds.predictedScore}.`
-      : `Belirgin bir tercih yok; tahmin edilen skor ${odds.predictedScore}.`,
+    text:
+      best && phrase
+        ? say(
+            'pick.best',
+            [
+              'Modelin en güvendiği öngörü: {x} (%{p}). Tahmin edilen skor {s}.',
+              'Rakamların en net söylediği şey: {x} (%{p}). Tahmin edilen skor {s}.',
+            ],
+            { x: phrase, p: best.pct, s: odds.predictedScore },
+          )
+        : say('pick.none', ['Belirgin bir öngörü yok; tahmin edilen skor {s}.', 'Net bir öne çıkan nokta yok, yine de tahmin edilen skor {s}.'], { s: odds.predictedScore }),
   });
 
   const conf = analysis.dataQuality.confidence;
+  const confNote =
+    conf === 'yüksek'
+      ? 'Örneklem geniş, tahmine rahatça güvenilebilir.'
+      : conf === 'orta'
+        ? 'Örneklem orta düzeyde, küçük sapmalar olabilir.'
+        : 'Örneklem sınırlı, tahmini temkinle okumak gerekir.';
   sections.push({
     title: 'Veri güveni',
     text:
       `Analiz ${analysis.dataQuality.homeMatches} + ${analysis.dataQuality.awayMatches} geçmiş maça ve ${analysis.dataQuality.h2hMatches} ikili karşılaşmaya dayanıyor. ` +
-      `Güven: ${conf}.`,
+      `Güven: ${conf}. ${confNote}`,
   });
 
   return {
