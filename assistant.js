@@ -10,6 +10,7 @@ import { phraser, streakOf } from './content.js';
 import { importanceOf } from './importance.js';
 import { SPECIAL_TOPICS } from './special.js';
 import { ASSISTANT_DAILY_LIMIT, dayKeyTr, hasAssistantAccess } from './subscription.js';
+import { intentOf, followUpAnswer, SUGGESTIONS } from './chat.js';
 import { scoreMatrix } from './engine/analysis.js';
 import { MODEL } from './engine/config.js';
 
@@ -401,7 +402,15 @@ export class AssistantService {
       teamCount: model.teamCount,
     });
     const focus = focusOf(question);
-    const reply = buildAssistantReply({ match, content, model, specials, importance, live, focus, seed: key, state });
+    const intent = question.trim() ? intentOf(question) : 'general';
+    // Takip sorusu (neden, skor, kaç gol...) aynı maçın rakamlarından kısa yanıtlanır; özel konu (korner, İY/MS, KG) tam yanıta gider.
+    const follow = !focus.length && intent !== 'general'
+      ? followUpAnswer({ intent, H: match.homeName, A: match.awayName, model, content, importance, state, live })
+      : null;
+    const reply = follow
+      ? { headline: `${match.homeName} - ${match.awayName}`, answer: follow.answer, scenes: [] }
+      : buildAssistantReply({ match, content, model, specials, importance, live, focus, seed: key, state });
+    const suggestions = follow ? follow.suggestions : SUGGESTIONS.general;
     const bumped = await this.store.bumpAssistantUsage(uid, day, this.dailyLimit);
 
     return {
@@ -416,6 +425,9 @@ export class AssistantService {
       },
       importance,
       focus,
+      intent,
+      followUp: Boolean(follow),
+      suggestions,
       live: live ? { minute: live.minute, home: live.home, away: live.away, halftime: live.halftime } : null,
       headline: reply.headline,
       answer: reply.answer,
