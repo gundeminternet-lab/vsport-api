@@ -15,6 +15,7 @@ import { TeamMemory } from './engine/memory.js';
 import { PRICES, CONTENT_VERSION, buildAi, buildOdds, buildSim, buildReview, modelOf } from './content.js';
 import { SPECIAL_TOPICS, SPECIAL_VERSION, specialPrice, buildSpecial } from './special.js';
 import { collectCornerSamples, expectedCorners } from './engine/corners.js';
+import { pendingEntry } from './track.js';
 
 export class AppError extends Error {
   constructor(code, message) {
@@ -44,7 +45,8 @@ const DAY = 86400000;
 const utcDay = (ms) => new Date(Math.floor(ms / DAY) * DAY);
 
 export class PaidContentService {
-  constructor({ store, espn, now = () => Date.now(), memoryFactory = () => new TeamMemory(), leagues = LEAGUES }) {
+  constructor({ store, espn, now = () => Date.now(), memoryFactory = () => new TeamMemory(), leagues = LEAGUES, track = null }) {
+    this.track = track; // tahmin karnesi (TrackService): maç öncesi üretilen tahmin kaydedilir
     this.leagues = new Set(leagues);
     this.store = store;
     this.espn = espn;
@@ -127,7 +129,21 @@ export class PaidContentService {
       odds: buildOdds(analysis),
       sim: buildSim(analysis, { seed: key }),
     };
-    return this.store.saveContent(key, content);
+    const saved = await this.store.saveContent(key, content);
+    // Tahmin karnesi: yalnızca maç başlamadan üretilen içerik kaydedilir (sonradan üretilen tahmin karneye girmez).
+    if (saved.generatedBeforeKickoff && this.track) {
+      const entry = pendingEntry({
+        key,
+        league: match.league,
+        eventId: String(match.id),
+        kickoffMs: match.timestamp,
+        homeName: match.homeName,
+        awayName: match.awayName,
+        ai: saved.ai,
+      });
+      await this.track.recordPending(entry).catch((e) => console.error('[track]', e?.message ?? e));
+    }
+    return saved;
   }
 
   /** Tahminin dayandığı sayılar. Eski içeriklerde (model alanı eklenmeden üretilmiş) analiz yeniden çalıştırılır. */

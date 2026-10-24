@@ -25,6 +25,7 @@ import { createLeagueStore, previousWeekId } from './league.js';
 import { createProgressStore, XP } from './progress.js';
 import { createPollStore } from './polls.js';
 import { CouponSettler, createSettleStore } from './settle.js';
+import { TrackService, createTrackStore } from './track.js';
 import { CouponCheckService } from './check.js';
 import { createRewardStore } from './rewards.js';
 import { createAdminService } from './admin.js';
@@ -66,7 +67,8 @@ const store = {
 };
 
 const espn = new EspnClient();
-const paidService = new PaidContentService({ store, espn });
+const trackService = new TrackService({ store: createTrackStore(db), espn });
+const paidService = new PaidContentService({ store, espn, track: trackService });
 const api = createApi({
   verifyToken: async (token) => (await auth.verifyIdToken(token)).uid,
   service: paidService,
@@ -78,6 +80,7 @@ const api = createApi({
   featured: createFeaturedService({ db, FieldValue, Timestamp, paid: paidService }),
   coupons: new CouponService({ store }),
   progress,
+  track: trackService,
 });
 
 const port = Number(process.env.PORT ?? 8080);
@@ -89,6 +92,7 @@ const league = createLeagueStore(db, FieldValue, progress);
 const polls = createPollStore(db, FieldValue, Timestamp);
 const settler = new CouponSettler({ store: createSettleStore(db, FieldValue), espn });
 let lastSettle = 0;
+let lastTrack = 0;
 let awardedWeek = null; // bellekte: aynı hafta için her dakika işlem açılmasın
 const watcher = new MatchWatcher({
   store,
@@ -99,6 +103,11 @@ const watcher = new MatchWatcher({
   onFinished: (m) => league.scoreMatch(m),
   // Pazartesi (Türkiye saati) geçen haftanın ilk üçüne token ödülü; tekrar dağıtılmaz
   onTick: async (now) => {
+    // Tahmin karnesi: bitmiş maçların bekleyen tahminleri sonuçlanır (10 dakikada bir)
+    if (now - lastTrack >= 10 * 60e3) {
+      lastTrack = now;
+      trackService.resolveDue().then((n) => n && console.log(`[track] ${n} tahmin sonuçlandı`)).catch((e) => console.error('[track]', e?.message ?? e));
+    }
     // Kuponlar 10 dakikada bir sonuçlandırılır (editör karnesi)
     if (now - lastSettle >= 10 * 60e3) {
       lastSettle = now;
