@@ -178,7 +178,17 @@ export function scoreMatrix(lh, la, rho = MODEL.dcRho, maxG = 10, sigma = 0) {
   return out;
 }
 
-function baseMatrix(lh, la, rho, maxG) {
+/**
+ * Belirsizlik karışımının düğümleri: her biri { w, lh, la } (ağırlıklar toplamı 1). Yarılar gibi birleşik olasılıklar
+ * hesaplanırken aynı güç farkı senaryosu iki yarıda da kullanılsın diye dışarıya açılır. sigma 0 ise tek düğüm döner.
+ */
+export function mixtureNodes(lh, la, sigma = 0) {
+  if (!(sigma > 0)) return [{ w: 1, lh, la }];
+  const norm = Math.exp(-(sigma * sigma) / 2);
+  return GH.map(([z, w]) => ({ w, lh: lh * norm * Math.exp(sigma * z), la: la * norm * Math.exp(-sigma * z) }));
+}
+
+export function baseMatrix(lh, la, rho, maxG) {
   const ph = pmf(lh, maxG);
   const pa = pmf(la, maxG);
   const m = [];
@@ -375,6 +385,7 @@ export function analyzeMatch({
       model: factors.model,
       h2hMatches: h2h.n,
       tableAvailable: Boolean(homeTable && awayTable),
+      tableTeams: homeTable?.teamCount ?? null,
       confidence,
     },
   };

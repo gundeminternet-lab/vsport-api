@@ -12,7 +12,9 @@
 
 import { MatchSimulator } from './engine/service.js';
 import { TeamMemory } from './engine/memory.js';
-import { PRICES, CONTENT_VERSION, buildAi, buildOdds, buildSim, buildReview } from './content.js';
+import { PRICES, CONTENT_VERSION, buildAi, buildOdds, buildSim, buildReview, modelOf } from './content.js';
+import { SPECIAL_TOPICS, SPECIAL_VERSION, specialPrice, buildSpecial } from './special.js';
+import { collectCornerSamples, expectedCorners } from './engine/corners.js';
 
 export class AppError extends Error {
   constructor(code, message) {
@@ -88,14 +90,10 @@ export class PaidContentService {
     throw new AppError('not-found', 'Maç bilgisi bulunamadı.');
   }
 
-  /** İçerik maç başına bir kez üretilir ve saklanır; herkes aynı analizi ve aynı simülasyonu görür. */
-  async contentFor(match, { asOf } = {}) {
-    const key = matchKey(match.league, match.id);
-    const cached = await this.store.getContent(key);
-    if (cached && cached.version === CONTENT_VERSION) return cached;
-
+  /** Maç öncesi analiz (yalnızca `asOf` anından önceki veriler). */
+  async _analyze(match, asOf) {
     const sim = new MatchSimulator({ espn: this.espn, memory: this.memoryFactory() });
-    const analysis = await sim.prepare({
+    return sim.prepare({
       league: match.league,
       homeId: match.homeId,
       awayId: match.awayId,
@@ -104,6 +102,15 @@ export class PaidContentService {
       // Maç bittikten sonra üretiliyorsa yalnızca maç öncesi veriler kullanılır.
       now: asOf ?? this.now(),
     });
+  }
+
+  /** İçerik maç başına bir kez üretilir ve saklanır; herkes aynı analizi ve aynı simülasyonu görür. */
+  async contentFor(match, { asOf } = {}) {
+    const key = matchKey(match.league, match.id);
+    const cached = await this.store.getContent(key);
+    if (cached && cached.version === CONTENT_VERSION) return cached;
+
+    const analysis = await this._analyze(match, asOf);
     const content = {
       version: CONTENT_VERSION,
       key,
@@ -115,11 +122,61 @@ export class PaidContentService {
       createdAt: new Date(this.now()).toISOString(),
       // true: içerik maç başlamadan üretildi (biri maç öncesi satın aldı). false: maç bittikten sonra, yalnızca maç öncesi veriyle üretildi.
       generatedBeforeKickoff: this.now() < match.timestamp,
+      model: modelOf(analysis),
       ai: buildAi(analysis, { seed: key }),
       odds: buildOdds(analysis),
       sim: buildSim(analysis, { seed: key }),
     };
     return this.store.saveContent(key, content);
+  }
+
+  /** Tahminin dayandığı sayılar. Eski içeriklerde (model alanı eklenmeden üretilmiş) analiz yeniden çalıştırılır. */
+  async modelFor(match, content, { asOf } = {}) {
+    if (content?.model) return content.model;
+    return modelOf(await this._analyze(match, asOf));
+  }
+
+  /** İki takımın son maçlarındaki korner örnekleri (ESPN maç özetlerinden). */
+  async _cornerSamples(match, asOf) {
+    const sim = new MatchSimulator({ espn: this.espn, memory: this.memoryFactory() });
+    const warnings = [];
+    await Promise.all([
+      sim.syncTeam(match.league, String(match.homeId), match.homeName, warnings),
+      sim.syncTeam(match.league, String(match.awayId), match.awayName, warnings),
+    ]);
+    const before = asOf ?? this.now();
+    const [homeSamples, awaySamples] = await Promise.all([
+      collectCornerSamples({ espn: this.espn, teamId: match.homeId, matches: sim.memory.getMatches(match.homeId), before }),
+      collectCornerSamples({ espn: this.espn, teamId: match.awayId, matches: sim.memory.getMatches(match.awayId), before }),
+    ]);
+    return { homeSamples, awaySamples };
+  }
+
+  /**
+   * Özel Yorum başlıkları (maç başına bir kez üretilir ve saklanır; herkes aynı rakamları görür).
+   * Eksik başlıklar üretilip belgeye eklenir.
+   */
+  async specialFor(match, topics, { asOf } = {}) {
+    const key = matchKey(match.league, match.id);
+    const doc = typeof this.store.getSpecial === 'function' ? await this.store.getSpecial(key) : null;
+    const valid = doc && doc.version === SPECIAL_VERSION;
+    const have = valid ? { ...(doc.topics ?? {}) } : {};
+    const missing = topics.filter((t) => !have[t]);
+    if (missing.length) {
+      const base = await this.contentFor(match, asOf ? { asOf } : {});
+      const model = (valid && doc.model) || (await this.modelFor(match, base, { asOf }));
+      let corners = null;
+      if (missing.includes('corners')) {
+        const samples = await this._cornerSamples(match, asOf);
+        corners = expectedCorners({ lambdaHome: model.lambdaHome, lambdaAway: model.lambdaAway, ...samples });
+      }
+      const built = buildSpecial(missing, { homeName: match.homeName, awayName: match.awayName, model, corners, seed: key });
+      if (typeof this.store.saveSpecial === 'function') {
+        await this.store.saveSpecial(key, { version: SPECIAL_VERSION, key, model, createdAt: new Date(this.now()).toISOString(), topics: built });
+      }
+      Object.assign(have, built);
+    }
+    return Object.fromEntries(topics.map((t) => [t, have[t]]));
   }
 
   async part(content, type) {
@@ -186,6 +243,80 @@ export class PaidContentService {
     if (!match.completed) throw new AppError('permission-denied', 'Bu içerik kilitli.');
     const content = await this.contentFor(match, { asOf: match.timestamp - 60000 });
     return { type, key, data: await this.part(content, type) };
+  }
+
+  /** İstekteki başlıkları doğrular: 'all' ya da başlık listesi → tekrarsız, geçerli başlıklar. */
+  specialTopics(topics) {
+    const list = topics === 'all' || (Array.isArray(topics) && topics.includes('all')) ? SPECIAL_TOPICS : topics;
+    if (!Array.isArray(list) || list.length === 0 || list.length > SPECIAL_TOPICS.length) throw new AppError('invalid-argument', 'Geçersiz başlık.');
+    const out = [];
+    for (const t of list) {
+      if (!SPECIAL_TOPICS.includes(t)) throw new AppError('invalid-argument', 'Geçersiz başlık.');
+      if (!out.includes(t)) out.push(t);
+    }
+    return SPECIAL_TOPICS.filter((t) => out.includes(t));
+  }
+
+  /** Özel Yorum satın al: tek başlık 40, dört başlığın tamamı 120 token. Daha önce açılan başlıklar için tekrar ücret alınmaz. */
+  async unlockSpecial({ uid, league, eventId, kickoff, topics }) {
+    if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
+    this.validate({ league, eventId, kickoff }, { needType: false });
+    const want = this.specialTopics(topics);
+    const match = await this.findMatch({ league, eventId, kickoff });
+    const key = matchKey(league, eventId);
+    const flags = await Promise.all(want.map((t) => this.store.hasUnlock(uid, key, `sp_${t}`)));
+    const missing = want.filter((_, i) => !flags[i]);
+    if (missing.length && (match.completed || match.timestamp <= this.now())) {
+      throw new AppError('failed-precondition', 'Maç başladı; Özel Yorum yalnızca maç öncesi satın alınabilir.');
+    }
+    const price = specialPrice(missing.length);
+    if (missing.length && (await this.store.getTokens(uid)) < price) {
+      throw new AppError('failed-precondition', `Yetersiz token: ${price} gerekli.`);
+    }
+    // Önce içerik üretilir: ESPN'e ulaşılamazsa kullanıcıdan ücret alınmaz.
+    const data = await this.specialFor(match, want);
+    let charged = false;
+    let balance = null;
+    if (missing.length) {
+      ({ charged, balance } = await this.store.purchaseBundle({
+        uid,
+        priceFor: specialPrice,
+        items: missing.map((t) => ({
+          unlockId: `${key}_sp_${t}`,
+          record: {
+            key,
+            type: `sp_${t}`,
+            league: match.league,
+            eventId: String(match.id),
+            title: `${match.homeName} - ${match.awayName}`,
+            kickoff: new Date(match.timestamp).toISOString(),
+          },
+        })),
+      }));
+    }
+    return { key, topics: want, charged, balance, price: missing.length ? price : 0, data };
+  }
+
+  /** Açılmış Özel Yorum başlıklarını getir (maç bittiyse hepsi ücretsiz). */
+  async getSpecial({ uid, league, eventId, kickoff }) {
+    if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
+    this.validate({ league, eventId, kickoff }, { needType: false });
+    const key = matchKey(league, eventId);
+    const flags = await Promise.all(SPECIAL_TOPICS.map((t) => this.store.hasUnlock(uid, key, `sp_${t}`)));
+    let open = SPECIAL_TOPICS.filter((_, i) => flags[i]);
+    // Satın alınanlar zaten saklıysa ESPN'e hiç gitmeden döner.
+    if (open.length && typeof this.store.getSpecial === 'function') {
+      const doc = await this.store.getSpecial(key);
+      if (doc?.version === SPECIAL_VERSION && open.every((t) => doc.topics?.[t])) {
+        return { key, topics: open, data: Object.fromEntries(open.map((t) => [t, doc.topics[t]])) };
+      }
+    }
+    const match = await this.findMatch({ league, eventId, kickoff });
+    if (match.completed) open = [...SPECIAL_TOPICS];
+    if (!open.length) return { key, topics: [], data: {} };
+    const started = match.timestamp <= this.now();
+    const data = await this.specialFor(match, open, started ? { asOf: match.timestamp - 60000 } : {});
+    return { key, topics: open, data };
   }
 
   /** Biten maçta AI tahmini ve simülasyon sonucunun gerçek sonuçla karşılaştırması (ücretsiz). */

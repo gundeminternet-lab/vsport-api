@@ -29,6 +29,8 @@ import { CouponCheckService } from './check.js';
 import { createRewardStore } from './rewards.js';
 import { createAdminService } from './admin.js';
 import { createTts } from './tts.js';
+import { AssistantService } from './assistant.js';
+import { createFeaturedService } from './featured.js';
 
 function serviceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -52,6 +54,11 @@ const store = {
     if (r.charged) progress.add(args.uid, { unlocks: 1, xp: XP.unlock }).catch(() => {});
     return r;
   },
+  async purchaseBundle(args) {
+    const r = await baseStore.purchaseBundle(args);
+    if (r.charged) progress.add(args.uid, { unlocks: 1, xp: XP.unlock }).catch(() => {});
+    return r;
+  },
   // Kupon kontrol sonuçları kullanıcının geçmişine (yalnızca kendisi okur)
   async saveCheck(uid, id, result) {
     await db.doc(`users/${uid}/checks/${id}`).set({ ...result, createdAt: FieldValue.serverTimestamp() });
@@ -67,6 +74,8 @@ const api = createApi({
   rewards,
   admin: createAdminService({ db, FieldValue, auth }),
   tts: createTts({ db, FieldValue }),
+  assistant: new AssistantService({ paid: paidService, store }),
+  featured: createFeaturedService({ db, FieldValue, Timestamp, paid: paidService }),
   coupons: new CouponService({ store }),
   progress,
 });

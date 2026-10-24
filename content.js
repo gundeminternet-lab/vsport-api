@@ -189,6 +189,42 @@ function pickPhrase(key, H, A) {
   return map[key] ?? null;
 }
 
+const fin = (x) => (Number.isFinite(x) ? x : null);
+
+/**
+ * Analizden saklanan, tahminin dayandığı sayılar (Özel Yorum ve Asistan aynı rakamları kullansın diye içeriğe yazılır).
+ * Sayısal olmayan değerler null olur (Firestore ve JSON için güvenli).
+ */
+export function modelOf(analysis) {
+  const ph = analysis.home.profile;
+  const pa = analysis.away.profile;
+  const h2h = analysis.h2h ?? {};
+  return {
+    lambdaHome: analysis.lambdaHome,
+    lambdaAway: analysis.lambdaAway,
+    sigma: analysis.sigma ?? 0,
+    homeRank: fin(ph.rank),
+    awayRank: fin(pa.rank),
+    homePlayed: fin(ph.played),
+    awayPlayed: fin(pa.played),
+    homePpg: fin(ph.ppg),
+    awayPpg: fin(pa.ppg),
+    teamCount: fin(analysis.dataQuality.tableTeams),
+    confidence: analysis.dataQuality.confidence,
+    homeGf: fin(ph.goalsForPerGame),
+    homeGa: fin(ph.goalsAgainstPerGame),
+    awayGf: fin(pa.goalsForPerGame),
+    awayGa: fin(pa.goalsAgainstPerGame),
+    homeForm: ph.form.string ?? '',
+    awayForm: pa.form.string ?? '',
+    homeFormPoints: fin(ph.form.points),
+    awayFormPoints: fin(pa.form.points),
+    homeFormMatches: fin(ph.form.matches),
+    awayFormMatches: fin(pa.form.matches),
+    h2h: { n: fin(h2h.n) ?? 0, homeWins: fin(h2h.homeWins) ?? 0, draws: fin(h2h.draws) ?? 0, awayWins: fin(h2h.awayWins) ?? 0 },
+  };
+}
+
 export function buildAi(analysis, { editorComment = null, seed = null } = {}) {
   const H = analysis.home.name;
   const A = analysis.away.name;

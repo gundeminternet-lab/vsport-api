@@ -3,7 +3,8 @@
 //
 //   GET  /health                      → 200 "ok"  (uyku önleme / sağlık kontrolü)
 //   POST /api/{ad}  { data: {...} }   → 200 { result } | 4xx/5xx { error: { code, message } }
-//        ad: unlockContent | getContent | getReview | unlockCoupon
+//        ad: unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze
+//            setFeatured | clearFeatured | adminSetSubscription (ve diğer yönetim/ödül/ses uçları)
 //   Authorization: Bearer <Firebase ID token>   (uygulama her istekte gönderir)
 
 import { AppError } from './logic.js';
@@ -19,16 +20,20 @@ const STATUS = {
   unavailable: 503,
 };
 
-export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
+export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
   const routes = {
     unlockContent: (d) => service.unlock(d),
     getContent: (d) => service.get(d),
     getReview: (d) => service.review(d),
     unlockCoupon: (d) => coupons.unlock(d),
+    unlockSpecial: (d) => service.unlockSpecial(d),
+    getSpecial: (d) => service.getSpecial(d),
+    ...(assistant ? { assistantAnalyze: (d) => assistant.analyze(d) } : {}),
+    ...(featured ? { setFeatured: (d) => featured.set(d), clearFeatured: (d) => featured.clear(d) } : {}),
     ...(progress ? { checkIn: (d) => progress.checkIn(d) } : {}),
     ...(checker ? { checkCoupon: (d) => checker.check(d) } : {}),
     ...(admin
-      ? { adminSetRole: (d) => admin.setRole(d), adminAdjustTokens: (d) => admin.adjustTokens(d), adminSetBanned: (d) => admin.setBanned(d) }
+      ? { adminSetRole: (d) => admin.setRole(d), adminAdjustTokens: (d) => admin.adjustTokens(d), adminSetBanned: (d) => admin.setBanned(d), adminSetSubscription: (d) => admin.setSubscription(d) }
       : {}),
     ...(tts ? { tts: (d) => tts.speak(d) } : {}),
     ...(rewards ? { myInviteCode: (d) => rewards.myInviteCode(d), redeemInvite: (d) => rewards.redeemInvite(d) } : {}),

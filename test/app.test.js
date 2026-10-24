@@ -87,3 +87,32 @@ test('bilinmeyen yol 404, bozuk JSON 400, hız sınırı 429', async () => {
   assert.ok(codes.includes(429), `hız sınırı devreye girmeli: ${codes}`);
   await s.close();
 });
+
+test('Özel Yorum, Asistan, Günün Maçı ve abonelik uçları yönlendirilir; uid doğrulanmış belgeden gelir', async () => {
+  const s = await start({
+    service: {
+      unlockSpecial: async (d) => ({ topics: d.topics, uid: d.uid }),
+      getSpecial: async (d) => ({ uid: d.uid }),
+    },
+    assistant: { analyze: async (d) => ({ uid: d.uid, question: d.question }) },
+    featured: { set: async (d) => ({ dayKey: '2026-10-24', uid: d.uid }), clear: async (d) => ({ dayKey: d.dayKey }) },
+    admin: { setSubscription: async (d) => ({ plan: d.plan, target: d.targetUid }) },
+    rateLimit: 100,
+  });
+  const a = await s.post('/api/unlockSpecial', { data: { topics: ['corners'], uid: 'baskasi' } });
+  assert.deepEqual(a.json.result, { topics: ['corners'], uid: 'u1' });
+  assert.equal((await s.post('/api/getSpecial', { data: {} })).json.result.uid, 'u1');
+  assert.deepEqual((await s.post('/api/assistantAnalyze', { data: { question: 'korner' } })).json.result, { uid: 'u1', question: 'korner' });
+  assert.equal((await s.post('/api/setFeatured', { data: {} })).json.result.dayKey, '2026-10-24');
+  assert.equal((await s.post('/api/clearFeatured', { data: { dayKey: '2026-10-24' } })).json.result.dayKey, '2026-10-24');
+  assert.deepEqual((await s.post('/api/adminSetSubscription', { data: { plan: 'monthly', targetUid: 'x' } })).json.result, { plan: 'monthly', target: 'x' });
+  await s.close();
+});
+
+test('Asistan ve Günün Maçı servisleri verilmezse uçlar yoktur', async () => {
+  const s = await start();
+  assert.equal((await s.post('/api/assistantAnalyze', { data: {} })).status, 404);
+  assert.equal((await s.post('/api/setFeatured', { data: {} })).status, 404);
+  assert.equal((await s.post('/api/adminSetSubscription', { data: {} })).status, 404);
+  await s.close();
+});

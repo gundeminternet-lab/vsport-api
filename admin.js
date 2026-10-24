@@ -2,6 +2,7 @@
 // Token ve rol istemciden değiştirilemediği için bu işlemler sunucudan yapılır ve token hareketlerine yazılır.
 
 import { AppError } from './logic.js';
+import { grantSubscription } from './subscription.js';
 
 export const ROLES = ['user', 'editor', 'admin'];
 const MAX_ADJUST = 100000;
@@ -56,6 +57,21 @@ export function createAdminService({ db, FieldValue, auth }) {
         });
         return { balance: balance + delta };
       });
+    },
+
+    /** Aboneliği ver ya da kaldır (plan: 'weekly' | 'monthly' | 'yearly' | 'none'). Mağaza faturalandırması bağlanana kadar kullanılır. */
+    async setSubscription({ uid, targetUid, plan, days }) {
+      await requireAdmin(uid);
+      const ref = target(targetUid);
+      const s = await ref.get();
+      if (!s.exists) throw new AppError('not-found', 'Kullanıcı bulunamadı.');
+      if (plan === 'none') {
+        await ref.update({ subscription: FieldValue.delete() });
+        return { plan: 'none', until: null };
+      }
+      const sub = grantSubscription(s.get('subscription'), { plan, days, by: uid });
+      await ref.update({ subscription: sub });
+      return { plan: sub.plan, until: sub.until };
     },
 
     async setBanned({ uid, targetUid, banned }) {
