@@ -29,6 +29,7 @@ import { TrackService, createTrackStore } from './track.js';
 import { LineupService } from './lineup.js';
 import { BulletinService } from './bulletin.js';
 import { narratorFromEnv } from './narrator.js';
+import { readerFromEnv } from './coupon_vision.js';
 import { CouponCheckService } from './check.js';
 import { createRewardStore } from './rewards.js';
 import { createAdminService } from './admin.js';
@@ -73,6 +74,7 @@ const espn = new EspnClient();
 const trackService = new TrackService({ store: createTrackStore(db), espn });
 const paidService = new PaidContentService({ store, espn, track: trackService });
 const narrator = narratorFromEnv();
+const couponReader = readerFromEnv();
 const api = createApi({
   verifyToken: async (token) => (await auth.verifyIdToken(token)).uid,
   service: paidService,
@@ -87,6 +89,7 @@ const api = createApi({
   track: trackService,
   lineup: new LineupService({ paid: paidService, espn }),
   bulletin: new BulletinService({ espn, db }),
+  reader: couponReader,
 });
 
 const port = Number(process.env.PORT ?? 8080);

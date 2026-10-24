@@ -20,7 +20,7 @@ const STATUS = {
   unavailable: 503,
 };
 
-export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, bulletin = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
+export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, bulletin = null, reader = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
   const routes = {
     unlockContent: (d) => service.unlock(d),
     getContent: (d) => service.get(d),
@@ -30,6 +30,7 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
     getSpecial: (d) => service.getSpecial(d),
     ...(track ? { getTrackRecord: (d) => track.trackRecord(d) } : {}),
     ...(bulletin ? { getWeeklyBulletin: (d) => bulletin.get(d) } : {}),
+    ...(reader ? { readCouponImage: (d) => reader.read(d) } : {}),
     ...(lineup ? { getLineupUpdate: (d) => lineup.update(d) } : {}),
     ...(assistant ? { assistantAnalyze: (d) => assistant.analyze(d) } : {}),
     ...(featured ? { setFeatured: (d) => featured.set(d), clearFeatured: (d) => featured.clear(d) } : {}),
@@ -63,13 +64,13 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
   };
   const fail = (res, code, message) => send(res, STATUS[code] ?? 500, { error: { code, message } });
 
-  const readBody = (req) =>
+  const readBody = (req, limit = maxBodyBytes) =>
     new Promise((resolve, reject) => {
       let size = 0;
       const chunks = [];
       req.on('data', (c) => {
         size += c.length;
-        if (size > maxBodyBytes) {
+        if (size > limit) {
           reject(new AppError('invalid-argument', 'İstek çok büyük.'));
           req.destroy();
         } else chunks.push(c);
@@ -103,7 +104,8 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
       if (limited(uid)) return fail(res, 'resource-exhausted', 'Çok fazla istek; biraz sonra tekrar deneyin.');
 
       let data = {};
-      const raw = await readBody(req);
+      // Ekran görüntüsü yalnızca bu uç noktada daha büyük gövde kabul eder.
+      const raw = await readBody(req, m[1] === 'readCouponImage' ? 4 * 1024 * 1024 : maxBodyBytes);
       if (raw) {
         let parsed;
         try {
