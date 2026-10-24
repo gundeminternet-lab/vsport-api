@@ -72,14 +72,15 @@ const store = {
 const espn = new EspnClient();
 const trackService = new TrackService({ store: createTrackStore(db), espn });
 const paidService = new PaidContentService({ store, espn, track: trackService });
+const narrator = narratorFromEnv();
 const api = createApi({
   verifyToken: async (token) => (await auth.verifyIdToken(token)).uid,
   service: paidService,
-  checker: new CouponCheckService({ paid: paidService, store }),
+  checker: new CouponCheckService({ paid: paidService, store, narrator }),
   rewards,
   admin: createAdminService({ db, FieldValue, auth }),
   tts: createTts({ db, FieldValue }),
-  assistant: new AssistantService({ paid: paidService, store, narrator: narratorFromEnv() }),
+  assistant: new AssistantService({ paid: paidService, store, narrator }),
   featured: createFeaturedService({ db, FieldValue, Timestamp, paid: paidService }),
   coupons: new CouponService({ store }),
   progress,

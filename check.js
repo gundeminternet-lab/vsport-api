@@ -4,6 +4,7 @@
 
 import { scoreMatrix } from './engine/analysis.js';
 import { AppError, matchKey } from './logic.js';
+import { Narrator } from './narrator.js';
 
 export const CHECK_PRICE = 20;
 export const CHECK_MARKETS = [
@@ -88,7 +89,8 @@ export class CouponCheckService {
   /**
    * paid: PaidContentService (findMatch, contentFor, validate), store: getTokens, purchase, saveCheck
    */
-  constructor({ paid, store, now = () => Date.now() }) {
+  constructor({ paid, store, now = () => Date.now(), narrator = new Narrator() }) {
+    this.narrator = narrator;
     this.paid = paid;
     this.store = store;
     this.now = now;
@@ -145,6 +147,11 @@ export class CouponCheckService {
       });
     }
     const summary = summarize(items);
+    // Kupon yorumu: sayılar motordan; anlatıcı açıksa yeniden yazılır.
+    const narrated = await this.narrator.rewrite({
+      draft: commentaryDraft(items, summary),
+      facts: { seçimSayısı: String(items.length), maçlar: items.map((i) => `${i.home} - ${i.away}`).join(', ') },
+    });
     const result = {
       ...summary,
       items: items.map((i) => ({
@@ -156,10 +163,23 @@ export class CouponCheckService {
         prob: undefined,
       })),
       price: CHECK_PRICE,
+      commentary: narrated.text,
+      commentarySource: narrated.source,
     };
     const id = `check_${this.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const { balance } = await this.store.purchase({ uid, unlockId: id, price: CHECK_PRICE, record: { type: 'check', title: `${items.length} maçlık kupon kontrolü` } });
     await this.store.saveCheck?.(uid, id, result);
     return { ...result, id, balance };
   }
+}
+
+// Kupon yorumu (kısa, olasılığa dayalı). Yalnızca motorun ürettiği sayıları kullanır; anlatıcı açıksa yeniden yazılır.
+export function commentaryDraft(items, summary) {
+  const parts = [`Seçimlerin birleşik olasılığı %${summary.combinedPct}.`];
+  if (items.length > 1 && summary.weakest >= 0) {
+    const w = items[summary.weakest];
+    parts.push(`En zayıf seçim ${w.home} - ${w.away} (${w.market}, %${pct(w.prob)}).`);
+  }
+  parts.push(`Seçim puanı ${summary.score}/100.`);
+  return parts.join(' ');
 }
