@@ -3,7 +3,7 @@
 //
 //   GET  /health                      → 200 "ok"  (uyku önleme / sağlık kontrolü)
 //   POST /api/{ad}  { data: {...} }   → 200 { result } | 4xx/5xx { error: { code, message } }
-//        ad: unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze | getTrackRecord | getLineupUpdate
+//        ad: unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze | getTrackRecord | getLineupUpdate | getWeeklyBulletin
 //            setFeatured | clearFeatured | adminSetSubscription (ve diğer yönetim/ödül/ses uçları)
 //   Authorization: Bearer <Firebase ID token>   (uygulama her istekte gönderir)
 
@@ -20,7 +20,7 @@ const STATUS = {
   unavailable: 503,
 };
 
-export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
+export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, bulletin = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
   const routes = {
     unlockContent: (d) => service.unlock(d),
     getContent: (d) => service.get(d),
@@ -29,6 +29,7 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
     unlockSpecial: (d) => service.unlockSpecial(d),
     getSpecial: (d) => service.getSpecial(d),
     ...(track ? { getTrackRecord: (d) => track.trackRecord(d) } : {}),
+    ...(bulletin ? { getWeeklyBulletin: (d) => bulletin.get(d) } : {}),
     ...(lineup ? { getLineupUpdate: (d) => lineup.update(d) } : {}),
     ...(assistant ? { assistantAnalyze: (d) => assistant.analyze(d) } : {}),
     ...(featured ? { setFeatured: (d) => featured.set(d), clearFeatured: (d) => featured.clear(d) } : {}),
