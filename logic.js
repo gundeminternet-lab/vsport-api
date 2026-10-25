@@ -13,6 +13,7 @@
 import { MatchSimulator } from './engine/service.js';
 import { TeamMemory } from './engine/memory.js';
 import { PRICES, CONTENT_VERSION, buildAi, buildOdds, buildSim, buildReview, modelOf } from './content.js';
+import { storyForContent } from './story.js';
 import { SPECIAL_TOPICS, SPECIAL_VERSION, specialPrice, buildSpecial } from './special.js';
 import { collectCornerSamples, expectedCorners } from './engine/corners.js';
 import { pendingEntry } from './track.js';
@@ -198,7 +199,8 @@ export class PaidContentService {
   async part(content, type) {
     if (type === 'ai') {
       const editorComment = await this.store.getEditorComment(content.key);
-      return { ...content.ai, editorComment };
+      // Video hikâyesi (50.000 simülasyon) saklanmaz; modelin beklenen gollerinden tohumlu olarak türetilir.
+      return { ...content.ai, editorComment, story: storyForContent(content) };
     }
     return content[type];
   }
