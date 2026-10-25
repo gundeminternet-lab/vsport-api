@@ -30,6 +30,7 @@ import { LineupService } from './lineup.js';
 import { BulletinService } from './bulletin.js';
 import { narratorFromEnv } from './narrator.js';
 import { readerFromEnv } from './coupon_vision.js';
+import { StoryReviewService } from './story_review.js';
 import { CouponCheckService } from './check.js';
 import { createRewardStore } from './rewards.js';
 import { createAdminService } from './admin.js';
@@ -90,6 +91,7 @@ const api = createApi({
   lineup: new LineupService({ paid: paidService, espn }),
   bulletin: new BulletinService({ espn, db }),
   reader: couponReader,
+  storyReview: new StoryReviewService({ paid: paidService }),
 });
 
 const port = Number(process.env.PORT ?? 8080);

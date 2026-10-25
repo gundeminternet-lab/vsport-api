@@ -108,6 +108,7 @@ export function buildStory({ lambdaHome, lambdaAway, sigma = 0, homeName: H, awa
     .map(([label, v]) => ({ label, pct: v }));
 
   const [dh, dd, da] = apportion([home, draw, away], DOT_COUNT);
+  const grid = [0, 1, 2, 3].map((h) => [0, 1, 2, 3].map((a) => pct(counts.get(`${h}-${a}`) ?? 0, sims)));
   const pickLabel = pick === '1' ? `${H} kazanır` : pick === '2' ? `${A} kazanır` : 'Beraberlik';
   const pickPct = pick === '1' ? p.home : pick === '2' ? p.away : p.draw;
 
@@ -122,6 +123,19 @@ export function buildStory({ lambdaHome, lambdaAway, sigma = 0, homeName: H, awa
     confident,
     dots: { home: dh, draw: dd, away: da },
     coin: { team: fav, pct: favPct, filled: Math.round(favPct / 10) },
+    // Skor ısı haritası: satır ev sahibi golü (0-3), sütun deplasman golü (0-3); rest: bu kutunun dışındaki skorlar.
+    grid,
+    gridRest: Math.max(0, 100 - grid.flat().reduce((a, b) => a + b, 0)),
+    // Sürpriz: kazanma ihtimali düşük olan taraf.
+    upset: { team: favHome ? A : H, pct: favHome ? p.away : p.home, filled: Math.round((favHome ? p.away : p.home) / 10) },
+    // Kontrol listesinin maç sonunda değerlendirilebilen biçimi (checklist ile aynı sırada).
+    checks: [
+      { type: 'result', value: pick },
+      { type: 'score', value: topScores[0]?.score ?? null },
+      { type: 'over25', value: goals.over25 >= 50 },
+      { type: 'btts', value: goals.btts >= 50 },
+      { type: 'firstGoal', value: firstGoal.home >= firstGoal.away ? 'home' : 'away' },
+    ],
     checklist: [
       { label: `Sonuç: ${pickLabel}`, pct: pickPct },
       { label: `Skor: ${topScores[0]?.score ?? '-'}`, pct: topScores[0]?.pct ?? 0 },
@@ -151,4 +165,69 @@ export function storyForContent(content) {
   if (cache.size > 300) cache.clear();
   cache.set(key, story);
   return story;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Maç sonu karnesi
+// ---------------------------------------------------------------------------------------------------
+
+const outcomeOf = (h, a) => (h > a ? '1' : h < a ? '2' : 'X');
+
+/**
+ * Maç öncesi kontrol maddelerini gerçek sonuçla karşılaştırır: true (tuttu), false (tutmadı), null (bilinmiyor).
+ * firstGoal: 'home' | 'away' | null (bilinmiyor). Golsüz maçta "ilk golü X atar" tutmamış sayılır.
+ */
+export function evaluateChecks(checks, { home, away }, firstGoal = null) {
+  return checks.map((c) => {
+    switch (c.type) {
+      case 'result': return outcomeOf(home, away) === c.value;
+      case 'score': return c.value == null ? null : `${home}-${away}` === c.value;
+      case 'over25': return (home + away >= 3) === c.value;
+      case 'btts': return (home > 0 && away > 0) === c.value;
+      case 'firstGoal':
+        if (home + away === 0) return false;
+        return firstGoal == null ? null : firstGoal === c.value;
+      default: return null;
+    }
+  });
+}
+
+/** Sonucun maç öncesi ihtimaline göre sürpriz düzeyi. */
+export function surpriseOf(pctBefore) {
+  if (pctBefore >= 45) return { level: 'expected', label: 'Beklenen sonuç' };
+  if (pctBefore >= 30) return { level: 'possible', label: 'Olası bir sonuç' };
+  if (pctBefore >= 15) return { level: 'surprise', label: 'Sürpriz' };
+  return { level: 'shock', label: 'Büyük sürpriz' };
+}
+
+/**
+ * Maç sonu karnesi: aynı tohumla aynı 50.000 simülasyon yeniden kurulur; gerçek skorun kaç kez çıktığı,
+ * skorlar arasındaki sırası, sonucun maç öncesi ihtimali ve kontrol listesinin sonucu.
+ */
+export function reviewStory({ lambdaHome, lambdaAway, sigma = 0, homeName, awayName, seed, sims = STORY_SIMS, actual, firstGoal = null }) {
+  const story = buildStory({ lambdaHome, lambdaAway, sigma, homeName, awayName, seed, sims });
+  const counts = simulateScores({ lambdaHome, lambdaAway, sigma, sims, seed });
+  const score = `${actual.home}-${actual.away}`;
+  const simCount = counts.get(score) ?? 0;
+  const rank = 1 + [...counts.values()].filter((c) => c > simCount).length;
+  const outcome = outcomeOf(actual.home, actual.away);
+  const outcomePct = outcome === '1' ? story.pct.home : outcome === '2' ? story.pct.away : story.pct.draw;
+  const marks = evaluateChecks(story.checks, actual, firstGoal);
+  return {
+    sims,
+    home: homeName,
+    away: awayName,
+    score,
+    simCount,
+    simPct: Math.round((simCount / sims) * 1000) / 10,
+    rank,
+    outcome,
+    outcomePct,
+    pick: story.pick,
+    pickHit: story.pick === outcome,
+    surprise: surpriseOf(outcomePct),
+    checklist: story.checklist.map((c, i) => ({ ...c, hit: marks[i] })),
+    hits: marks.filter((m) => m === true).length,
+    decided: marks.filter((m) => m !== null).length,
+  };
 }
