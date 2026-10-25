@@ -36,6 +36,7 @@ import { createRewardStore } from './rewards.js';
 import { createAdminService } from './admin.js';
 import { createTts } from './tts.js';
 import { AssistantService } from './assistant.js';
+import { ASSISTANT_DAILY_LIMIT } from './subscription.js';
 import { createFeaturedService } from './featured.js';
 
 function serviceAccount() {
@@ -83,7 +84,15 @@ const api = createApi({
   rewards,
   admin: createAdminService({ db, FieldValue, auth }),
   tts: createTts({ db, FieldValue }),
-  assistant: new AssistantService({ paid: paidService, store, narrator }),
+  // Deneme dönemi: asistan herkese açık. Abonelik şartı için ASSISTANT_REQUIRES_SUBSCRIPTION=true.
+  // ASSISTANT_DAILY_LIMIT ile günlük sınır değiştirilebilir (varsayılan 15).
+  assistant: new AssistantService({
+    paid: paidService,
+    store,
+    narrator,
+    requireSubscription: process.env.ASSISTANT_REQUIRES_SUBSCRIPTION === 'true',
+    dailyLimit: Number(process.env.ASSISTANT_DAILY_LIMIT) || ASSISTANT_DAILY_LIMIT,
+  }),
   featured: createFeaturedService({ db, FieldValue, Timestamp, paid: paidService }),
   coupons: new CouponService({ store }),
   progress,

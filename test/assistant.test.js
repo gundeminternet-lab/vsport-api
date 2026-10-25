@@ -175,3 +175,13 @@ test('sahne üretici tek başına: odak başlığı öne alır, eksik veriyle de
   assert.ok(!r.scenes.some((s) => s.kind === 'stats'), 'veri yoksa kıyas sahnesi atlanır');
   for (const s of r.scenes) assert.ok(!/NaN|undefined/.test(JSON.stringify(s)), s.title);
 });
+
+test('deneme modu (requireSubscription: false): abonelik aranmaz; giriş ve günlük sınır yine geçerli', async () => {
+  const store = makeStore({ tokens: 0, subscription: null });
+  const paid = new PaidContentService({ leagues: ['demo.1'], store, espn: makeEspn(), now: () => NOW });
+  const assistant = new AssistantService({ paid, store, now: () => NOW, dailyLimit: 1, requireSubscription: false });
+  const r = await assistant.analyze({ uid: 'u1', ...fixture });
+  assert.equal(r.state, 'pre');
+  await assert.rejects(assistant.analyze({ uid: 'u1', ...fixture }), (e) => e.code === 'resource-exhausted');
+  await assert.rejects(assistant.analyze({ uid: null, ...fixture }), (e) => e.code === 'permission-denied');
+});

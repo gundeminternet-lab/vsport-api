@@ -10,7 +10,7 @@ import { phraser, streakOf } from './content.js';
 import { importanceOf } from './importance.js';
 import { SPECIAL_TOPICS } from './special.js';
 import { ASSISTANT_DAILY_LIMIT, dayKeyTr, hasAssistantAccess } from './subscription.js';
-import { intentOf, followUpAnswer, SUGGESTIONS } from './chat.js';
+import { intentOf, followUpAnswer, reviewOf, swingText, suggestionsFor } from './chat.js';
 import { Narrator } from './narrator.js';
 import { scoreMatrix } from './engine/analysis.js';
 import { MODEL } from './engine/config.js';
@@ -340,7 +340,9 @@ const spokenScore = (s) => {
 // Servis
 // ---------------------------------------------------------------------------------------------------
 export class AssistantService {
-  constructor({ paid, store, now = () => Date.now(), dailyLimit = ASSISTANT_DAILY_LIMIT, narrator = new Narrator() }) {
+  /** requireSubscription: false ise abonelik aranmaz (deneme dönemi); günlük sınır yine uygulanır. */
+  constructor({ paid, store, now = () => Date.now(), dailyLimit = ASSISTANT_DAILY_LIMIT, narrator = new Narrator(), requireSubscription = true }) {
+    this.requireSubscription = requireSubscription;
     this.paid = paid;
     this.store = store;
     this.narrator = narrator;
@@ -350,7 +352,7 @@ export class AssistantService {
 
   async analyze({ uid, league, eventId, kickoff, question = '' }) {
     if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
-    if (!hasAssistantAccess(await this.store.getSubscription(uid), this.now())) {
+    if (this.requireSubscription && !hasAssistantAccess(await this.store.getSubscription(uid), this.now())) {
       throw new AppError('permission-denied', 'AI Asistan, aylık ve yıllık abonelere özel.');
     }
     this.paid.validate({ league, eventId, kickoff }, { needType: false });
@@ -407,12 +409,32 @@ export class AssistantService {
     const intent = question.trim() ? intentOf(question) : 'general';
     // Takip sorusu (neden, skor, kaç gol...) aynı maçın rakamlarından kısa yanıtlanır; özel konu (korner, İY/MS, KG) tam yanıta gider.
     const follow = !focus.length && intent !== 'general'
-      ? followUpAnswer({ intent, H: match.homeName, A: match.awayName, model, content, importance, state, live })
+      ? followUpAnswer({
+          intent,
+          question,
+          H: match.homeName,
+          A: match.awayName,
+          model,
+          content,
+          importance,
+          state,
+          live,
+          homeGoals: match.homeGoals ?? null,
+          awayGoals: match.awayGoals ?? null,
+          probAt: (sc) => liveProbabilities(model, sc),
+        })
       : null;
-    const reply = follow
+    let reply = follow
       ? { headline: `${match.homeName} - ${match.awayName}`, answer: follow.answer, scenes: [] }
       : buildAssistantReply({ match, content, model, specials, importance, live, focus, seed: key, state });
-    const suggestions = follow ? follow.suggestions : SUGGESTIONS.general;
+    // Tam yanıtı maçın durumuna göre zenginleştir: maç bittiyse değerlendirme, sürüyorsa olasılık değişimi.
+    if (!follow && !focus.length && state === 'post' && Number.isFinite(match.homeGoals) && Number.isFinite(match.awayGoals)) {
+      const review = reviewOf({ H: match.homeName, A: match.awayName, model, content, homeGoals: match.homeGoals, awayGoals: match.awayGoals });
+      reply = { ...reply, answer: review.text };
+    } else if (!follow && state === 'live' && live) {
+      reply = { ...reply, answer: `${reply.answer} ${swingText({ H: match.homeName, A: match.awayName, content, live })}`.trim() };
+    }
+    const suggestions = follow ? follow.suggestions : suggestionsFor(state);
     // Anlatım: şablon yanıtı dil modeliyle yeniden yazılabilir (kapalıysa aynen kalır). Rakamlar motordan gelir.
     const narrated = await this.narrator.rewrite({
       draft: reply.answer,
