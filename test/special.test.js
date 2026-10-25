@@ -116,7 +116,7 @@ test('tek başlık 40 token; aynı başlık tekrar ücretsiz; içerik bir kez ü
   assert.equal(second.data.corners.headline, r.data.corners.headline, 'aynı rakamlar');
 });
 
-test('hepsi: 120 token; eski kayıtlı içerik modelsiz olsa da çalışır', async () => {
+test('AI paketi Özel Yorumları kapsar: ücret alınmaz; eski kayıtlı içerik modelsiz olsa da çalışır', async () => {
   const store = makeStore(300);
   const s = svc(store);
   // Model alanı olmayan eski içerik taklidi: önce normal üretilir, sonra model silinir
@@ -125,8 +125,8 @@ test('hepsi: 120 token; eski kayıtlı içerik modelsiz olsa da çalışır', as
   delete store.contents.get(key).model;
   const tokensBefore = store.users.u1.tokens;
   const r = await s.unlockSpecial({ uid: 'u1', ...fixture, topics: 'all' });
-  assert.equal(r.price, 120);
-  assert.equal(store.users.u1.tokens, tokensBefore - 120);
+  assert.equal(r.price, 0);
+  assert.equal(store.users.u1.tokens, tokensBefore);
   assert.deepEqual(Object.keys(r.data), SPECIAL_TOPICS);
 });
 

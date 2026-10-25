@@ -147,11 +147,24 @@ test('bahis olasılıkları tutarlı: 1+X+2 = 1, çifte şanslar doğru', async 
   assert.ok(p.iyX > p.msX, 'ilk yarıda beraberlik daha olası');
   assert.ok(topScores[0].p >= topScores[1].p);
 
-  const svc = new PaidContentService({ leagues: ['demo.1'], store: makeStore(1000), espn: makeEspn(), now: () => NOW });
-  const { data } = await svc.unlock({ uid: 'u1', ...fixture, type: 'odds' });
-  const ms = data.groups[0].items.reduce((s, i) => s + i.pct, 0);
-  assert.ok(ms >= 99 && ms <= 101);
-  for (const h of data.highlights) assert.ok(h.pct >= 60);
+  // Bahis ihtimalleri artık satılmaz: yeni kilit açılamaz, ücret alınmaz.
+  const store = makeStore(1000);
+  const svc = new PaidContentService({ leagues: ['demo.1'], store, espn: makeEspn(), now: () => NOW });
+  await assert.rejects(svc.unlock({ uid: 'u1', ...fixture, type: 'odds' }), (e) => e.code === 'failed-precondition');
+  assert.equal(store.users.u1.tokens, 1000);
+});
+
+test('AI paketi: tek ücretle simülasyonu da açar', async () => {
+  const store = makeStore(1000);
+  const svc = new PaidContentService({ leagues: ['demo.1'], store, espn: makeEspn(), now: () => NOW });
+  const ai = await svc.unlock({ uid: 'u1', ...fixture, type: 'ai' });
+  assert.equal(ai.price, PRICES.ai);
+  assert.equal(store.users.u1.tokens, 1000 - PRICES.ai);
+  const sim = await svc.unlock({ uid: 'u1', ...fixture, type: 'sim' });
+  assert.equal(sim.charged, false);
+  assert.equal(store.users.u1.tokens, 1000 - PRICES.ai);
+  const got = await svc.get({ uid: 'u1', ...fixture, type: 'sim' });
+  assert.ok(got.data.finalScore);
 });
 
 test('karşılaştırma kuralları', () => {

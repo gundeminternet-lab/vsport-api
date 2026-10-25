@@ -12,7 +12,7 @@
 
 import { MatchSimulator } from './engine/service.js';
 import { TeamMemory } from './engine/memory.js';
-import { PRICES, CONTENT_VERSION, buildAi, buildOdds, buildSim, buildReview, modelOf } from './content.js';
+import { PRICES, RETIRED_TYPES, CONTENT_VERSION, buildAi, buildOdds, buildSim, buildReview, modelOf } from './content.js';
 import { storyForContent } from './story.js';
 import { SPECIAL_TOPICS, SPECIAL_VERSION, specialPrice, buildSpecial } from './special.js';
 import { collectCornerSamples, expectedCorners } from './engine/corners.js';
@@ -205,13 +205,23 @@ export class PaidContentService {
     return content[type];
   }
 
-  /** Kilit aç: maç başlamamış olmalı. Daha önce açıldıysa tekrar ücret alınmaz. */
+  /**
+   * Kullanıcının bu içeriği görme hakkı var mı? AI paketi (ai) simülasyonu ve Özel Yorum başlıklarını (sp_*) da kapsar.
+   */
+  async covers(uid, key, type) {
+    if (await this.store.hasUnlock(uid, key, type)) return true;
+    if (type === 'ai') return false;
+    return (type === 'sim' || type.startsWith('sp_')) && this.store.hasUnlock(uid, key, 'ai');
+  }
+
+  /** Kilit aç: maç başlamamış olmalı. Daha önce açıldıysa (ya da AI paketi kapsıyorsa) tekrar ücret alınmaz. */
   async unlock({ uid, league, eventId, kickoff, type }) {
     if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
     this.validate({ league, eventId, kickoff, type });
-    const match = await this.findMatch({ league, eventId, kickoff });
     const key = matchKey(league, eventId);
-    const already = await this.store.hasUnlock(uid, key, type);
+    const already = await this.covers(uid, key, type);
+    if (!already && RETIRED_TYPES.includes(type)) throw new AppError('failed-precondition', 'Bu içerik artık sunulmuyor.');
+    const match = await this.findMatch({ league, eventId, kickoff });
     if (!already && (match.completed || match.timestamp <= this.now())) {
       throw new AppError('failed-precondition', 'Maç başladı; ücretli içerikler yalnızca maç öncesi satın alınabilir.');
     }
@@ -246,7 +256,7 @@ export class PaidContentService {
     if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
     this.validate({ league, eventId, kickoff, type });
     const key = matchKey(league, eventId);
-    const unlocked = await this.store.hasUnlock(uid, key, type);
+    const unlocked = await this.covers(uid, key, type);
     if (unlocked) {
       const cached = await this.store.getContent(key);
       if (cached) return { type, key, data: await this.part(cached, type) };
@@ -282,7 +292,7 @@ export class PaidContentService {
     const want = this.specialTopics(topics);
     const match = await this.findMatch({ league, eventId, kickoff });
     const key = matchKey(league, eventId);
-    const flags = await Promise.all(want.map((t) => this.store.hasUnlock(uid, key, `sp_${t}`)));
+    const flags = await Promise.all(want.map((t) => this.covers(uid, key, `sp_${t}`)));
     const missing = want.filter((_, i) => !flags[i]);
     if (missing.length && (match.completed || match.timestamp <= this.now())) {
       throw new AppError('failed-precondition', 'Maç başladı; Özel Yorum yalnızca maç öncesi satın alınabilir.');
@@ -320,7 +330,7 @@ export class PaidContentService {
     if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
     this.validate({ league, eventId, kickoff }, { needType: false });
     const key = matchKey(league, eventId);
-    const flags = await Promise.all(SPECIAL_TOPICS.map((t) => this.store.hasUnlock(uid, key, `sp_${t}`)));
+    const flags = await Promise.all(SPECIAL_TOPICS.map((t) => this.covers(uid, key, `sp_${t}`)));
     let open = SPECIAL_TOPICS.filter((_, i) => flags[i]);
     // Satın alınanlar zaten saklıysa ESPN'e hiç gitmeden döner.
     if (open.length && typeof this.store.getSpecial === 'function') {
