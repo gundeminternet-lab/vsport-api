@@ -194,3 +194,28 @@ test('içerik üretimi: maç öncesi bekleyen tahmin yazılır; bitmiş maçta y
   await post.contentFor({ league: finished.league, id: finished.eventId, timestamp: Date.parse(finished.kickoff), homeId: '1003', awayId: '1004', homeName: 'Demo Takım 3', awayName: 'Demo Takım 4' });
   assert.equal(after.length, 0, 'maç bittikten sonra üretilen içerik karneye girmez');
 });
+
+// ---- Sonuçlanan listesi hükümleri ----
+import { verdictOf, SURPRISE_PCT, TrackService as TS2 } from '../track.js';
+
+test('hüküm: tutan tahmin, gerçek sonucun maç öncesi yüzdesi ve sürpriz', () => {
+  const hit = verdictOf({ pick: '1', outcome: '1', outcomeHit: true, scoreHit: false, probs: { '1': 55, X: 25, '2': 20 } });
+  assert.deepEqual(hit, { pick: '1', outcome: '1', hit: true, scoreHit: false, pct: 55, surprise: false });
+  const shock = verdictOf({ pick: '1', outcome: '2', outcomeHit: false, scoreHit: false, probs: { '1': 60, X: 22, '2': 18 } });
+  assert.equal(shock.hit, false);
+  assert.equal(shock.pct, 18);
+  assert.equal(shock.surprise, 18 < SURPRISE_PCT);
+});
+
+test('hükümler: yalnızca sonuçlanmış maçlar döner; geçersiz liste ve girişsiz kullanıcı reddedilir', async () => {
+  const rows = [{ key: 'tur_1_1', pick: 'X', outcome: 'X', outcomeHit: true, scoreHit: true, probs: { '1': 40, X: 30, '2': 30 } }];
+  let asked = null;
+  const svc = new TS2({ store: { getResolvedMany: async (keys) => { asked = keys; return rows; } }, espn: {} });
+  const r = await svc.verdicts({ uid: 'u', keys: ['tur_1_1', 'tur_1_2', 'tur_1_1'] });
+  assert.deepEqual(asked, ['tur_1_1', 'tur_1_2']);
+  assert.deepEqual(Object.keys(r.verdicts), ['tur_1_1']);
+  assert.equal(r.verdicts.tur_1_1.scoreHit, true);
+  await assert.rejects(svc.verdicts({ uid: 'u', keys: ['kötü/anahtar'] }), { code: 'invalid-argument' });
+  await assert.rejects(svc.verdicts({ uid: 'u', keys: Array.from({ length: 101 }, (_, i) => `k${i}`) }), { code: 'invalid-argument' });
+  await assert.rejects(svc.verdicts({ uid: null, keys: [] }), { code: 'permission-denied' });
+});

@@ -3,7 +3,7 @@
 //
 //   GET  /health                      → 200 "ok"  (uyku önleme / sağlık kontrolü)
 //   POST /api/{ad}  { data: {...} }   → 200 { result } | 4xx/5xx { error: { code, message } }
-//        ad: unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze | getTrackRecord | getLineupUpdate | getWeeklyBulletin | readCouponImage | getStoryReview
+//        ad: unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze | getTrackRecord | getLineupUpdate | getWeeklyBulletin | readCouponImage | getStoryReview | deleteAccount | getVerdicts
 //            setFeatured | clearFeatured | adminSetSubscription (ve diğer yönetim/ödül/ses uçları)
 //   Authorization: Bearer <Firebase ID token>   (uygulama her istekte gönderir)
 
@@ -20,7 +20,7 @@ const STATUS = {
   unavailable: 503,
 };
 
-export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, bulletin = null, reader = null, storyReview = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
+export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, bulletin = null, reader = null, storyReview = null, account = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
   const routes = {
     unlockContent: (d) => service.unlock(d),
     getContent: (d) => service.get(d),
@@ -28,10 +28,11 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
     unlockCoupon: (d) => coupons.unlock(d),
     unlockSpecial: (d) => service.unlockSpecial(d),
     getSpecial: (d) => service.getSpecial(d),
-    ...(track ? { getTrackRecord: (d) => track.trackRecord(d) } : {}),
+    ...(track ? { getTrackRecord: (d) => track.trackRecord(d), getVerdicts: (d) => track.verdicts(d) } : {}),
     ...(bulletin ? { getWeeklyBulletin: (d) => bulletin.get(d) } : {}),
     ...(reader ? { readCouponImage: (d) => reader.read(d) } : {}),
     ...(storyReview ? { getStoryReview: (d) => storyReview.review(d) } : {}),
+    ...(account ? { deleteAccount: (d) => account.deleteAccount(d) } : {}),
     ...(lineup ? { getLineupUpdate: (d) => lineup.update(d) } : {}),
     ...(assistant ? { assistantAnalyze: (d) => assistant.analyze(d) } : {}),
     ...(featured ? { setFeatured: (d) => featured.set(d), clearFeatured: (d) => featured.clear(d) } : {}),

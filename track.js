@@ -162,6 +162,16 @@ export class TrackService {
   }
 
   /** Karne (önbellekli). Herkes aynı karneyi görür; yalnızca giriş yapmış kullanıcılar okuyabilir. */
+  /** Verilen maç anahtarlarından sonuçlanmış olanların hükmü: { verdicts: { key: verdictOf } }. En fazla 100 maç. */
+  async verdicts({ uid, keys } = {}) {
+    if (!uid) throw Object.assign(new Error('Giriş yapmalısınız.'), { code: 'permission-denied' });
+    if (!Array.isArray(keys) || keys.length > 100 || !keys.every((k) => typeof k === 'string' && KEY_RE.test(k))) {
+      throw Object.assign(new Error('Geçersiz maç listesi.'), { code: 'invalid-argument' });
+    }
+    const rows = await this.store.getResolvedMany([...new Set(keys)]);
+    return { verdicts: Object.fromEntries(rows.map((r) => [r.key, verdictOf(r)])) };
+  }
+
   async trackRecord({ uid, limit = 500 } = {}) {
     if (!uid) throw Object.assign(new Error('Giriş yapmalısınız.'), { code: 'permission-denied' });
     const now = this.now();
@@ -171,6 +181,26 @@ export class TrackService {
     this._cacheAt = now;
     return this._cache;
   }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Sonuçlanan maç listesi: maç başına kısa hüküm (✓/✗ rozeti ve "günün sürprizleri")
+// ---------------------------------------------------------------------------------------------------
+
+export const SURPRISE_PCT = 25;
+const KEY_RE = /^[A-Za-z0-9_]{1,80}$/;
+
+/** Sonuçlanmış kayıttan kısa hüküm: tahmin tuttu mu, gerçek sonucun maç öncesi yüzdesi, sürpriz mi. */
+export function verdictOf(r) {
+  const pct = Number(r?.probs?.[r.outcome]);
+  return {
+    pick: r.pick,
+    outcome: r.outcome,
+    hit: r.outcomeHit === true,
+    scoreHit: r.scoreHit === true,
+    pct: Number.isFinite(pct) ? pct : null,
+    surprise: Number.isFinite(pct) && pct < SURPRISE_PCT,
+  };
 }
 
 /** Firestore veri katmanı (Admin SDK). */
@@ -202,6 +232,11 @@ export function createTrackStore(db) {
     async listResolved(limit) {
       const q = await db.collection('predictions').orderBy('kickoffMs', 'desc').limit(limit).get();
       return q.docs.map((d) => d.data());
+    },
+    async getResolvedMany(keys) {
+      if (!keys.length) return [];
+      const snaps = await db.getAll(...keys.map((k) => db.doc(`predictions/${k}`)));
+      return snaps.filter((d) => d.exists).map((d) => d.data());
     },
   };
 }
