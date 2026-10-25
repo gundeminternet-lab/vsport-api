@@ -1,6 +1,7 @@
 // Kadro açıklandığında güncel tahmin (maç başlamadan önce). Ana tahmin (karnede kayıtlı olan) değişmez;
 // bu yalnızca "kadro açıklandı" kartında, ilk tahminle yan yana gösterilir.
 //   Akış: kadro (ESPN özeti) → düzenli oyuncular (son maçların ilk 11'leri) → bu maçta kadroda olmayanlar → yeni λ → yeni tahmin.
+//   Yalnızca bu maçın AI paketini açan kullanıcıya gösterilir (açmayana { locked: true }).
 
 import { MatchSimulator } from './engine/service.js';
 import { parseLineup, regularPlayers, absences, lineupEffect, applyLineupAdjustment, LINEUP_SAMPLE } from './engine/lineup.js';
@@ -58,6 +59,11 @@ export class LineupService {
       throw new AppError('failed-precondition', 'Kadro güncellemesi yalnızca maç başlamadan önce gösterilir.');
     }
     const key = matchKey(league, eventId);
+    // Kadroya göre güncel tahmin AI paketinin parçası: paketi açmayan kullanıcıya tahmin (ilk ya da güncel), "değişti mi"
+    // bilgisi ve eksik oyuncu notları gönderilmez.
+    if (!(await this.paid.covers(uid, key, 'ai'))) {
+      return { available: false, locked: true, key, reason: 'Kadroya göre güncel AI tahmini AI paketinde.' };
+    }
     const hit = this._cache.get(key);
     if (hit && this.now() - hit.at < CACHE_MS) return hit.value;
 

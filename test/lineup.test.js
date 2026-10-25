@@ -86,8 +86,11 @@ test('hiç düzeltme yoksa tahmin değişmez', () => {
   assert.equal(a.lambdaHome, 1.4);
 });
 
-function fakePaid({ match, content }) {
+function fakePaid({ match, content, owned = true }) {
   return {
+    async covers(_uid, _key, type) {
+      return owned && type === 'ai';
+    },
     validate() {},
     async findMatch() {
       return match;
@@ -146,4 +149,35 @@ test('servis: maç başladıktan sonra güncelleme yapılmaz', async () => {
 test('servis: giriş yapmadan güncelleme yok', async () => {
   const svc = new LineupService({ paid: fakePaid({ match: matchInfo, content }), espn: {}, now: () => NOW });
   await assert.rejects(() => svc.update({ league: 'tur.1', eventId: '77', kickoff: new Date(NOW).toISOString() }), { code: 'permission-denied' });
+});
+
+test('servis: AI paketini açmayan kullanıcıya tahmin ve notlar gönderilmez', async () => {
+  let fetched = 0;
+  const espn = { getSummary: async () => { fetched++; return { rosters: [] }; } };
+  const svc = new LineupService({ paid: fakePaid({ match: matchInfo, content, owned: false }), espn, now: () => NOW, samplesFor: async () => [] });
+  const r = await svc.update({ uid: 'u', league: 'tur.1', eventId: '77', kickoff: new Date(matchInfo.timestamp).toISOString() });
+  assert.equal(r.available, false);
+  assert.equal(r.locked, true);
+  for (const k of ['base', 'updated', 'changed', 'notes', 'missing', 'benched']) assert.equal(r[k], undefined, k);
+  assert.equal(fetched, 0, 'kilitliyken kadro/tahmin hesaplanmaz');
+});
+
+test('servis: paket açanın önbelleğe giren sonucu paketsiz kullanıcıya sızmaz', async () => {
+  const owners = new Set(['sahip']);
+  const paid = { ...fakePaid({ match: matchInfo, content }), covers: async (uid) => owners.has(uid) };
+  const espn = {
+    getSummary: async () => ({
+      rosters: [
+        { team: { id: '10' }, roster: [{ starter: true, athlete: { displayName: 'Stoper' }, position: { abbreviation: 'CB' } }] },
+        { team: { id: '20' }, roster: [{ starter: true, athlete: { displayName: 'Dep Kaleci' }, position: { abbreviation: 'G' } }] },
+      ],
+    }),
+  };
+  const svc = new LineupService({ paid, espn, now: () => NOW, samplesFor: async () => [] });
+  const args = { league: 'tur.1', eventId: '77', kickoff: new Date(matchInfo.timestamp).toISOString() };
+  const own = await svc.update({ uid: 'sahip', ...args });
+  assert.equal(own.available, true);
+  const other = await svc.update({ uid: 'baska', ...args });
+  assert.equal(other.locked, true);
+  assert.equal(other.base, undefined);
 });
