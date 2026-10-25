@@ -101,6 +101,11 @@ const api = createApi({
   bulletin: new BulletinService({ espn, db }),
   reader: couponReader,
   storyReview: new StoryReviewService({ paid: paidService }),
+  info: {
+    version: '2026-10-25-asistan-acik',
+    assistantRequiresSubscription: process.env.ASSISTANT_REQUIRES_SUBSCRIPTION === 'true',
+    assistantDailyLimit: Number(process.env.ASSISTANT_DAILY_LIMIT) || ASSISTANT_DAILY_LIMIT,
+  },
 });
 
 const port = Number(process.env.PORT ?? 8080);

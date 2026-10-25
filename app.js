@@ -20,7 +20,7 @@ const STATUS = {
   unavailable: 503,
 };
 
-export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, bulletin = null, reader = null, storyReview = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
+export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, bulletin = null, reader = null, storyReview = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
   const routes = {
     unlockContent: (d) => service.unlock(d),
     getContent: (d) => service.get(d),
@@ -82,6 +82,8 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
 
   return async function handler(req, res) {
     const url = new URL(req.url, 'http://localhost');
+    // Hangi sürümün yayında olduğunu tarayıcıdan görmek için (gizli bilgi içermez).
+    if (req.method === 'GET' && url.pathname === '/version') return send(res, 200, info ?? {});
     if (req.method === 'GET' && (url.pathname === '/health' || url.pathname === '/')) {
       res.writeHead(200, { 'content-type': 'text/plain' });
       return res.end('ok');
