@@ -204,7 +204,8 @@ export class PaidContentService {
     if (type === 'ai') {
       const editorComment = await this.store.getEditorComment(content.key);
       // Video hikâyesi (50.000 simülasyon) saklanmaz; modelin beklenen gollerinden tohumlu olarak türetilir.
-      return { ...content.ai, editorComment, story: storyForContent(content) };
+      // model: ekrandaki karşılaştırmalar için tahminin dayandığı sayılar (lig sırası, form, gol ortalamaları, H2H, xG)
+      return { ...content.ai, editorComment, story: storyForContent(content), model: content.model ?? null };
     }
     return content[type];
   }

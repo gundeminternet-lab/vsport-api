@@ -174,3 +174,14 @@ test('genişletilmiş ligler sunucuda geçerli sayılır (içerik isteği "Geçe
   }
   assert.ok(!svc.leagues.has('xyz.9'));
 });
+
+test('AI analizi yanıtı tahminin dayandığı sayıları da taşır (ekrandaki "Sayılarla maç")', async () => {
+  const store = makeStore({ subscription: subscribed('monthly') });
+  const svc = new PaidContentService({ leagues: ['demo.1'], store, espn: makeEspn(), now: () => NOW });
+  const r = await svc.unlock({ uid: 'u1', ...fixture, type: 'ai' });
+  const m = r.data.model;
+  assert.ok(m, 'model alanı');
+  assert.ok(Number.isFinite(m.lambdaHome) && Number.isFinite(m.lambdaAway));
+  assert.match(m.homeForm, /^[GBM]{0,5}$/);
+  assert.ok(m.h2h && Number.isInteger(m.h2h.n));
+});
