@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node server.js",
     "test": "node --test",
+    "backtest:live": "node scripts/live_backtest.js",
     "deploy": "firebase deploy --only functions",
     "logs": "firebase functions:log"
   },

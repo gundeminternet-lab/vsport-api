@@ -27,6 +27,7 @@ import { createPollStore } from './polls.js';
 import { CouponSettler, createSettleStore } from './settle.js';
 import { TrackService, createTrackStore } from './track.js';
 import { LineupService } from './lineup.js';
+import { LiveForecastService } from './live_forecast.js';
 import { BulletinService } from './bulletin.js';
 import { narratorFromEnv } from './narrator.js';
 import { readerFromEnv } from './coupon_vision.js';
@@ -99,12 +100,14 @@ const api = createApi({
   progress,
   track: trackService,
   lineup: new LineupService({ paid: paidService, espn }),
+  // Tek canlı model: canlı kart, baskı kartı ve AI yorumcu aynı ihtimalleri buradan alır
+  liveForecast: new LiveForecastService({ paid: paidService }),
   bulletin: new BulletinService({ espn, db }),
   reader: couponReader,
   storyReview: new StoryReviewService({ paid: paidService }),
   account: new AccountService({ db, auth }),
   info: {
-    version: '2026-10-25-asistan-acik',
+    version: '2026-10-26-canli-model',
     assistantRequiresSubscription: process.env.ASSISTANT_REQUIRES_SUBSCRIPTION === 'true',
     assistantDailyLimit: Number(process.env.ASSISTANT_DAILY_LIMIT) || ASSISTANT_DAILY_LIMIT,
   },

@@ -12,8 +12,7 @@ import { SPECIAL_TOPICS } from './special.js';
 import { ASSISTANT_DAILY_LIMIT, dayKeyTr, hasAssistantAccess } from './subscription.js';
 import { intentOf, followUpAnswer, reviewOf, swingText, suggestionsFor } from './chat.js';
 import { Narrator } from './narrator.js';
-import { scoreMatrix } from './engine/analysis.js';
-import { MODEL } from './engine/config.js';
+import { liveForecast } from './engine/live_model.js';
 
 const pct = (p) => Math.round(p * 100);
 const tr1 = (x) => (Math.round(x * 10) / 10).toFixed(1).replace('.', ',');
@@ -51,47 +50,60 @@ const num = (v) => {
   return Number.isFinite(n) ? n : null;
 };
 
-/** ESPN maç özetinden güncel durum: { state: 'pre'|'in'|'post', home, away, minute, halftime }. */
+/**
+ * ESPN maç özetinden güncel durum: { state: 'pre'|'in'|'post', home, away, minute, period, halftime, stats, reds }.
+ * stats: { home: { shots, onTarget }, away: {...} } ya da null (şut verisi yok). reds: [ev, dep] kırmızı kart.
+ */
 export function parseLive(json) {
   const comp = json?.header?.competitions?.[0];
   if (!comp) return null;
   const type = comp.status?.type ?? {};
-  const side = (s) => num(comp.competitors?.find((c) => c.homeAway === s)?.score);
+  const competitor = (s) => comp.competitors?.find((c) => c.homeAway === s);
+  const side = (s) => num(competitor(s)?.score);
   let minute = null;
   const m = String(comp.status?.displayClock ?? '').match(/(\d+)(?:'?\s*\+\s*(\d+))?/);
   if (m) minute = Number(m[1]) + Number(m[2] ?? 0);
   const halftime = type.name === 'STATUS_HALFTIME';
   if (halftime) minute = 45;
-  return { state: type.state ?? 'pre', home: side('home') ?? 0, away: side('away') ?? 0, minute, halftime };
+  // Devre: ESPN "period" verir; yoksa durum adından (STATUS_FIRST_HALF / STATUS_SECOND_HALF)
+  let period = num(comp.status?.period) ?? 0;
+  if (!period) period = /FIRST_HALF|HALFTIME/.test(type.name ?? '') ? 1 : /SECOND_HALF/.test(type.name ?? '') ? 2 : 0;
+
+  const ids = { home: String(competitor('home')?.team?.id ?? competitor('home')?.id ?? ''), away: String(competitor('away')?.team?.id ?? competitor('away')?.id ?? '') };
+  // Şutlar: boxscore istatistikleri
+  const statOf = (teamId, name) => {
+    const t = (json?.boxscore?.teams ?? []).find((x) => String(x?.team?.id ?? '') === teamId);
+    const st = (t?.statistics ?? []).find((x) => x?.name === name);
+    return st ? num(st.displayValue ?? st.value) : null;
+  };
+  const shots = (id) => ({ shots: statOf(id, 'totalShots'), onTarget: statOf(id, 'shotsOnTarget') });
+  const hs = shots(ids.home);
+  const as = shots(ids.away);
+  const stats =
+    ids.home && ids.away && hs.shots !== null && as.shots !== null
+      ? { home: { shots: hs.shots, onTarget: hs.onTarget ?? 0 }, away: { shots: as.shots, onTarget: as.onTarget ?? 0 } }
+      : null;
+  // Kırmızı kartlar: olaylardan (ikinci sarı dahil), yoksa istatistikten
+  const reds = [0, 0];
+  for (const e of json?.keyEvents ?? []) {
+    const t = String(e?.type?.text ?? e?.type?.type ?? '').toLowerCase();
+    if (!(e?.redCard === true || t.includes('red card') || t.includes('second yellow') || t.includes('yellow-red'))) continue;
+    const id = String(e?.team?.id ?? '');
+    if (id && id === ids.home) reds[0] += 1;
+    else if (id && id === ids.away) reds[1] += 1;
+  }
+  reds[0] = Math.max(reds[0], statOf(ids.home, 'redCards') ?? 0);
+  reds[1] = Math.max(reds[1], statOf(ids.away, 'redCards') ?? 0);
+  return { state: type.state ?? 'pre', home: side('home') ?? 0, away: side('away') ?? 0, minute, period, halftime, stats, reds };
 }
 
 /**
- * Maç sürerken olasılıklar: kalan süredeki gol beklentisi (λ × kalan oran) üzerine mevcut skor eklenir.
- * Skor tablosu aynı belirsizlik karışımıyla (sigma) hesaplanır.
+ * Maç sürerken olasılıklar: tek canlı model (engine/live_model.js). Canlı kart ve AI yorumcu da aynı modeli kullanır.
+ * live: { minute, home, away, period?, halftime?, stats?, reds? }. Dönen alanlar: p1, pX, p2, over25, btts, noMoreGoals,
+ * moreGoals, nextGoal, topFinals, topScore, expected, remainingGoals, rem.
  */
-export function liveProbabilities(model, { minute, home, away }) {
-  const rem = clamp((90 - Math.min(minute ?? 0, 90)) / 90, 0.03, 1);
-  const m = scoreMatrix(model.lambdaHome * rem, model.lambdaAway * rem, MODEL.dcRho, 8, model.sigma ?? 0);
-  let p1 = 0;
-  let pX = 0;
-  let p2 = 0;
-  let over25 = 0;
-  let btts = 0;
-  let best = { p: -1, score: `${home}-${away}` };
-  for (let i = 0; i < m.length; i++) {
-    for (let j = 0; j < m[i].length; j++) {
-      const p = m[i][j];
-      const fh = home + i;
-      const fa = away + j;
-      if (fh > fa) p1 += p;
-      else if (fh === fa) pX += p;
-      else p2 += p;
-      if (fh + fa >= 3) over25 += p;
-      if (fh > 0 && fa > 0) btts += p;
-      if (p > best.p) best = { p, score: `${fh}-${fa}` };
-    }
-  }
-  return { rem, p1, pX, p2, over25, btts, noMoreGoals: m[0][0], topScore: best.score };
+export function liveProbabilities(model, live) {
+  return liveForecast(model, live);
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -171,7 +183,7 @@ export function buildAssistantReply({ match, content, model, specials, importanc
         ['Galibiyet', `${H} %${pct(lp.p1)}`],
         ['Beraberlik', `%${pct(lp.pX)}`],
         ['Galibiyet', `${A} %${pct(lp.p2)}`],
-        ['Tahmini final', lp.topScore],
+        ['Skor böyle biter', `%${pct(lp.noMoreGoals)}`],
       ],
       speech: say('as.live', [
         `Maç şu anda ${spokenPair(live.home, live.away)}${live.halftime ? ', devre arasındayız' : `, ${live.minute}. dakikadayız`}. Kalan süre hesaba katıldığında ${H} yüzde ${pct(lp.p1)}, beraberlik yüzde ${pct(lp.pX)}, ${A} yüzde ${pct(lp.p2)} görünüyor.`,
@@ -262,21 +274,41 @@ export function buildAssistantReply({ match, content, model, specials, importanc
     mood: 'warm',
   });
 
-  // 7) Skor tahmini
-  scenes.push({
-    kind: 'forecast',
-    title: 'Skor beklentisi',
-    icon: 'scoreboard',
-    kicker: 'Tahmini final skoru',
-    big: live1 ? live1.topScore.replace('-', ' - ') : ai.topScore.replace('-', ' - '),
-    chips: [
-      ['Beklenen gol', `${tr1(lh)} - ${tr1(la)}`],
-      ['Veri güveni', ai.confidence],
-      ...(live1 ? [['2,5 üst', `%${pct(live1.over25)}`], ['KG var', `%${pct(live1.btts)}`]] : []),
-    ],
-    speech: `Tahmini final skoru ${spokenScore(live1 ? live1.topScore : ai.topScore)}. Veri güveni ${ai.confidence}.`,
-    mood: 'warm',
-  });
+  // 7) Skor tahmini. Canlıda tek skor yerine: skorun böyle bitme ihtimali, en az bir gol daha ve en olası finaller.
+  if (live1) {
+    const finals = live1.topFinals.map((f) => [f.score.replace('-', ' - '), `%${pct(f.p)}`]);
+    const ng = live1.nextGoal;
+    scenes.push({
+      kind: 'forecast',
+      title: 'Maç nasıl biter?',
+      icon: 'scoreboard',
+      kicker: `Skor böyle biter %${pct(live1.noMoreGoals)} · En az bir gol daha %${pct(live1.moreGoals)}`,
+      big: live1.topFinals[0].score.replace('-', ' - '),
+      chips: [
+        ...finals.slice(1),
+        ['Sıradaki gol', `${H} %${pct(ng.home)} · ${A} %${pct(ng.away)}`],
+        ['Beklenen final', `${tr1(live1.expected.home)} - ${tr1(live1.expected.away)}`],
+      ],
+      speech: `Skorun böyle bitme ihtimali yüzde ${pct(live1.noMoreGoals)}, en az bir gol daha görme ihtimali yüzde ${pct(live1.moreGoals)}. Sıradaki golü ${
+        ng.home >= ng.away ? H : A
+      } atmaya daha yakın: yüzde ${pct(Math.max(ng.home, ng.away))}. En olası finaller ${live1.topFinals.map((f) => spokenScore(f.score)).join(', ')}.`,
+      mood: 'warm',
+    });
+  } else {
+    scenes.push({
+      kind: 'forecast',
+      title: 'Skor beklentisi',
+      icon: 'scoreboard',
+      kicker: 'Tahmini final skoru',
+      big: ai.topScore.replace('-', ' - '),
+      chips: [
+        ['Beklenen gol', `${tr1(lh)} - ${tr1(la)}`],
+        ['Veri güveni', ai.confidence],
+      ],
+      speech: `Tahmini final skoru ${spokenScore(ai.topScore)}. Veri güveni ${ai.confidence}.`,
+      mood: 'warm',
+    });
+  }
 
   // 8) Özel Yorum başlıkları: sorulan konu önce gelir; canlı maçta maç öncesi korner/İY başlıkları atlanır
   if (specials) {
@@ -421,7 +453,9 @@ export class AssistantService {
           live,
           homeGoals: match.homeGoals ?? null,
           awayGoals: match.awayGoals ?? null,
-          probAt: (sc) => liveProbabilities(model, sc),
+          // Senaryolar canlı durumun devre, şut ve kart bilgisiyle hesaplanır (ekrandakiyle aynı başlangıç)
+          probAt: (sc) =>
+            liveProbabilities(model, live ? { period: live.period, halftime: live.halftime, stats: live.stats, reds: live.reds, ...sc } : sc),
         })
       : null;
     let reply = follow
@@ -479,6 +513,17 @@ export function narrationFacts({ match, state, live, content, model, importance 
     beklenenGol: `${r1(model.lambdaHome)} / ${r1(model.lambdaAway)}`,
     önem: `${importance.label} ${importance.score}/100`,
   };
-  if (live) facts.canlı = `${live.home}-${live.away}, ${live.minute}. dakika`;
+  if (live) {
+    facts.canlı = `${live.home}-${live.away}, ${live.minute}. dakika`;
+    const lp = live.probs;
+    if (lp?.topFinals) {
+      // Canlı rakamlar tek canlı modelden; anlatıcı "tahmini skor" yerine bunları kullanmalı
+      facts.canlıOlasılıklar = `ev ${Math.round(lp.p1 * 100)} / beraberlik ${Math.round(lp.pX * 100)} / deplasman ${Math.round(lp.p2 * 100)}`;
+      facts.skorBöyleBiter = `%${Math.round(lp.noMoreGoals * 100)}`;
+      facts.enAzBirGolDaha = `%${Math.round(lp.moreGoals * 100)}`;
+      facts.sıradakiGol = `ev ${Math.round(lp.nextGoal.home * 100)} / deplasman ${Math.round(lp.nextGoal.away * 100)} / gol yok ${Math.round(lp.nextGoal.none * 100)}`;
+      facts.olasıFinaller = lp.topFinals.map((f) => `${f.score} %${Math.round(f.p * 100)}`).join(', ');
+    }
+  }
   return facts;
 }

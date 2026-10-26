@@ -123,6 +123,14 @@ export function followUpAnswer({ intent, question = '', H, A, model, content, im
       };
     }
     case 'score': {
+      if (state === 'live' && live?.probs?.topFinals) {
+        const lp = live.probs;
+        const finals = lp.topFinals.map((f) => `${f.score} (%${pct(f.p)})`).join(', ');
+        return {
+          answer: `Skorun böyle bitme ihtimali %${pct(lp.noMoreGoals)}, en az bir gol daha %${pct(lp.moreGoals)}. En olası finaller: ${finals}.`,
+          suggestions: SUGGESTIONS.score,
+        };
+      }
       const next = m.topScores.filter((x) => x.score !== ai.topScore).slice(0, 2).map((x) => `${x.score} (%${pct(x.p)})`);
       const lead = post ? `${post}en olası skor` : 'En olası skor';
       return {
@@ -131,6 +139,13 @@ export function followUpAnswer({ intent, question = '', H, A, model, content, im
       };
     }
     case 'goals':
+      if (state === 'live' && live?.probs?.remainingGoals) {
+        const lp = live.probs;
+        return {
+          answer: `Kalan sürede beklenen gol: ${H} ${tr1(lp.remainingGoals.home)}, ${A} ${tr1(lp.remainingGoals.away)}. En az bir gol daha %${pct(lp.moreGoals)}; maç sonunda en az üç gol %${pct(lp.over25)}.`,
+          suggestions: SUGGESTIONS.goals,
+        };
+      }
       return {
         answer: `Beklenen toplam gol ${tr1(total)}: ${H} ${tr1(lh)}, ${A} ${tr1(la)}. Maçta en az üç gol olma ihtimali %${pct(m.p.over25)}.`,
         suggestions: SUGGESTIONS.goals,
