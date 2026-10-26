@@ -10,6 +10,7 @@
 //   getAccess(uid) -> { subscription, trialUsed }
 //   recordUnlock({ uid, unlockId, record }) -> { created }      (abonenin açtığı içerik geçmişe yazılır; ücret yok)
 //   useTrial({ uid, unlockId, record, limit }) -> { used, trialLeft }  (deneme hakkı: tek işlemde sayaç + kilit)
+//   useWheelCredit({ uid, prize, unlockId, record, now }) -> { used, left } (günlük çark hakkı: tek işlemde hak + kilit)
 //
 // Erişim: abonelik (subscription.js → AccessService). Jeton/token sistemi kaldırıldı.
 
@@ -22,6 +23,7 @@ import { collectCornerSamples, expectedCorners } from './engine/corners.js';
 import { pendingEntry } from './track.js';
 import { AppError } from './errors.js';
 import { AccessService, TRIAL_MATCHES, subscriptionRequired } from './subscription.js';
+import { CREDIT_TARGET, CREDIT_TYPES } from './wheel.js';
 
 export { AppError };
 
@@ -208,12 +210,19 @@ export class PaidContentService {
   }
 
   /**
-   * Kullanıcının bu içeriği görme hakkı var mı? Abonelik her şeyi kapsar. Abone değilse: açılmış kilit (deneme hakkıyla
-   * ya da eski jeton döneminde açılan AI paketi); AI paketi simülasyonu ve Özel Yorum başlıklarını (sp_*) da kapsar.
+   * Abonelik dışında açılmış kilit: AI paketi (…_ai: deneme, çark "tüm özellikler" ya da eski jeton dönemi) simülasyonu
+   * ve Özel Yorum başlıklarını (sp_*) da kapsar; çarktan "AI Yorumcu" (…_aic) yalnızca AI analizi ve videosunu açar.
    */
-  async covers(uid, key, type) {
+  async _ownUnlock(uid, key, type) {
     if (await this.store.hasUnlock(uid, key, type)) return true;
-    if (type !== 'ai' && (type === 'sim' || type.startsWith('sp_')) && (await this.store.hasUnlock(uid, key, 'ai'))) return true;
+    if (type === 'ai') return this.store.hasUnlock(uid, key, 'aic');
+    if (type === 'sim' || type.startsWith('sp_')) return this.store.hasUnlock(uid, key, 'ai');
+    return false;
+  }
+
+  /** Kullanıcının bu içeriği görme hakkı var mı? Abonelik her şeyi kapsar; değilse açılmış kilit. */
+  async covers(uid, key, type) {
+    if (await this._ownUnlock(uid, key, type)) return true;
     return this.access.isSubscriber(uid);
   }
 
@@ -231,39 +240,57 @@ export class PaidContentService {
   }
 
   /**
-   * İçeriği aç. Abone: her zaman (maç başladıysa maç öncesi veriyle). Abone değil: daha önce açtığı maç ya da
-   * deneme hakkı (yalnızca AI paketi, maç başlamadan önce, TRIAL_MATCHES maç). Hiçbir durumda ücret alınmaz.
+   * İçeriği aç. Abone: her zaman (maç başladıysa maç öncesi veriyle). Abone değil: daha önce açtığı içerik, deneme hakkı
+   * (AI paketi, TRIAL_MATCHES maç) ya da günlük çarktan kazanılan hak (use: 'full' | 'commentator' | 'sim').
+   * Ücretsiz haklar yalnızca maç başlamadan kullanılır. Hiçbir durumda ücret alınmaz.
+   *   use: 'trial' | 'full' | 'commentator' | 'sim'; verilmezse (eski sürüm) AI paketi için deneme hakkı.
    */
-  async unlock({ uid, league, eventId, kickoff, type }) {
+  async unlock({ uid, league, eventId, kickoff, type, use = null }) {
     if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
     this.validate({ league, eventId, kickoff, type });
+    if (use !== null && !Object.hasOwn(CREDIT_TYPES, use)) throw new AppError('invalid-argument', 'Geçersiz hak.');
     const key = matchKey(league, eventId);
     if (RETIRED_TYPES.includes(type) && !(await this.store.hasUnlock(uid, key, type))) {
       throw new AppError('failed-precondition', 'Bu içerik artık sunulmuyor.');
     }
-    const unlocked = (await this.store.hasUnlock(uid, key, type)) || (type !== 'ai' && (await this.store.hasUnlock(uid, key, 'ai')));
+    const how = use ?? (type === 'ai' ? 'trial' : null);
+    const packageUse = how === 'trial' || how === 'full';
+    // Paket hakkı istenmişse (AI Yorumcu ya da simülasyon açık olsa da) paketin kendisi açık mı bakılır.
+    const unlocked = packageUse && use !== null ? await this.store.hasUnlock(uid, key, 'ai') : await this._ownUnlock(uid, key, type);
     const ent = unlocked ? null : await this.access.entitlement(uid);
-    const match = await this.findMatch({ league, eventId, kickoff });
-    const started = match.completed || match.timestamp <= this.now();
 
     let via = unlocked ? 'unlock' : null;
     if (!via && ent.subscribed) via = 'subscription';
     if (!via) {
-      // Deneme hakkı yalnızca AI paketiyle (simülasyon ve Özel Yorumlar onun içinde) ve maç öncesi kullanılır.
-      if (type !== 'ai' || ent.trialLeft <= 0) throw subscriptionRequired();
-      if (started) throw new AppError('failed-precondition', 'Maç başladı; ücretsiz deneme yalnızca maç öncesi kullanılabilir.');
-      via = 'trial';
+      if (!how || !CREDIT_TYPES[how].includes(type)) throw subscriptionRequired();
+      if (how === 'trial' && ent.trialLeft <= 0) throw subscriptionRequired();
+      if (how !== 'trial' && !(ent.wheel?.credits?.[how] > 0)) throw subscriptionRequired('Bu çark ödülü hakkın yok ya da süresi doldu.');
+      via = how === 'trial' ? 'trial' : 'wheel';
     }
-    // Önce içerik üretilir: ESPN'e ulaşılamazsa deneme hakkı harcanmaz.
+    const match = await this.findMatch({ league, eventId, kickoff });
+    const started = match.completed || match.timestamp <= this.now();
+    if (via === 'trial' && started) throw new AppError('failed-precondition', 'Maç başladı; ücretsiz deneme yalnızca maç öncesi kullanılabilir.');
+    if (via === 'wheel' && started) throw new AppError('failed-precondition', 'Maç başladı; çark ödülleri yalnızca maç başlamadan kullanılabilir.');
+    // Önce içerik üretilir: ESPN'e ulaşılamazsa deneme/çark hakkı harcanmaz.
     const content = await this.contentFor(match, started ? { asOf: match.timestamp - 60000 } : {});
     let trialLeft = ent?.trialLeft ?? null;
+    let creditsLeft = null;
     if (via === 'trial') {
-      ({ trialLeft } = await this.store.useTrial({ uid, unlockId: `${key}_${type}`, record: this._record(match, key, type, { via: 'trial' }), limit: TRIAL_MATCHES }));
+      ({ trialLeft } = await this.store.useTrial({ uid, unlockId: `${key}_ai`, record: this._record(match, key, 'ai', { via: 'trial' }), limit: TRIAL_MATCHES }));
+    } else if (via === 'wheel') {
+      const target = CREDIT_TARGET[how];
+      ({ left: creditsLeft } = await this.store.useWheelCredit({
+        uid,
+        prize: how,
+        unlockId: `${key}_${target}`,
+        record: this._record(match, key, target, { via: 'wheel', prize: how }),
+        now: this.now(),
+      }));
     } else if (via === 'subscription') {
       // Abonenin açtığı maçlar "açtıklarım" listesinde ve kilit durumunda görünsün (ücret yok)
       await this.store.recordUnlock?.({ uid, unlockId: `${key}_${type}`, record: this._record(match, key, type, { via: 'subscription' }) });
     }
-    return { type, key, via, trialLeft, data: await this.part(content, type) };
+    return { type, key, via, use: via === 'wheel' || via === 'trial' ? how : null, trialLeft, creditsLeft, data: await this.part(content, type) };
   }
 
   /** Açılmış içeriği tekrar getir. Maç bittiyse herkese ücretsiz. */
@@ -300,7 +327,7 @@ export class PaidContentService {
     return SPECIAL_TOPICS.filter((t) => out.includes(t));
   }
 
-  /** Özel Yorum: aboneler ve bu maçın AI paketini (deneme hakkıyla) açanlar için; ücret yok. */
+  /** Özel Yorum: aboneler ve bu maçın AI paketini (deneme hakkı ya da çarkın "tüm özellikler" ödülüyle) açanlar için; ücret yok. */
   async unlockSpecial({ uid, league, eventId, kickoff, topics }) {
     if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
     this.validate({ league, eventId, kickoff }, { needType: false });

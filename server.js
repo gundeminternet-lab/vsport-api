@@ -45,6 +45,7 @@ import { AssistantService } from './assistant.js';
 import { ASSISTANT_DAILY_LIMIT, AccessService, PLAN_PRICES_TL, PLAN_PRODUCTS, TRIAL_MATCHES } from './subscription.js';
 import { billingFromEnv } from './billing.js';
 import { createFeaturedService } from './featured.js';
+import { WheelService, WHEEL_WEIGHTS, WHEEL_SLICES, CREDIT_DAYS, ASSISTANT_PRIZE_HOURS } from './wheel.js';
 
 function serviceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -70,6 +71,11 @@ const store = {
   },
   async useTrial(args) {
     const r = await baseStore.useTrial(args);
+    if (r.used) progress.add(args.uid, { unlocks: 1, xp: XP.unlock }).catch(() => {});
+    return r;
+  },
+  async useWheelCredit(args) {
+    const r = await baseStore.useWheelCredit(args);
     if (r.used) progress.add(args.uid, { unlocks: 1, xp: XP.unlock }).catch(() => {});
     return r;
   },
@@ -109,6 +115,8 @@ const api = createApi({
   coupons: new CouponService({ store, access }),
   billing,
   access,
+  // Günlük hediye çarkı (+10 XP ödülü seviyeye işlenir)
+  wheel: new WheelService({ store: baseStore, progress }),
   progress,
   track: trackService,
   lineup: new LineupService({ paid: paidService, espn }),
@@ -119,10 +127,11 @@ const api = createApi({
   storyReview: new StoryReviewService({ paid: paidService }),
   account: new AccountService({ db, auth }),
   info: {
-    version: '2026-10-26-abonelik',
+    version: '2026-10-26-cark',
     assistantRequiresSubscription: process.env.ASSISTANT_OPEN !== 'true',
     billingEnabled: billing.enabled,
     plans: { prices: PLAN_PRICES_TL, products: PLAN_PRODUCTS, trialMatches: TRIAL_MATCHES },
+    wheel: { weights: WHEEL_WEIGHTS, slices: WHEEL_SLICES, creditDays: CREDIT_DAYS, assistantHours: ASSISTANT_PRIZE_HOURS },
     assistantDailyLimit: Number(process.env.ASSISTANT_DAILY_LIMIT) || ASSISTANT_DAILY_LIMIT,
   },
 });

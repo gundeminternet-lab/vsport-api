@@ -1,6 +1,7 @@
 // Testler için ortak sahte veri katmanı ve ESPN (Firebase ve ağ yok).
 import { DemoEspn } from '../engine/demo.js';
 import { AppError } from '../logic.js';
+import { takeCredit, countCredits } from '../wheel.js';
 
 export const NOW = Date.UTC(2026, 9, 17, 12, 0);
 export const FUTURE = NOW + 2 * 86400000;
@@ -20,13 +21,13 @@ export function makeEspn({ now = NOW } = {}) {
 }
 
 /**
- * Sahte veri katmanı. Jeton yok: erişim abonelik (subscription) ve deneme hakkı (trialUsed) ile.
- * makeStore({ subscription, trialUsed }) — subscription: { plan, until } ya da null.
+ * Sahte veri katmanı. Jeton yok: erişim abonelik (subscription), deneme hakkı (trialUsed) ve günlük çark (wheel) ile.
+ * makeStore({ subscription, trialUsed, wheel }) — subscription: { plan, until } ya da null.
  */
 export function makeStore(opts = {}) {
-  const { subscription = null, trialUsed = 0 } = typeof opts === 'number' ? {} : opts;
+  const { subscription = null, trialUsed = 0, wheel = null } = typeof opts === 'number' ? {} : opts;
   const s = {
-    users: { u1: { subscription, trialUsed } },
+    users: { u1: { subscription, trialUsed, wheel } },
     unlocks: new Set(),
     records: new Map(),
     contents: new Map(),
@@ -53,7 +54,26 @@ export function makeStore(opts = {}) {
     },
     async getAccess(uid) {
       const u = s.users[uid];
-      return { subscription: u?.subscription ?? null, trialUsed: u?.trialUsed ?? 0 };
+      return { subscription: u?.subscription ?? null, trialUsed: u?.trialUsed ?? 0, wheel: u?.wheel ?? null };
+    },
+    async spinWheel({ uid, day, apply }) {
+      const u = s.users[uid];
+      if (!u) throw new AppError('failed-precondition', 'Profil bulunamadı.');
+      if (u.wheel?.day === day) throw new AppError('failed-precondition', 'Bugünkü çark hakkını kullandın.');
+      u.wheel = JSON.parse(JSON.stringify(apply(u.wheel ?? null)));
+      return { wheel: u.wheel };
+    },
+    async useWheelCredit({ uid, prize, unlockId, record, now }) {
+      const u = s.users[uid];
+      if (!u) throw new AppError('failed-precondition', 'Profil bulunamadı.');
+      const id = `${uid}/${unlockId}`;
+      if (s.unlocks.has(id)) return { used: false, left: countCredits(u.wheel, prize, now) };
+      const taken = takeCredit(u.wheel, prize, now);
+      if (!taken) throw new AppError('subscription-required', 'Bu çark ödülü hakkın yok ya da süresi doldu.');
+      u.wheel = taken.wheel;
+      s.unlocks.add(id);
+      s.records.set(id, record);
+      return { used: true, left: countCredits(u.wheel, prize, now) };
     },
     async getSubscription(uid) { return s.users[uid]?.subscription ?? null; },
     async setSubscription(uid, sub) {
@@ -97,6 +117,14 @@ export function makeStore(opts = {}) {
   };
   return s;
 }
+
+/** Çarktan kazanılmış haklar (testler için): credits('full', 'sim') → users.u1.wheel */
+export const wheelWith = (prizes = [], now = NOW, extra = {}) => ({
+  day: null,
+  credits: prizes.map((prize, i) => ({ id: `c${i}`, prize, at: now, until: now + 7 * 86400000 })),
+  assistantUntil: null,
+  ...extra,
+});
 
 /** Süresi dolmamış abonelik kaydı (testler için). */
 export const subscribed = (plan = 'monthly', now = NOW) => ({ plan, until: now + 30 * 86400000, source: 'admin' });

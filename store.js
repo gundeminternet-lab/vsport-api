@@ -2,6 +2,7 @@
 // db: getFirestore() sonucu, FieldValue: firebase-admin/firestore'dan.
 
 import { AppError } from './errors.js';
+import { takeCredit, countCredits } from './wheel.js';
 
 export function createStore(db, FieldValue) {
   const store = {
@@ -49,8 +50,38 @@ export function createStore(db, FieldValue) {
     // ---- Erişim: abonelik ve deneme hakkı (yalnızca sunucu yazar) ----
     async getAccess(uid) {
       const s = await db.doc(`users/${uid}`).get();
-      if (!s.exists) return { subscription: null, trialUsed: 0 };
-      return { subscription: s.get('subscription') ?? null, trialUsed: Number(s.get('trialUsed') ?? 0) };
+      if (!s.exists) return { subscription: null, trialUsed: 0, wheel: null };
+      return { subscription: s.get('subscription') ?? null, trialUsed: Number(s.get('trialUsed') ?? 0), wheel: s.get('wheel') ?? null };
+    },
+    // ---- Günlük çark (users/{uid}.wheel; wheel.js) ----
+    // Bugün çevrildiyse hata; değilse apply(önceki) tek işlemde yazılır.
+    async spinWheel({ uid, day, apply }) {
+      const userRef = db.doc(`users/${uid}`);
+      return db.runTransaction(async (tx) => {
+        const user = await tx.get(userRef);
+        if (!user.exists) throw new AppError('failed-precondition', 'Profil bulunamadı.');
+        const prev = user.get('wheel') ?? null;
+        if (prev?.day === day) throw new AppError('failed-precondition', 'Bugünkü çark hakkını kullandın. Yeni hak gece 00:00\'da.');
+        const wheel = apply(prev);
+        tx.update(userRef, { wheel });
+        return { wheel };
+      });
+    },
+    // Çark hakkı: tek işlemde hak düşülür + kilit kaydı yazılır. Kilit zaten varsa hak harcanmaz.
+    async useWheelCredit({ uid, prize, unlockId, record, now }) {
+      return db.runTransaction(async (tx) => {
+        const userRef = db.doc(`users/${uid}`);
+        const unlockRef = db.doc(`users/${uid}/unlocks/${unlockId}`);
+        const [user, unlock] = await Promise.all([tx.get(userRef), tx.get(unlockRef)]);
+        if (!user.exists) throw new AppError('failed-precondition', 'Profil bulunamadı.');
+        const prev = user.get('wheel') ?? null;
+        if (unlock.exists) return { used: false, left: countCredits(prev, prize, now) };
+        const taken = takeCredit(prev, prize, now);
+        if (!taken) throw new AppError('subscription-required', 'Bu çark ödülü hakkın yok ya da süresi doldu.');
+        tx.update(userRef, { wheel: taken.wheel });
+        tx.set(unlockRef, { ...record, at: FieldValue.serverTimestamp() });
+        return { used: true, left: countCredits(taken.wheel, prize, now) };
+      });
     },
     async setSubscription(uid, subscription) {
       await db.doc(`users/${uid}`).set({ subscription }, { merge: true });

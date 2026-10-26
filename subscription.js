@@ -5,11 +5,13 @@
 // Kapsam: her plan AI paketini (her maç: AI analizi, AI videosu, simülasyon, Özel Yorumlar, kadro güncellemesi),
 // kupon kontrolünü ve editör kuponlarını açar. AI Asistan yalnızca aylık ve yıllık planda.
 // Deneme: her kullanıcı abone olmadan TRIAL_MATCHES maçın AI paketini ücretsiz açabilir (maç başlamadan önce).
+// Günlük çark (wheel.js): maç/editör hakları ve 1 günlük AI Asistan ödülü de buradaki haklara eklenir.
 //
-// Kayıt: users/{uid}.subscription = { plan, until (ms), source: 'play'|'admin', ... } ve users/{uid}.trialUsed (sayı).
-// İkisini de yalnızca sunucu yazar (firestore.rules).
+// Kayıt: users/{uid}.subscription = { plan, until (ms), source: 'play'|'admin', ... }, users/{uid}.trialUsed (sayı)
+// ve users/{uid}.wheel. Hepsini yalnızca sunucu yazar (firestore.rules).
 
 import { AppError } from './errors.js';
+import { wheelStatus } from './wheel.js';
 
 const DAY = 86400000;
 export const PLANS = ['weekly', 'monthly', 'yearly'];
@@ -41,17 +43,24 @@ export const hasAssistantAccess = (sub, now = Date.now()) => {
   return a !== null && ASSISTANT_PLANS.includes(a.plan);
 };
 
-/** Kullanıcının hakları (saf): { subscribed, plan, until, assistant, trialUsed, trialLeft }. */
-export function entitlementOf({ subscription = null, trialUsed = 0 } = {}, now = Date.now()) {
+/**
+ * Kullanıcının hakları (saf): { subscribed, plan, until, assistant, assistantVia, trialUsed, trialLeft, wheel }.
+ * assistant: aylık/yıllık abonelik ya da çarktan kazanılan 1 günlük AI Asistan (assistantVia: 'plan' | 'wheel').
+ */
+export function entitlementOf({ subscription = null, trialUsed = 0, wheel = null } = {}, now = Date.now()) {
   const a = activeSubscription(subscription, now);
   const used = Math.max(0, Number(trialUsed) || 0);
+  const w = wheelStatus(wheel, now);
+  const planAssistant = a !== null && ASSISTANT_PLANS.includes(a.plan);
   return {
     subscribed: a !== null,
     plan: a?.plan ?? null,
     until: a?.until ?? null,
-    assistant: a !== null && ASSISTANT_PLANS.includes(a.plan),
+    assistant: planAssistant || w.assistantUntil !== null,
+    assistantVia: planAssistant ? 'plan' : w.assistantUntil !== null ? 'wheel' : null,
     trialUsed: used,
     trialLeft: a ? 0 : Math.max(0, TRIAL_MATCHES - used),
+    wheel: w,
   };
 }
 
