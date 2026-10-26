@@ -1,11 +1,12 @@
 // vSport Cloud Functions (Firebase Functions v2, Node 22).
 //
-//   unlockContent  { league, eventId, kickoff, type: 'ai'|'odds'|'sim' }  token düşer, içerik döner
-//   getContent     { league, eventId, kickoff, type }                     açılmış içerik (maç bittiyse ücretsiz)
-//   getReview      { league, eventId, kickoff }                           biten maçta tahmin ↔ sonuç karşılaştırması
-//   unlockCoupon   { couponId }                                           editör kuponu: editörün belirlediği fiyat düşer
+//   unlockContent  { league, eventId, kickoff, type: 'ai'|'sim' }   abone ya da deneme hakkı: içerik döner
+//   getContent     { league, eventId, kickoff, type }               açılmış içerik (maç bittiyse ücretsiz)
+//   getReview      { league, eventId, kickoff }                     biten maçta tahmin ↔ sonuç karşılaştırması
+//   unlockCoupon   { couponId }                                     editör kuponu (abonelere)
 //
-// Token bakiyesi yalnızca burada (Admin SDK) değişir; firestore.rules istemcinin değiştirmesini engeller.
+// Asıl sunucu server.js'tir (Render); bu dosya Cloud Functions ile çalıştırmak isteyenler içindir.
+// Abonelik ve deneme sayacı yalnızca sunucuda (Admin SDK) değişir; firestore.rules istemcinin değiştirmesini engeller.
 
 import { initializeApp } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
@@ -34,7 +35,8 @@ function wrap(fn) {
     try {
       return await fn({ ...(request.data ?? {}), uid: request.auth?.uid ?? null });
     } catch (e) {
-      if (e instanceof AppError) throw new HttpsError(e.code, e.message);
+      // 'subscription-required' Firebase'in hata kodlarında yok: izin hatası olarak, ayrıntıda gerçek kodla döner
+      if (e instanceof AppError) throw new HttpsError(e.code === 'subscription-required' ? 'permission-denied' : e.code, e.message, { reason: e.code });
       console.error(e);
       throw new HttpsError('internal', 'İşlem tamamlanamadı, lütfen tekrar deneyin.');
     }

@@ -6,7 +6,8 @@
 // Dönemler: "w2026-43" (ISO hafta, Türkiye saatiyle), "m2026-10" (ay), "all" (tüm zamanlar).
 
 export const POINTS = { exact: 5, difference: 3, outcome: 2 };
-export const WEEKLY_PRIZES = [500, 250, 100];
+/** Haftanın ilk kaç kişisi kürsüye çıkar (rozet ve XP; jeton ödülü kaldırıldı). */
+export const PODIUM_SIZE = 3;
 const TR_OFFSET = 3 * 3600e3; // Türkiye UTC+3 (yaz saati yok)
 
 /** Tahmin puanı: tam skor 5, doğru gol farkı (beraberlik hariç) 3, doğru sonuç 2, diğer 0. */
@@ -101,29 +102,21 @@ export function createLeagueStore(db, FieldValue, progress = null) {
       return scored;
     },
 
-    /** Geçen haftanın ilk üçüne token ödülü (bir kez). */
-    async awardWeek(weekId, prizes = WEEKLY_PRIZES) {
+    /** Geçen haftanın ilk üçü kürsüye çıkar: rozet ve XP (bir kez). Jeton ödülü yoktur. */
+    async awardWeek(weekId, podium = PODIUM_SIZE) {
       const marker = db.doc(`leaderboards/${weekId}`);
       // Tek alanlı sıralama (ek dizin gerekmez); eşitlikte tam skor sayısı belirler.
-      const q = await db.collection(`leaderboards/${weekId}/entries`).orderBy('points', 'desc').limit(prizes.length + 10).get();
+      const q = await db.collection(`leaderboards/${weekId}/entries`).orderBy('points', 'desc').limit(podium + 10).get();
       const top = q.docs
         .sort((a, b) => (b.get('points') ?? 0) - (a.get('points') ?? 0) || (b.get('exact') ?? 0) - (a.get('exact') ?? 0))
-        .slice(0, prizes.length);
+        .slice(0, podium);
       return db.runTransaction(async (tx) => {
         const m = await tx.get(marker);
         if (m.exists && m.data().awarded) return [];
         const winners = [];
         top.forEach((d, i) => {
           if ((d.data().points ?? 0) <= 0) return;
-          const amount = prizes[i];
-          tx.update(db.doc(`users/${d.id}`), { tokens: FieldValue.increment(amount) });
-          tx.create(db.collection(`users/${d.id}/token_ledger`).doc(), {
-            delta: amount,
-            reason: 'league_prize',
-            key: `${weekId}_${i + 1}`,
-            at: FieldValue.serverTimestamp(),
-          });
-          winners.push({ uid: d.id, rank: i + 1, amount, username: d.data().username ?? null, points: d.data().points });
+          winners.push({ uid: d.id, rank: i + 1, username: d.data().username ?? null, points: d.data().points });
         });
         tx.set(marker, { awarded: true, winners, awardedAt: FieldValue.serverTimestamp() }, { merge: true });
         return winners;

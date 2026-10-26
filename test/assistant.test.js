@@ -11,7 +11,7 @@ const DAY = 86400000;
 const monthly = { plan: 'monthly', until: NOW + 20 * DAY };
 
 function make({ subscription = monthly, now = NOW, espn = makeEspn(), limit = 15 } = {}) {
-  const store = makeStore({ tokens: 0, subscription });
+  const store = makeStore({ subscription });
   const paid = new PaidContentService({ leagues: ['demo.1'], store, espn, now: () => now });
   return { store, paid, assistant: new AssistantService({ paid, store, now: () => now, dailyLimit: limit }) };
 }
@@ -33,9 +33,12 @@ const liveSummary = (minute, home, away, state = 'in', name = 'STATUS_FIRST_HALF
 test('abonelik yoksa, haftalıksa ya da süresi dolmuşsa reddedilir; hak harcanmaz', async () => {
   for (const subscription of [null, { plan: 'weekly', until: NOW + DAY }, { plan: 'monthly', until: NOW - 1 }]) {
     const { assistant, store } = make({ subscription });
-    await assert.rejects(assistant.analyze({ uid: 'u1', ...fixture }), (e) => e.code === 'permission-denied');
+    await assert.rejects(assistant.analyze({ uid: 'u1', ...fixture }), (e) => e.code === 'subscription-required');
     assert.equal(store.usage.size, 0);
   }
+  // Haftalık abone: planı yükseltmesi söylenir
+  const weekly = make({ subscription: { plan: 'weekly', until: NOW + DAY } });
+  await assert.rejects(weekly.assistant.analyze({ uid: 'u1', ...fixture }), (e) => /aylık ve yıllık planlarda/.test(e.message));
   const { assistant } = make();
   await assert.rejects(assistant.analyze({ uid: null, ...fixture }), (e) => e.code === 'permission-denied');
 });
@@ -142,6 +145,23 @@ test('maç sürerken: canlı sahne, güncel olasılıklar ve maç öncesi İY ba
   assert.ok(!titles.includes('İlk yarı skoru') && !titles.includes('İY/MS sürprizleri'));
   assert.ok(titles.includes('Korner beklentisi'));
   assert.match(r.answer, /1-0/);
+  // Canlıda tek "tahmini final" yerine: skorun böyle bitme ihtimali, en az bir gol daha ve en olası finaller
+  assert.ok(first.chips.some(([k]) => k === 'Skor böyle biter'));
+  const ending = r.scenes.find((s) => s.title === 'Maç nasıl biter?');
+  assert.ok(ending, 'canlı skor sahnesi');
+  assert.match(ending.kicker, /Skor böyle biter %\d+ · En az bir gol daha %\d+/);
+  assert.ok(ending.chips.some(([k]) => k === 'Sıradaki gol'));
+  assert.ok(!titles.includes('Skor beklentisi'));
+});
+
+test('canlı takip soruları: skor sorusu canlı modelden yanıtlanır', async () => {
+  const now = FUTURE + 63 * 60000;
+  const espn = makeEspn();
+  espn.getSummary = async () => liveSummary(63, 1, 0);
+  const { assistant } = make({ now, espn });
+  const r = await assistant.analyze({ uid: 'u1', ...fixture, question: 'skor kaç biter?' });
+  assert.equal(r.followUp, true);
+  assert.match(r.answer, /Skorun böyle bitme ihtimali %\d+, en az bir gol daha %\d+\. En olası finaller: 1-0/);
 });
 
 test('canlı veri alınamazsa maç öncesi görünüm sunulur', async () => {
@@ -177,7 +197,7 @@ test('sahne üretici tek başına: odak başlığı öne alır, eksik veriyle de
 });
 
 test('deneme modu (requireSubscription: false): abonelik aranmaz; giriş ve günlük sınır yine geçerli', async () => {
-  const store = makeStore({ tokens: 0, subscription: null });
+  const store = makeStore({ subscription: null });
   const paid = new PaidContentService({ leagues: ['demo.1'], store, espn: makeEspn(), now: () => NOW });
   const assistant = new AssistantService({ paid, store, now: () => NOW, dailyLimit: 1, requireSubscription: false });
   const r = await assistant.analyze({ uid: 'u1', ...fixture });

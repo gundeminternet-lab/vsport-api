@@ -77,11 +77,8 @@ export function createProgressStore(db, FieldValue, now = () => Date.now(), rewa
         if (!c) return { already: true, streak: Number(prev.streak ?? 0), earned: [] };
         const { stats, earned } = applyProgress(prev, c.delta);
         stats.lastDay = c.lastDay;
-        // Günlük token ödülü aynı işlemde (bir günde bir kez)
-        const userSnap = rewards ? await tx.get(db.doc(`users/${uid}`)) : null;
         tx.set(ref(uid), { ...stats, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
-        const tokens = rewards && userSnap?.exists ? rewards.grantDaily(tx, uid, c.streak, c.lastDay) : 0;
-        return { already: false, streak: c.streak, xp: c.delta.xp, tokens, earned };
+        return { already: false, streak: c.streak, xp: c.delta.xp, earned };
       });
     },
   };

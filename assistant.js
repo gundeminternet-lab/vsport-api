@@ -1,4 +1,4 @@
-// AI Asistan (aylık ve yıllık abonelere özel): kullanıcı bir maç sorar; asistan istatistiğe ve maçın önemine göre
+// AI Asistan (aylık ve yıllık abonelere özel; haftalık planda yok): kullanıcı bir maç sorar; asistan istatistiğe ve maçın önemine göre
 // analiz yapar ve bunu sahne sahne bir "video" (uygulamadaki sahne oynatıcısı) olarak sunar.
 //
 // Asistan yeni bir model kurmaz: maçın AI analizi (content.model), Özel Yorum başlıkları (special.js) ve maç önemi
@@ -9,7 +9,7 @@ import { AppError, matchKey } from './logic.js';
 import { phraser, streakOf } from './content.js';
 import { importanceOf } from './importance.js';
 import { SPECIAL_TOPICS } from './special.js';
-import { ASSISTANT_DAILY_LIMIT, dayKeyTr, hasAssistantAccess } from './subscription.js';
+import { ASSISTANT_DAILY_LIMIT, dayKeyTr } from './subscription.js';
 import { intentOf, followUpAnswer, reviewOf, swingText, suggestionsFor } from './chat.js';
 import { Narrator } from './narrator.js';
 import { liveForecast } from './engine/live_model.js';
@@ -373,9 +373,11 @@ const spokenScore = (s) => {
 // ---------------------------------------------------------------------------------------------------
 export class AssistantService {
   /** requireSubscription: false ise abonelik aranmaz (deneme dönemi); günlük sınır yine uygulanır. */
-  constructor({ paid, store, now = () => Date.now(), dailyLimit = ASSISTANT_DAILY_LIMIT, narrator = new Narrator(), requireSubscription = true }) {
+  constructor({ paid, store, now = () => Date.now(), dailyLimit = ASSISTANT_DAILY_LIMIT, narrator = new Narrator(), requireSubscription = true, access = null }) {
     this.requireSubscription = requireSubscription;
     this.paid = paid;
+    // Erişim (abonelik, Google Play yenilemesi): varsayılan olarak ücretli içerik servisiyle aynı denetim
+    this.access = access ?? paid.access;
     this.store = store;
     this.narrator = narrator;
     this.now = now;
@@ -384,8 +386,14 @@ export class AssistantService {
 
   async analyze({ uid, league, eventId, kickoff, question = '' }) {
     if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
-    if (this.requireSubscription && !hasAssistantAccess(await this.store.getSubscription(uid), this.now())) {
-      throw new AppError('permission-denied', 'AI Asistan, aylık ve yıllık abonelere özel.');
+    if (this.requireSubscription) {
+      const ent = await this.access.entitlement(uid);
+      if (!ent.assistant) {
+        throw new AppError(
+          'subscription-required',
+          ent.subscribed ? 'AI Asistan aylık ve yıllık planlarda. Planını yükselterek kullanabilirsin.' : 'AI Asistan aylık ve yıllık abonelere özel.',
+        );
+      }
     }
     this.paid.validate({ league, eventId, kickoff }, { needType: false });
     if (typeof question !== 'string' || question.length > 200) throw new AppError('invalid-argument', 'Soru en fazla 200 karakter olabilir.');

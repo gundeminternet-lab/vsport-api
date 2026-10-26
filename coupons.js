@@ -1,19 +1,20 @@
-// Editör kuponları: kupon herkese açık listede görünür (başlık, editör, maçlar, fiyat), seçimler ve oranlar
-// coupons/{id}/private/picks belgesinde gizlidir. Kilidi açan kullanıcı o belgeyi Firestore kuralları sayesinde okuyabilir.
+// Editör kuponları: kupon herkese açık listede görünür (başlık, editör, maçlar), seçimler ve oranlar
+// coupons/{id}/private/picks belgesinde gizlidir. Aboneler (her plan) açar; açılınca kilit kaydı yazılır ve kullanıcı
+// o belgeyi Firestore kuralları sayesinde okuyabilir. Jeton/fiyat yoktur.
 //
-// store arayüzü (index.js): getCoupon(id), hasUnlockId(uid, unlockId), purchase({ uid, unlockId, price, record })
+// store arayüzü: getCoupon(id), hasUnlockId(uid, unlockId), recordUnlock({ uid, unlockId, record })
 
-import { AppError } from './logic.js';
-
-export const MAX_COUPON_PRICE = 1000;
+import { AppError } from './errors.js';
+import { AccessService } from './subscription.js';
 
 export class CouponService {
-  constructor({ store, now = () => Date.now() }) {
+  constructor({ store, now = () => Date.now(), access = null }) {
     this.store = store;
     this.now = now;
+    this.access = access ?? new AccessService({ store, now });
   }
 
-  async unlock({ uid, couponId, price: expectedPrice }) {
+  async unlock({ uid, couponId }) {
     if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
     if (typeof couponId !== 'string' || !/^[A-Za-z0-9_-]{1,40}$/.test(couponId)) {
       throw new AppError('invalid-argument', 'Geçersiz kupon.');
@@ -22,29 +23,15 @@ export class CouponService {
     if (!c || c.deleted === true) throw new AppError('not-found', 'Kupon bulunamadı.');
 
     const unlockId = `coupon_${couponId}`;
-    // Editör kendi kuponunu ücretsiz görür (kurallar da izin verir).
-    if (c.editorUid === uid) return { couponId, charged: false, balance: null };
-
-    const already = await this.store.hasUnlockId(uid, unlockId);
-    // Kurallarla doğrulanan Firestore zaman damgası esas alınır (metin alanı yalnızca yedek).
-    const first = typeof c.firstKickoffAt?.toMillis === 'function' ? c.firstKickoffAt.toMillis() : Date.parse(c.firstKickoff);
-    if (!already && (!Number.isFinite(first) || first <= this.now())) {
-      throw new AppError('failed-precondition', 'Kuponun ilk maçı başladı; artık satın alınamaz.');
-    }
-    const price = Number.isInteger(c.price) && c.price >= 0 && c.price <= MAX_COUPON_PRICE ? c.price : null;
-    if (price === null) throw new AppError('failed-precondition', 'Kupon fiyatı geçersiz.');
-
-    if (already) return { couponId, charged: false, balance: null };
-    // Kullanıcı onayladıktan sonra editör fiyatı değiştirdiyse ücret alınmaz.
-    if (expectedPrice !== undefined && expectedPrice !== price) {
-      throw new AppError('failed-precondition', `Kupon fiyatı değişti (şimdi ${price} token). Lütfen tekrar deneyin.`);
-    }
-    const { charged, balance } = await this.store.purchase({
+    // Editör kendi kuponunu her zaman görür (kurallar da izin verir).
+    if (c.editorUid === uid) return { couponId, opened: true };
+    if (await this.store.hasUnlockId(uid, unlockId)) return { couponId, opened: true };
+    await this.access.requireSubscriber(uid, 'Editör seçimleri abonelere özel.');
+    await this.store.recordUnlock({
       uid,
       unlockId,
-      price,
-      record: { type: 'coupon', couponId, title: c.title ?? 'Kupon', editorName: c.editorName ?? '', kickoff: c.firstKickoff },
+      record: { type: 'coupon', couponId, title: c.title ?? 'Kupon', editorName: c.editorName ?? '', kickoff: c.firstKickoff, via: 'subscription' },
     });
-    return { couponId, charged, balance, price };
+    return { couponId, opened: true };
   }
 }

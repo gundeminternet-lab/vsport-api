@@ -1,22 +1,14 @@
-// Özel Yorum: model doğruluğu, anlatım dili ve satın alma akışı.
+// Özel Yorum: model doğruluğu, anlatım dili ve erişim (abonelik ya da maçın AI paketi).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { PaidContentService } from '../logic.js';
 import { markets } from '../content.js';
-import { buildSpecial, halfModel, SPECIAL_TOPICS, SPECIAL_PRICE, SPECIAL_BUNDLE_PRICE, specialPrice, spokenScore } from '../special.js';
-import { NOW, FUTURE, makeEspn, makeStore, fixture, finished } from './helpers.js';
+import { buildSpecial, halfModel, SPECIAL_TOPICS, spokenScore } from '../special.js';
+import { NOW, FUTURE, makeEspn, makeStore, subscribed, fixture, finished } from './helpers.js';
 
 const model = { lambdaHome: 1.8, lambdaAway: 1.2, sigma: 0.15 };
 const all = () => buildSpecial(SPECIAL_TOPICS, { homeName: 'Galatasaray', awayName: 'Fenerbahçe', model, seed: 'tur_1_1' });
-
-test('fiyat: tek başlık 40, dörtlü paket 120', () => {
-  assert.equal(specialPrice(1), SPECIAL_PRICE);
-  assert.equal(specialPrice(2), 80);
-  assert.equal(specialPrice(3), SPECIAL_BUNDLE_PRICE);
-  assert.equal(specialPrice(4), SPECIAL_BUNDLE_PRICE);
-  assert.equal(specialPrice(0), 0);
-});
 
 test('İY/MS dokuzlusu: toplam 1, satır ve sütun toplamları ana modelle aynı', () => {
   const half = halfModel(model);
@@ -92,68 +84,55 @@ test('konuşma biçimi skor okur', () => {
 // ---------------------------------------------------------------------------------------------------
 const svc = (store, opts = {}) => new PaidContentService({ leagues: ['demo.1'], store, espn: makeEspn(), now: () => NOW, ...opts });
 
-test('tek başlık 40 token; aynı başlık tekrar ücretsiz; içerik bir kez üretilir', async () => {
-  const store = makeStore(300);
+test('abone: başlıklar ücretsiz açılır; aynı başlık tekrar üretilmez, eksik olan eklenir', async () => {
+  const store = makeStore({ subscription: subscribed('weekly') });
   const s = svc(store);
   const r = await s.unlockSpecial({ uid: 'u1', ...fixture, topics: ['corners'] });
-  assert.equal(r.charged, true);
-  assert.equal(r.price, 40);
-  assert.equal(store.users.u1.tokens, 260);
   assert.deepEqual(r.topics, ['corners']);
   assert.ok(r.data.corners.headline);
+  assert.equal(r.price, undefined, 'ücret yok');
 
-  const again = await s.unlockSpecial({ uid: 'u1', ...fixture, topics: ['corners'] });
-  assert.equal(again.charged, false);
-  assert.equal(store.users.u1.tokens, 260);
+  await s.unlockSpecial({ uid: 'u1', ...fixture, topics: ['corners'] });
   assert.equal(store.specialSaves, 1);
 
-  // İkinci başlık: yalnızca eksik olan için ücret
   const second = await s.unlockSpecial({ uid: 'u1', ...fixture, topics: ['corners', 'btts'] });
-  assert.equal(second.price, 40);
-  assert.equal(store.users.u1.tokens, 220);
   assert.equal(store.specialSaves, 2, 'yalnızca eksik başlık üretilip eklendi');
   assert.deepEqual(Object.keys(second.data), ['corners', 'btts']);
   assert.equal(second.data.corners.headline, r.data.corners.headline, 'aynı rakamlar');
 });
 
-test('AI paketi Özel Yorumları kapsar: ücret alınmaz; eski kayıtlı içerik modelsiz olsa da çalışır', async () => {
-  const store = makeStore(300);
+test('deneme hakkıyla açılan AI paketi Özel Yorumları kapsar; eski kayıtlı içerik modelsiz olsa da çalışır', async () => {
+  const store = makeStore();
   const s = svc(store);
-  // Model alanı olmayan eski içerik taklidi: önce normal üretilir, sonra model silinir
   await s.unlock({ uid: 'u1', ...fixture, type: 'ai' });
   const key = [...store.contents.keys()][0];
   delete store.contents.get(key).model;
-  const tokensBefore = store.users.u1.tokens;
   const r = await s.unlockSpecial({ uid: 'u1', ...fixture, topics: 'all' });
-  assert.equal(r.price, 0);
-  assert.equal(store.users.u1.tokens, tokensBefore);
   assert.deepEqual(Object.keys(r.data), SPECIAL_TOPICS);
+  assert.equal(store.users.u1.trialUsed, 1, 'Özel Yorumlar ayrı hak harcamaz');
 });
 
-test('yetersiz bakiye, başlamış maç, geçersiz başlık ve girişsiz kullanıcı reddedilir', async () => {
-  const poor = makeStore(100);
-  await assert.rejects(svc(poor).unlockSpecial({ uid: 'u1', ...fixture, topics: 'all' }), (e) => e.code === 'failed-precondition');
-  assert.equal(poor.users.u1.tokens, 100);
-  assert.equal(poor.specialSaves, 0, 'bakiyesi yetmeyen içerik üretimini tetikleyemez');
+test('abone değil ve paket açık değilse reddedilir; geçersiz başlık ve girişsiz kullanıcı reddedilir', async () => {
+  const free = makeStore();
+  await assert.rejects(svc(free).unlockSpecial({ uid: 'u1', ...fixture, topics: 'all' }), (e) => e.code === 'subscription-required');
+  assert.equal(free.specialSaves, 0, 'yetkisiz kullanıcı içerik üretimini tetikleyemez');
 
-  const store = makeStore(500);
-  await assert.rejects(svc(store, { now: () => FUTURE + 60000 }).unlockSpecial({ uid: 'u1', ...fixture, topics: ['corners'] }), (e) => e.code === 'failed-precondition');
+  const store = makeStore({ subscription: subscribed() });
   await assert.rejects(svc(store).unlockSpecial({ uid: 'u1', ...fixture, topics: ['x'] }), (e) => e.code === 'invalid-argument');
   await assert.rejects(svc(store).unlockSpecial({ uid: 'u1', ...fixture, topics: [] }), (e) => e.code === 'invalid-argument');
   await assert.rejects(svc(store).unlockSpecial({ uid: null, ...fixture, topics: ['corners'] }), (e) => e.code === 'permission-denied');
-  assert.equal(store.users.u1.tokens, 500);
+  // Abone maç başladıktan sonra da açabilir (maç öncesi veriyle)
+  const late = await svc(store, { now: () => FUTURE + 60000 }).unlockSpecial({ uid: 'u1', ...fixture, topics: ['corners'] });
+  assert.ok(late.data.corners);
 });
 
-test('açılan başlıklar getSpecial ile gelir; kilitli olanlar gelmez; biten maçta hepsi ücretsiz', async () => {
-  const store = makeStore(300);
-  const s = svc(store);
-  assert.deepEqual((await s.getSpecial({ uid: 'u1', ...fixture })).topics, []);
-  await s.unlockSpecial({ uid: 'u1', ...fixture, topics: ['htft'] });
-  const got = await s.getSpecial({ uid: 'u1', ...fixture });
-  assert.deepEqual(got.topics, ['htft']);
-  assert.deepEqual(Object.keys(got.data), ['htft']);
-
-  const after = await s.getSpecial({ uid: 'u1', ...finished });
+test('getSpecial: abone her başlığı alır, abone olmayan almaz; biten maçta hepsi ücretsiz', async () => {
+  const free = makeStore();
+  assert.deepEqual((await svc(free).getSpecial({ uid: 'u1', ...fixture })).topics, []);
+  const after = await svc(free).getSpecial({ uid: 'u1', ...finished });
   assert.deepEqual(after.topics, SPECIAL_TOPICS, 'biten maçta ücretsiz');
-  assert.equal(store.users.u1.tokens, 260);
+
+  const sub = makeStore({ subscription: subscribed() });
+  const got = await svc(sub).getSpecial({ uid: 'u1', ...fixture });
+  assert.deepEqual(got.topics, SPECIAL_TOPICS);
 });

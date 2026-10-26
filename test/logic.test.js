@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 
 import { DemoEspn } from '../engine/demo.js';
 import { PaidContentService, AppError, matchKey, LEAGUES } from '../logic.js';
-import { PRICES, VALUES_PER_FRAME, markets, buildReview } from '../content.js';
+import { VALUES_PER_FRAME, markets, buildReview } from '../content.js';
+import { makeStore, subscribed } from './helpers.js';
+import { TRIAL_MATCHES } from '../subscription.js';
 
 const NOW = Date.UTC(2026, 9, 17, 12, 0);
 const FUTURE = NOW + 2 * 86400000; // 19 Ekim 12:00
@@ -25,37 +27,6 @@ function makeEspn() {
   return espn;
 }
 
-function makeStore(tokens = 300) {
-  const s = {
-    users: { u1: { tokens } },
-    unlocks: new Set(),
-    contents: new Map(),
-    saves: 0,
-    ledger: [],
-    async getContent(k) { return s.contents.get(k) ?? null; },
-    async saveContent(k, c) {
-      s.saves++;
-      if (!s.contents.has(k)) s.contents.set(k, JSON.parse(JSON.stringify(c)));
-      return s.contents.get(k);
-    },
-    async getEditorComment() { return null; },
-    async getTokens(uid) { return s.users[uid]?.tokens ?? 0; },
-    async hasUnlock(uid, k, t) { return s.unlocks.has(`${uid}/${k}_${t}`); },
-    async hasUnlockId(uid, id) { return s.unlocks.has(`${uid}/${id}`); },
-    async getCoupon(id) { return s.coupons?.[id] ?? null; },
-    async purchase({ uid, unlockId, price }) {
-      const id = `${uid}/${unlockId}`;
-      if (s.unlocks.has(id)) return { charged: false, balance: s.users[uid].tokens };
-      if (s.users[uid].tokens < price) throw new AppError('failed-precondition', 'Yetersiz token');
-      s.users[uid].tokens -= price;
-      s.unlocks.add(id);
-      s.ledger.push(-price);
-      return { charged: price > 0, balance: s.users[uid].tokens };
-    },
-  };
-  return s;
-}
-
 const fixture = { league: 'demo.1', eventId: '9001', kickoff: new Date(FUTURE).toISOString() };
 const finished = { league: 'demo.1', eventId: '9002', kickoff: new Date(PAST).toISOString() };
 
@@ -63,40 +34,63 @@ test('anahtar uygulamadaki MatchItem.key ile aynı', () => {
   assert.equal(matchKey('tur.1', '401888391'), 'tur_1_401888391');
 });
 
-test('kilit açma: doğru fiyat düşer, ikinci kez ücret alınmaz, içerik bir kez üretilir', async () => {
-  const store = makeStore(300);
+test('abone: her içerik ücretsiz açılır, açılanlar geçmişe yazılır, içerik maç başına bir kez üretilir', async () => {
+  const store = makeStore({ subscription: subscribed('weekly') });
   const svc = new PaidContentService({ leagues: ['demo.1'], store, espn: makeEspn(), now: () => NOW });
 
   const sim = await svc.unlock({ uid: 'u1', ...fixture, type: 'sim' });
-  assert.equal(sim.charged, true);
-  assert.equal(store.users.u1.tokens, 300 - PRICES.sim);
+  assert.equal(sim.via, 'subscription');
   assert.ok(sim.data.positions.length > 1000);
 
-  const again = await svc.unlock({ uid: 'u1', ...fixture, type: 'sim' });
-  assert.equal(again.charged, false);
-  assert.equal(store.users.u1.tokens, 200, 'tekrar açmak ücretsiz');
-
   const ai = await svc.unlock({ uid: 'u1', ...fixture, type: 'ai' });
-  assert.equal(store.users.u1.tokens, 200 - PRICES.ai);
+  assert.equal(ai.via, 'subscription');
   assert.ok(['1', 'X', '2'].includes(ai.data.pick));
   assert.ok(ai.data.sections.length >= 5);
   assert.equal(store.saves, 1, 'içerik maç başına bir kez üretilir');
+  assert.equal(store.records.get('u1/demo_1_9001_ai').via, 'subscription');
+  assert.equal(store.users.u1.trialUsed, 0, 'abone deneme hakkı harcamaz');
 });
 
-test('yetersiz bakiye: hata, ücret alınmaz', async () => {
-  const store = makeStore(40);
+test('abone değil: deneme hakkıyla AI paketi açılır (simülasyon dahil); aynı maç tekrar hak harcamaz', async () => {
+  const store = makeStore();
   const svc = new PaidContentService({ leagues: ['demo.1'], store, espn: makeEspn(), now: () => NOW });
-  await assert.rejects(svc.unlock({ uid: 'u1', ...fixture, type: 'odds' }), (e) => e.code === 'failed-precondition');
-  assert.equal(store.users.u1.tokens, 40);
-  assert.equal(store.saves, 0, 'bakiyesi yetmeyen kullanıcı içerik üretimini tetikleyemez');
+  // Deneme yalnızca AI paketiyle başlar
+  await assert.rejects(svc.unlock({ uid: 'u1', ...fixture, type: 'sim' }), (e) => e.code === 'subscription-required');
+  const ai = await svc.unlock({ uid: 'u1', ...fixture, type: 'ai' });
+  assert.equal(ai.via, 'trial');
+  assert.equal(ai.trialLeft, TRIAL_MATCHES - 1);
+  assert.equal(store.users.u1.trialUsed, 1);
+  const again = await svc.unlock({ uid: 'u1', ...fixture, type: 'ai' });
+  assert.equal(again.via, 'unlock');
+  assert.equal(store.users.u1.trialUsed, 1, 'aynı maç ikinci kez hak harcamaz');
+  const sim = await svc.unlock({ uid: 'u1', ...fixture, type: 'sim' });
+  assert.equal(sim.via, 'unlock', 'AI paketi simülasyonu kapsar');
+  const got = await svc.get({ uid: 'u1', ...fixture, type: 'sim' });
+  assert.ok(got.data.finalScore);
 });
 
-test('maç başladıktan sonra satın alınamaz; giriş yapmadan da', async () => {
-  const store = makeStore(500);
-  const svc = new PaidContentService({ leagues: ['demo.1'], store, espn: makeEspn(), now: () => FUTURE + 60000 });
+test('deneme hakları bitince abonelik gerekir; içerik üretimi tetiklenmez', async () => {
+  const store = makeStore({ trialUsed: TRIAL_MATCHES });
+  const svc = new PaidContentService({ leagues: ['demo.1'], store, espn: makeEspn(), now: () => NOW });
+  await assert.rejects(svc.unlock({ uid: 'u1', ...fixture, type: 'ai' }), (e) => e.code === 'subscription-required');
+  assert.equal(store.saves, 0);
+  // Süresi dolmuş abonelik de abonelik sayılmaz
+  const expired = makeStore({ trialUsed: TRIAL_MATCHES, subscription: { plan: 'yearly', until: NOW - 1 } });
+  const svc2 = new PaidContentService({ leagues: ['demo.1'], store: expired, espn: makeEspn(), now: () => NOW });
+  await assert.rejects(svc2.unlock({ uid: 'u1', ...fixture, type: 'ai' }), (e) => e.code === 'subscription-required');
+});
+
+test('maç başladıktan sonra deneme kullanılamaz, abone açabilir; giriş yapmadan hiçbiri', async () => {
+  const later = () => FUTURE + 60000;
+  const free = makeStore();
+  const svc = new PaidContentService({ leagues: ['demo.1'], store: free, espn: makeEspn(), now: later });
   await assert.rejects(svc.unlock({ uid: 'u1', ...fixture, type: 'ai' }), (e) => e.code === 'failed-precondition');
+  assert.equal(free.users.u1.trialUsed, 0);
   await assert.rejects(svc.unlock({ uid: null, ...fixture, type: 'ai' }), (e) => e.code === 'permission-denied');
-  assert.equal(store.users.u1.tokens, 500);
+  const sub = makeStore({ subscription: subscribed('monthly', FUTURE) });
+  const svc2 = new PaidContentService({ leagues: ['demo.1'], store: sub, espn: makeEspn(), now: later });
+  const r = await svc2.unlock({ uid: 'u1', ...fixture, type: 'ai' });
+  assert.equal(r.via, 'subscription');
 });
 
 test('geçersiz girdiler reddedilir, bilinmeyen maç bulunamaz', async () => {
@@ -107,9 +101,9 @@ test('geçersiz girdiler reddedilir, bilinmeyen maç bulunamaz', async () => {
   await assert.rejects(svc.unlock({ uid: 'u1', ...fixture, eventId: '1234', type: 'ai' }), (e) => e.code === 'not-found');
 });
 
-test('kilitli içerik ödemeden alınamaz; biten maçta ücretsiz', async () => {
+test('kilitli içerik abonelik olmadan alınamaz; biten maçta ücretsiz', async () => {
   const svc = new PaidContentService({ leagues: ['demo.1'], store: makeStore(), espn: makeEspn(), now: () => NOW });
-  await assert.rejects(svc.get({ uid: 'u1', ...fixture, type: 'sim' }), (e) => e.code === 'permission-denied');
+  await assert.rejects(svc.get({ uid: 'u1', ...fixture, type: 'sim' }), (e) => e.code === 'subscription-required');
   const after = await svc.get({ uid: 'u1', ...finished, type: 'ai' });
   assert.ok(after.data.sections.length > 0);
 });
@@ -126,7 +120,7 @@ test('biten maç karşılaştırması: tahmin maç öncesi veriyle üretilir', a
 });
 
 test('simülasyon paketi: kare sayısı, boyut, değer aralığı; skor tabelası son skorla uyumlu', async () => {
-  const svc = new PaidContentService({ leagues: ['demo.1'], store: makeStore(1000), espn: makeEspn(), now: () => NOW });
+  const svc = new PaidContentService({ leagues: ['demo.1'], store: makeStore({ subscription: subscribed() }), espn: makeEspn(), now: () => NOW });
   const { data } = await svc.unlock({ uid: 'u1', ...fixture, type: 'sim' });
   const bytes = Buffer.from(data.positions, 'base64');
   assert.equal(data.frames, 601);
@@ -147,24 +141,10 @@ test('bahis olasılıkları tutarlı: 1+X+2 = 1, çifte şanslar doğru', async 
   assert.ok(p.iyX > p.msX, 'ilk yarıda beraberlik daha olası');
   assert.ok(topScores[0].p >= topScores[1].p);
 
-  // Bahis ihtimalleri artık satılmaz: yeni kilit açılamaz, ücret alınmaz.
-  const store = makeStore(1000);
+  // Bahis ihtimalleri artık sunulmuyor: aboneye de açılmaz.
+  const store = makeStore({ subscription: subscribed() });
   const svc = new PaidContentService({ leagues: ['demo.1'], store, espn: makeEspn(), now: () => NOW });
   await assert.rejects(svc.unlock({ uid: 'u1', ...fixture, type: 'odds' }), (e) => e.code === 'failed-precondition');
-  assert.equal(store.users.u1.tokens, 1000);
-});
-
-test('AI paketi: tek ücretle simülasyonu da açar', async () => {
-  const store = makeStore(1000);
-  const svc = new PaidContentService({ leagues: ['demo.1'], store, espn: makeEspn(), now: () => NOW });
-  const ai = await svc.unlock({ uid: 'u1', ...fixture, type: 'ai' });
-  assert.equal(ai.price, PRICES.ai);
-  assert.equal(store.users.u1.tokens, 1000 - PRICES.ai);
-  const sim = await svc.unlock({ uid: 'u1', ...fixture, type: 'sim' });
-  assert.equal(sim.charged, false);
-  assert.equal(store.users.u1.tokens, 1000 - PRICES.ai);
-  const got = await svc.get({ uid: 'u1', ...fixture, type: 'sim' });
-  assert.ok(got.data.finalScore);
 });
 
 test('karşılaştırma kuralları', () => {

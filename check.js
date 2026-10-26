@@ -1,12 +1,11 @@
 // Kupon kontrol aracı: kullanıcının kendi kuponundaki her tahmin için modelin olasılığı, adil oran, değer
-// (oran × olasılık) ve kupon puanı. Ücretli (CHECK_PRICE token); hesap sunucuda, maç başına üretilmiş
+// (oran × olasılık) ve kupon puanı. Abonelere özel (her plan); hesap sunucuda, maç başına üretilmiş
 // ve saklanmış analizden (beklenen goller) yapılır.
 
 import { scoreMatrix } from './engine/analysis.js';
 import { AppError, matchKey } from './logic.js';
 import { Narrator } from './narrator.js';
 
-export const CHECK_PRICE = 20;
 export const CHECK_MARKETS = [
   'MS 1', 'MS X', 'MS 2',
   'Çifte şans 1-X', 'Çifte şans 1-2', 'Çifte şans X-2',
@@ -87,7 +86,7 @@ export function summarize(items) {
 
 export class CouponCheckService {
   /**
-   * paid: PaidContentService (findMatch, contentFor, validate), store: getTokens, purchase, saveCheck
+   * paid: PaidContentService (findMatch, contentFor, validate, access), store: saveCheck
    */
   constructor({ paid, store, now = () => Date.now(), narrator = new Narrator() }) {
     this.narrator = narrator;
@@ -112,9 +111,7 @@ export class CouponCheckService {
       if (keys.has(k)) throw new AppError('invalid-argument', 'Aynı maç kuponda iki kez olamaz.');
       keys.add(k);
     }
-    if ((await this.store.getTokens(uid)) < CHECK_PRICE) {
-      throw new AppError('failed-precondition', `Yetersiz token: ${CHECK_PRICE} gerekli.`);
-    }
+    await this.paid.access.requireSubscriber(uid, 'Tahmin kontrol aracı abonelere özel.');
 
     // Önce hesap: veri alınamazsa ücret alınmaz.
     const items = [];
@@ -162,14 +159,12 @@ export class CouponCheckService {
         alternative: i.alternative ? { market: i.alternative.market, pct: pct(i.alternative.prob) } : null,
         prob: undefined,
       })),
-      price: CHECK_PRICE,
       commentary: narrated.text,
       commentarySource: narrated.source,
     };
     const id = `check_${this.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const { balance } = await this.store.purchase({ uid, unlockId: id, price: CHECK_PRICE, record: { type: 'check', title: `${items.length} maçlık kupon kontrolü` } });
     await this.store.saveCheck?.(uid, id, result);
-    return { ...result, id, balance };
+    return { ...result, id };
   }
 }
 

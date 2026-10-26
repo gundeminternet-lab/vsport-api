@@ -72,15 +72,15 @@ test('ilk gol: ilk gol olayının takımı; kendi kalesine ya da gol yoksa null'
 
 const paid = ({ unlocked = true, completed = true, summaryFails = false } = {}) => ({
   validate() {},
-  store: { hasUnlock: async () => unlocked },
+  covers: async () => unlocked,
   findMatch: async () => ({ id: '9', timestamp: 0, completed, homeGoals: completed ? 0 : null, awayGoals: completed ? 2 : null, homeName: 'Liverpool', awayName: 'Brighton' }),
   contentFor: async () => ({ key: 'eng_1_9', model: { lambdaHome: 1.117, lambdaAway: 1.882, sigma: 0 }, home: { name: 'Liverpool' }, away: { name: 'Brighton' } }),
   espn: { getSummary: async () => { if (summaryFails) throw new Error('ağ'); return summary([{ type: { text: 'Goal' }, scoringPlay: true, team: { id: '2' } }]); } },
 });
 const args = { uid: 'u', league: 'eng.1', eventId: '9', kickoff: '2026-10-25T14:00:00Z' };
 
-test('servis: AI yorumunu açmayan reddedilir; bitmemiş maç reddedilir', async () => {
-  await assert.rejects(new StoryReviewService({ paid: paid({ unlocked: false }) }).review(args), { code: 'permission-denied' });
+test('servis: abone olmayan ve maçın AI paketini açmayan reddedilir; bitmemiş maç reddedilir', async () => {
+  await assert.rejects(new StoryReviewService({ paid: paid({ unlocked: false }) }).review(args), { code: 'subscription-required' });
   await assert.rejects(new StoryReviewService({ paid: paid({ completed: false }) }).review(args), { code: 'failed-precondition' });
 });
 

@@ -11,10 +11,10 @@ import { MODEL } from './engine/config.js';
 import { buildChoreography } from './engine/animation/choreography.js';
 import { buildPlayers } from './engine/animation/players.js';
 
-// AI paketi: tek kilit (ai) maçın AI analizini, AI videosunu, simülasyonunu ve Özel Yorumlarını açar.
-// Bahis ihtimalleri (odds) artık satılmaz; daha önce açanlar görmeye devam eder.
-export const PACKAGE_PRICE = 100;
-export const PRICES = { ai: PACKAGE_PRICE, odds: 50, sim: 100 };
+// İçerik türleri. AI paketi (ai) maçın AI analizini, AI videosunu, simülasyonunu ve Özel Yorumlarını kapsar.
+// Erişim abonelikle (ya da deneme hakkıyla); jeton fiyatı yoktur. Bahis ihtimalleri (odds) artık sunulmuyor;
+// daha önce açanlar görmeye devam eder.
+export const CONTENT_TYPES = ['ai', 'odds', 'sim'];
 export const RETIRED_TYPES = ['odds'];
 // 2: lig geneli güç modeli, belirsizlik katmanı, tahminle tutarlı skor ve simülasyon
 // 3: zengin anlatım dili (cümle çeşitliliği, seri/form yorumları, "Maçın anahtarı" bölümü)

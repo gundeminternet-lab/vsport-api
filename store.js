@@ -1,7 +1,7 @@
 // Firestore veri katmanı (Admin SDK). Hem Cloud Functions (index.js) hem bağımsız HTTP sunucusu (server.js) kullanır.
 // db: getFirestore() sonucu, FieldValue: firebase-admin/firestore'dan.
 
-import { AppError } from './logic.js';
+import { AppError } from './errors.js';
 
 export function createStore(db, FieldValue) {
   const store = {
@@ -46,9 +46,60 @@ export function createStore(db, FieldValue) {
       if (parts.length === 1) return parts[0].text;
       return parts.map((p) => `${p.name ?? 'Editör'}: ${p.text}`).join('\n\n');
     },
-    async getTokens(uid) {
+    // ---- Erişim: abonelik ve deneme hakkı (yalnızca sunucu yazar) ----
+    async getAccess(uid) {
       const s = await db.doc(`users/${uid}`).get();
-      return s.exists ? (s.data().tokens ?? 0) : 0;
+      if (!s.exists) return { subscription: null, trialUsed: 0 };
+      return { subscription: s.get('subscription') ?? null, trialUsed: Number(s.get('trialUsed') ?? 0) };
+    },
+    async setSubscription(uid, subscription) {
+      await db.doc(`users/${uid}`).set({ subscription }, { merge: true });
+    },
+    // Abonenin açtığı içerik: geçmiş için kilit kaydı (ücret yok). Zaten varsa dokunulmaz.
+    async recordUnlock({ uid, unlockId, record }) {
+      const ref = db.doc(`users/${uid}/unlocks/${unlockId}`);
+      try {
+        await ref.create({ ...record, at: FieldValue.serverTimestamp() });
+        return { created: true };
+      } catch (e) {
+        if (e.code === 6 /* ALREADY_EXISTS */) return { created: false };
+        throw e;
+      }
+    },
+    // Deneme hakkı: tek işlemde sayaç kontrolü + artış + kilit kaydı. Kilit zaten varsa hak harcanmaz.
+    async useTrial({ uid, unlockId, record, limit }) {
+      return db.runTransaction(async (tx) => {
+        const userRef = db.doc(`users/${uid}`);
+        const unlockRef = db.doc(`users/${uid}/unlocks/${unlockId}`);
+        const [user, unlock] = await Promise.all([tx.get(userRef), tx.get(unlockRef)]);
+        if (!user.exists) throw new AppError('failed-precondition', 'Profil bulunamadı.');
+        const used = Number(user.get('trialUsed') ?? 0);
+        if (unlock.exists) return { used: false, trialLeft: Math.max(0, limit - used) };
+        if (used >= limit) throw new AppError('subscription-required', 'Ücretsiz deneme hakların bitti. Devam etmek için abone olabilirsin.');
+        tx.update(userRef, { trialUsed: FieldValue.increment(1) });
+        tx.set(unlockRef, { ...record, at: FieldValue.serverTimestamp() });
+        return { used: true, trialLeft: Math.max(0, limit - used - 1) };
+      });
+    },
+    // ---- Google Play abonelikleri: satın alma belgesi (purchaseToken) yalnızca sunucuda tutulur ----
+    // play_tokens/{sha256(token)} → { uid, token, productId }. Aynı satın alma iki hesaba bağlanamaz.
+    async linkPlayToken({ hash, uid, token, productId }) {
+      const ref = db.doc(`play_tokens/${hash}`);
+      return db.runTransaction(async (tx) => {
+        const s = await tx.get(ref);
+        if (s.exists && s.get('uid') !== uid) return { ok: false, owner: s.get('uid') };
+        tx.set(ref, { uid, token, productId, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+        tx.set(db.doc(`billing/${uid}`), { tokenHash: hash, productId, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+        return { ok: true };
+      });
+    },
+    async getPlayToken(hash) {
+      const s = await db.doc(`play_tokens/${hash}`).get();
+      return s.exists ? s.data() : null;
+    },
+    async getBilling(uid) {
+      const s = await db.doc(`billing/${uid}`).get();
+      return s.exists ? s.data() : null;
     },
     async hasUnlock(uid, key, type) {
       return (await db.doc(`users/${uid}/unlocks/${key}_${type}`).get()).exists;
@@ -64,33 +115,6 @@ export function createStore(db, FieldValue) {
     async saveSpecial(key, patch) {
       // topics alanı iç içe birleştirilir: aynı anda iki başlık üretilirse biri diğerini silmez.
       await db.doc(`match_special/${key}`).set(patch, { merge: true });
-    },
-    // Birden çok kilidi tek işlemde aç: eksik olanlar için priceFor(eksikSayısı) kadar düşer.
-    async purchaseBundle({ uid, items, priceFor }) {
-      return db.runTransaction(async (tx) => {
-        const userRef = db.doc(`users/${uid}`);
-        const refs = items.map((i) => db.doc(`users/${uid}/unlocks/${i.unlockId}`));
-        const [user, ...unlocks] = await Promise.all([tx.get(userRef), ...refs.map((r) => tx.get(r))]);
-        if (!user.exists) throw new AppError('failed-precondition', 'Profil bulunamadı.');
-        const tokens = user.data().tokens ?? 0;
-        const missing = items.filter((_, i) => !unlocks[i].exists);
-        if (!missing.length) return { charged: false, balance: tokens };
-        const price = priceFor(missing.length);
-        if (tokens < price) throw new AppError('failed-precondition', `Yetersiz token: ${tokens} var, ${price} gerekli.`);
-        if (price > 0) tx.update(userRef, { tokens: FieldValue.increment(-price) });
-        for (const it of missing) {
-          tx.set(db.doc(`users/${uid}/unlocks/${it.unlockId}`), { ...it.record, price: price / missing.length, at: FieldValue.serverTimestamp() });
-        }
-        if (price > 0) {
-          tx.create(db.collection(`users/${uid}/token_ledger`).doc(), {
-            delta: -price,
-            reason: 'unlock_special',
-            key: missing.map((m) => m.unlockId).join(','),
-            at: FieldValue.serverTimestamp(),
-          });
-        }
-        return { charged: price > 0, balance: tokens - price };
-      });
     },
     // ---- Abonelik ve Asistan kullanımı ----
     async getSubscription(uid) {
@@ -115,29 +139,6 @@ export function createStore(db, FieldValue) {
     async getCoupon(id) {
       const s = await db.doc(`coupons/${id}`).get();
       return s.exists ? s.data() : null;
-    },
-    // Tek işlemde: kilit zaten varsa ücret alınmaz; bakiye yetmezse hata; yoksa düş + kilit + hareket kaydı.
-    async purchase({ uid, unlockId, price, record }) {
-      return db.runTransaction(async (tx) => {
-        const userRef = db.doc(`users/${uid}`);
-        const unlockRef = db.doc(`users/${uid}/unlocks/${unlockId}`);
-        const [user, unlock] = await Promise.all([tx.get(userRef), tx.get(unlockRef)]);
-        if (!user.exists) throw new AppError('failed-precondition', 'Profil bulunamadı.');
-        const tokens = user.data().tokens ?? 0;
-        if (unlock.exists) return { charged: false, balance: tokens };
-        if (tokens < price) throw new AppError('failed-precondition', `Yetersiz token: ${tokens} var, ${price} gerekli.`);
-        if (price > 0) tx.update(userRef, { tokens: FieldValue.increment(-price) });
-        tx.set(unlockRef, { ...record, price, at: FieldValue.serverTimestamp() });
-        if (price > 0) {
-          tx.create(db.collection(`users/${uid}/token_ledger`).doc(), {
-            delta: -price,
-            reason: `unlock_${record.type ?? 'item'}`,
-            key: unlockId,
-            at: FieldValue.serverTimestamp(),
-          });
-        }
-        return { charged: price > 0, balance: tokens - price };
-      });
     },
   };
   

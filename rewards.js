@@ -1,19 +1,10 @@
-// Günlük giriş ödülü ve davet kodu.
-//   Günlük ödül: seri gününe göre token (7 günlük döngü), giriş kaydıyla aynı işlemde verilir (progress.js checkIn).
-//   Davet: invite_codes/{KOD} → { uid }. Yeni kullanıcı (hesabı 7 günden yeni) bir kez kod girer; ikisi de ödül alır.
+// Davet kodu. Jeton ödülleri kaldırıldı (günlük giriş serisi, XP ve rozetler progress.js'te sürer).
+//   Davet: invite_codes/{KOD} → { uid }. Yeni kullanıcı (hesabı 7 günden yeni) bir kez kod girer; davet eden
+//   kişinin davet sayısı artar (profilde görünür). Ödül verilmez.
 
-import { AppError } from './logic.js';
+import { AppError } from './errors.js';
 
-export const DAILY_REWARDS = [5, 5, 10, 10, 15, 15, 50];
-export const INVITE_REWARD = 25;
-export const INVITE_MAX = 50; // bir kullanıcının ödül alabileceği en fazla davet
 export const INVITE_WINDOW_DAYS = 7;
-
-/** Serinin kaçıncı günü → token (7. gün büyük ödül, sonra döngü başa döner). */
-export function dailyReward(streak) {
-  if (!Number.isFinite(streak) || streak < 1) return DAILY_REWARDS[0];
-  return DAILY_REWARDS[(streak - 1) % DAILY_REWARDS.length];
-}
 
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // karışan harfler (0/O, 1/I) yok
 export function randomCode(rand = Math.random) {
@@ -38,17 +29,7 @@ export function redeemProblem({ user, inviterUid, uid, nowMs }) {
 }
 
 export function createRewardStore(db, FieldValue, now = () => Date.now()) {
-  const ledger = (tx, uid, delta, reason, key) =>
-    tx.create(db.collection(`users/${uid}/token_ledger`).doc(), { delta, reason, key, at: FieldValue.serverTimestamp() });
-
   return {
-    /** Günlük ödülü giriş işleminin içinde verir (tx: aynı işlem). */
-    grantDaily(tx, uid, streak, day) {
-      const amount = dailyReward(streak);
-      tx.update(db.doc(`users/${uid}`), { tokens: FieldValue.increment(amount) });
-      ledger(tx, uid, amount, 'daily_reward', day);
-      return amount;
-    },
 
     /** Kullanıcının davet kodu (yoksa üretir) ve davet sayısı. */
     async myInviteCode({ uid }) {
@@ -56,7 +37,7 @@ export function createRewardStore(db, FieldValue, now = () => Date.now()) {
       const user = await userRef.get();
       if (!user.exists) throw new AppError('failed-precondition', 'Profil bulunamadı.');
       const existing = user.get('inviteCode');
-      if (existing) return { code: existing, invites: user.get('invites') ?? 0, reward: INVITE_REWARD };
+      if (existing) return { code: existing, invites: user.get('invites') ?? 0 };
       for (let i = 0; i < 6; i++) {
         const code = randomCode();
         try {
@@ -66,16 +47,16 @@ export function createRewardStore(db, FieldValue, now = () => Date.now()) {
             tx.create(db.doc(`invite_codes/${code}`), { uid, createdAt: FieldValue.serverTimestamp() });
             tx.update(userRef, { inviteCode: code });
           });
-          return { code, invites: 0, reward: INVITE_REWARD };
+          return { code, invites: 0 };
         } catch (e) {
-          if (e.existing) return { code: e.existing, invites: user.get('invites') ?? 0, reward: INVITE_REWARD };
+          if (e.existing) return { code: e.existing, invites: user.get('invites') ?? 0 };
           if (e.code !== 6) throw e; // 6: kod zaten var → yeni kod dene
         }
       }
       throw new AppError('internal', 'Davet kodu oluşturulamadı, tekrar deneyin.');
     },
 
-    /** Davet kodu kullan: iki tarafa da ödül (davet edenin ödülü en fazla INVITE_MAX kez). */
+    /** Davet kodu kullan: davet eden kaydedilir, davet edenin sayacı artar. */
     async redeemInvite({ uid, code }) {
       const c = normalizeCode(code);
       if (!/^[A-Z0-9]{6}$/.test(c)) throw new AppError('invalid-argument', 'Geçersiz davet kodu.');
@@ -88,13 +69,9 @@ export function createRewardStore(db, FieldValue, now = () => Date.now()) {
         const inviterSnap = inviterRef ? await tx.get(inviterRef) : null;
         const problem = redeemProblem({ user: userSnap.exists ? userSnap.data() : null, inviterUid: inviterSnap?.exists ? inviterUid : null, uid, nowMs: now() });
         if (problem) throw new AppError('failed-precondition', problem);
-        tx.update(userRef, { invitedBy: inviterUid, tokens: FieldValue.increment(INVITE_REWARD) });
-        ledger(tx, uid, INVITE_REWARD, 'invite_welcome', c);
-        const invites = Number(inviterSnap.get('invites') ?? 0);
-        const inviterRewarded = invites < INVITE_MAX;
-        tx.update(inviterRef, { invites: FieldValue.increment(1), ...(inviterRewarded ? { tokens: FieldValue.increment(INVITE_REWARD) } : {}) });
-        if (inviterRewarded) ledger(tx, inviterUid, INVITE_REWARD, 'invite_bonus', uid);
-        return { reward: INVITE_REWARD, inviter: inviterSnap.get('username') ?? null };
+        tx.update(userRef, { invitedBy: inviterUid });
+        tx.update(inviterRef, { invites: FieldValue.increment(1) });
+        return { inviter: inviterSnap.get('username') ?? null };
       });
     },
   };

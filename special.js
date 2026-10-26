@@ -24,13 +24,8 @@ export const SPECIAL_LABELS = {
   htft: 'İY/MS sürprizleri',
   btts: 'KG var senaryoları',
 };
-/** Tek başlık ve dört başlığın paketi (jeton). İstemcideki lib/models/paid_content.dart ile aynı olmalı. */
-export const SPECIAL_PRICE = 40;
-export const SPECIAL_BUNDLE_PRICE = 120;
+// Özel Yorumlar ayrıca satılmaz: abonelikte ve AI paketinin içindedir (jeton fiyatı kaldırıldı).
 export const SPECIAL_VERSION = 1;
-
-/** Eksik başlık sayısına göre ücret: tek tek 40, hepsi 120'yi geçmez. */
-export const specialPrice = (missing) => Math.min(missing * SPECIAL_PRICE, SPECIAL_BUNDLE_PRICE);
 
 /** İlk yarıda atılan gol payı (content.js markets ile aynı). */
 const HT_SHARE = 0.45;

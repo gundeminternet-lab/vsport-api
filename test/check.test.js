@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { marketProbability, summarize, CouponCheckService, CHECK_MARKETS, CHECK_PRICE } from '../check.js';
+import { marketProbability, summarize, CouponCheckService, CHECK_MARKETS } from '../check.js';
+import { AccessService } from '../subscription.js';
 
 test('olasılıklar tutarlı', () => {
   const lh = 1.6, la = 1.0;
@@ -30,21 +31,31 @@ test('kupon özeti', () => {
   assert.equal(summarize([{ prob: 0.8 }]).verdict, 'strong');
 });
 
-test('servis: önce hesap, sonra ücret', async () => {
-  const charges = [];
+test('servis: abonelere açık; sonuç geçmişe kaydedilir; abone olmayan reddedilir', async () => {
+  const saved = [];
   const future = Date.parse('2026-10-25T17:00:00Z');
-  const svc = new CouponCheckService({
-    now: () => Date.parse('2026-10-22T12:00:00Z'),
-    paid: {
-      validate() {},
-      findMatch: async (s) => ({ id: s.eventId, league: s.league, timestamp: future, completed: false, homeName: 'A', awayName: 'B' }),
-      contentFor: async () => ({ odds: { expectedGoals: { home: 1.5, away: 1.1 } } }),
-    },
-    store: { getTokens: async () => 100, purchase: async (p) => (charges.push(p), { balance: 80 }), saveCheck: async () => {} },
-  });
-  const r = await svc.check({ uid: 'u', selections: [{ league: 'tur.1', eventId: '1', kickoff: '2026-10-25T17:00:00Z', market: 'MS 1', odd: 2.1 }] });
-  assert.equal(charges.length, 1);
-  assert.equal(charges[0].price, CHECK_PRICE);
+  const now = () => Date.parse('2026-10-22T12:00:00Z');
+  const make = (subscription) => {
+    const store = { getAccess: async () => ({ subscription, trialUsed: 0 }), saveCheck: async (uid, id, r) => saved.push({ uid, id, r }) };
+    return new CouponCheckService({
+      now,
+      paid: {
+        validate() {},
+        access: new AccessService({ store, now }),
+        findMatch: async (s) => ({ id: s.eventId, league: s.league, timestamp: future, completed: false, homeName: 'A', awayName: 'B' }),
+        contentFor: async () => ({ odds: { expectedGoals: { home: 1.5, away: 1.1 } } }),
+      },
+      store,
+    });
+  };
+  const one = [{ league: 'tur.1', eventId: '1', kickoff: '2026-10-25T17:00:00Z', market: 'MS 1', odd: 2.1 }];
+  await assert.rejects(make(null).check({ uid: 'u', selections: one }), (e) => e.code === 'subscription-required');
+  assert.equal(saved.length, 0);
+
+  const svc = make({ plan: 'weekly', until: now() + 86400e3 });
+  const r = await svc.check({ uid: 'u', selections: one });
+  assert.equal(saved.length, 1);
+  assert.equal(r.price, undefined);
   assert.equal(r.items[0].home, 'A');
   assert.ok(r.items[0].pct > 30);
   assert.equal(r.items[0].prob, undefined);

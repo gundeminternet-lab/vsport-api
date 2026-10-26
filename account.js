@@ -1,15 +1,16 @@
 // Hesap silme (Google Play zorunluluğu: uygulama içinden hesap silinebilmeli).
 //
-// Silinenler: kullanıcı belgesi ve bütün alt koleksiyonları (favoriler, takipler, kilitler, token geçmişi, asistan
-// kullanımı), kullanıcı adı kaydı, destek konuşması, istatistikler, sıralama girişleri, maç yorumları ve sohbet
-// mesajları; en son Firebase Authentication hesabı.
+// Silinenler: kullanıcı belgesi ve bütün alt koleksiyonları (favoriler, takipler, kilitler, asistan kullanımı),
+// kullanıcı adı kaydı, destek konuşması, istatistikler, sıralama girişleri, maç yorumları, sohbet mesajları,
+// Google Play abonelik bağlantısı (billing/{uid}, play_tokens); en son Firebase Authentication hesabı.
+// Not: Google Play aboneliği mağazada sürer; kullanıcı Play Store → Abonelikler'den iptal etmelidir (uygulama söyler).
 // Kalanlar: maç tahmin/oy belgeleri (yalnızca kullanıcı kimliğiyle anahtarlıdır, kişisel bilgi içermez; hesap silinince
 // sahipsiz kalır). Satın alma kayıtları kullanıcı belgesinin altında olduğu için onlar da silinir.
 //
 // Yardımcı adımlar (yorum, sohbet, sıralama...) hata verirse kaydedilir ve atlanır; asıl kayıt ve giriş hesabı yine silinir.
 // Yorum ve sohbet silme, Firestore'da "comments.uid" ve "messages.uid" için koleksiyon grubu dizini ister (README).
 
-import { AppError } from './logic.js';
+import { AppError } from './errors.js';
 
 export const DELETE_CONFIRM = 'SİL';
 const BATCH = 400;
@@ -49,6 +50,14 @@ export class AccountService {
     await step('support', async () => {
       await this.db.recursiveDelete(this.db.doc(`support/${uid}`));
       await this.db.doc(`support_threads/${uid}`).delete();
+    });
+    // Play abonelik bağlantısı: aynı satın alma yeni bir hesapta yeniden doğrulanabilsin
+    await step('billing', async () => {
+      const q = await this.db.collection('play_tokens').where('uid', '==', uid).limit(50).get();
+      const batch = this.db.batch();
+      for (const d of q.docs) batch.delete(d.ref);
+      batch.delete(this.db.doc(`billing/${uid}`));
+      await batch.commit();
     });
     if (username) await step('username', () => this.db.doc(`usernames/${String(username).replaceAll('@', '').toLowerCase()}`).delete());
 

@@ -5,6 +5,10 @@
 //   FIREBASE_SERVICE_ACCOUNT   Firebase konsolu → Proje ayarları → Hizmet hesapları → "Yeni özel anahtar oluştur"
 //                              ile indirilen JSON dosyasının TAMAMI (gizli tutun, asla Git'e koymayın)
 //   PORT                       barındırma hizmeti verir (varsayılan 8080)
+//   PLAY_PACKAGE_NAME          Google Play paket adı (varsayılan com.macsimulasyon.futbol_app)
+//   PLAY_SERVICE_ACCOUNT       (isteğe bağlı) Play Console'a yetkili servis hesabı JSON'u; yoksa FIREBASE_SERVICE_ACCOUNT
+//   PLAY_RTDN_SECRET           Play abonelik bildirimleri adresindeki ?secret= değeri (/play/rtdn)
+//   ASSISTANT_OPEN=true        (yalnızca test) AI Asistan'ı abonelik aramadan herkese açar
 //
 // Başlatma: node server.js
 
@@ -38,7 +42,8 @@ import { createRewardStore } from './rewards.js';
 import { createAdminService } from './admin.js';
 import { createTts } from './tts.js';
 import { AssistantService } from './assistant.js';
-import { ASSISTANT_DAILY_LIMIT } from './subscription.js';
+import { ASSISTANT_DAILY_LIMIT, AccessService, PLAN_PRICES_TL, PLAN_PRODUCTS, TRIAL_MATCHES } from './subscription.js';
+import { billingFromEnv } from './billing.js';
 import { createFeaturedService } from './featured.js';
 
 function serviceAccount() {
@@ -55,17 +60,17 @@ const auth = getAuth();
 const baseStore = createStore(db, FieldValue);
 const rewards = createRewardStore(db, FieldValue);
 const progress = createProgressStore(db, FieldValue, undefined, rewards);
-// Ücretli içerik açıldığında seviye/rozet ilerlemesi
+// Ücretli içerik ilk kez açıldığında (abonelikle ya da deneme hakkıyla) seviye/rozet ilerlemesi
 const store = {
   ...baseStore,
-  async purchase(args) {
-    const r = await baseStore.purchase(args);
-    if (r.charged) progress.add(args.uid, { unlocks: 1, xp: XP.unlock }).catch(() => {});
+  async recordUnlock(args) {
+    const r = await baseStore.recordUnlock(args);
+    if (r.created) progress.add(args.uid, { unlocks: 1, xp: XP.unlock }).catch(() => {});
     return r;
   },
-  async purchaseBundle(args) {
-    const r = await baseStore.purchaseBundle(args);
-    if (r.charged) progress.add(args.uid, { unlocks: 1, xp: XP.unlock }).catch(() => {});
+  async useTrial(args) {
+    const r = await baseStore.useTrial(args);
+    if (r.used) progress.add(args.uid, { unlocks: 1, xp: XP.unlock }).catch(() => {});
     return r;
   },
   // Kupon kontrol sonuçları kullanıcının geçmişine (yalnızca kendisi okur)
@@ -76,7 +81,11 @@ const store = {
 
 const espn = new EspnClient();
 const trackService = new TrackService({ store: createTrackStore(db), espn });
-const paidService = new PaidContentService({ store, espn, track: trackService });
+// Abonelik: Google Play doğrulaması + erişim denetimi (bitmiş görünen Play aboneliği mağazadan yeniden okunur)
+const billing = billingFromEnv(baseStore);
+const access = new AccessService({ store: baseStore, billing });
+if (!billing.enabled) console.warn('[billing] Google Play doğrulaması kapalı: servis hesabı ya da paket adı eksik.');
+const paidService = new PaidContentService({ store, espn, track: trackService, access });
 const narrator = narratorFromEnv();
 const couponReader = readerFromEnv();
 const api = createApi({
@@ -86,17 +95,20 @@ const api = createApi({
   rewards,
   admin: createAdminService({ db, FieldValue, auth }),
   tts: createTts({ db, FieldValue }),
-  // Deneme dönemi: asistan herkese açık. Abonelik şartı için ASSISTANT_REQUIRES_SUBSCRIPTION=true.
+  // AI Asistan aylık ve yıllık abonelere açık. Yalnızca test için ASSISTANT_OPEN=true herkese açar.
   // ASSISTANT_DAILY_LIMIT ile günlük sınır değiştirilebilir (varsayılan 15).
   assistant: new AssistantService({
     paid: paidService,
     store,
     narrator,
-    requireSubscription: process.env.ASSISTANT_REQUIRES_SUBSCRIPTION === 'true',
+    access,
+    requireSubscription: process.env.ASSISTANT_OPEN !== 'true',
     dailyLimit: Number(process.env.ASSISTANT_DAILY_LIMIT) || ASSISTANT_DAILY_LIMIT,
   }),
   featured: createFeaturedService({ db, FieldValue, Timestamp, paid: paidService }),
-  coupons: new CouponService({ store }),
+  coupons: new CouponService({ store, access }),
+  billing,
+  access,
   progress,
   track: trackService,
   lineup: new LineupService({ paid: paidService, espn }),
@@ -107,8 +119,10 @@ const api = createApi({
   storyReview: new StoryReviewService({ paid: paidService }),
   account: new AccountService({ db, auth }),
   info: {
-    version: '2026-10-26-canli-model',
-    assistantRequiresSubscription: process.env.ASSISTANT_REQUIRES_SUBSCRIPTION === 'true',
+    version: '2026-10-26-abonelik',
+    assistantRequiresSubscription: process.env.ASSISTANT_OPEN !== 'true',
+    billingEnabled: billing.enabled,
+    plans: { prices: PLAN_PRICES_TL, products: PLAN_PRODUCTS, trialMatches: TRIAL_MATCHES },
     assistantDailyLimit: Number(process.env.ASSISTANT_DAILY_LIMIT) || ASSISTANT_DAILY_LIMIT,
   },
 });
@@ -147,7 +161,7 @@ const watcher = new MatchWatcher({
     const week = previousWeekId(now - 6 * 3600e3);
     if (awardedWeek === week) return;
     const winners = await league.awardWeek(week);
-    if (winners.length) console.log(`[league] ${week} ödülleri:`, winners.map((w) => `${w.rank}. ${w.username} +${w.amount}`).join(', '));
+    if (winners.length) console.log(`[league] ${week} kürsüsü:`, winners.map((w) => `${w.rank}. ${w.username} (${w.points} puan)`).join(', '));
     awardedWeek = week;
   },
   send: (message) => messaging.send(fcmMessage(message)),

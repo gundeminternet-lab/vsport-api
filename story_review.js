@@ -30,8 +30,8 @@ export class StoryReviewService {
     if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
     this.paid.validate({ league, eventId, kickoff }, { needType: false });
     const key = matchKey(league, eventId);
-    if (!(await this.paid.store.hasUnlock(uid, key, 'ai'))) {
-      throw new AppError('permission-denied', 'Maç sonu karnesi, bu maçın AI yorumunu açanlara özel.');
+    if (!(await this.paid.covers(uid, key, 'ai'))) {
+      throw new AppError('subscription-required', 'Maç sonu karnesi abonelere ve bu maçın AI paketini açanlara özel.');
     }
     const match = await this.paid.findMatch({ league, eventId, kickoff });
     if (!match.completed || !Number.isFinite(match.homeGoals) || !Number.isFinite(match.awayGoals)) {

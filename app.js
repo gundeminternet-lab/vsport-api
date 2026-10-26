@@ -3,11 +3,12 @@
 //
 //   GET  /health                      → 200 "ok"  (uyku önleme / sağlık kontrolü)
 //   POST /api/{ad}  { data: {...} }   → 200 { result } | 4xx/5xx { error: { code, message } }
-//        ad: unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze | getTrackRecord | getLineupUpdate | getLiveForecast | getWeeklyBulletin | readCouponImage | getStoryReview | deleteAccount | getVerdicts
+//   POST /play/rtdn?secret=…            → Google Play abonelik bildirimi (Pub/Sub push)
+//        ad: unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze | getTrackRecord | getLineupUpdate | getLiveForecast | getWeeklyBulletin | readCouponImage | getStoryReview | deleteAccount | getVerdicts | verifyPlaySubscription | getEntitlement
 //            setFeatured | clearFeatured | adminSetSubscription (ve diğer yönetim/ödül/ses uçları)
 //   Authorization: Bearer <Firebase ID token>   (uygulama her istekte gönderir)
 
-import { AppError } from './logic.js';
+import { AppError } from './errors.js';
 
 const STATUS = {
   'invalid-argument': 400,
@@ -15,12 +16,13 @@ const STATUS = {
   'permission-denied': 403,
   'not-found': 404,
   'failed-precondition': 409,
+  'subscription-required': 402,
   'resource-exhausted': 429,
   internal: 500,
   unavailable: 503,
 };
 
-export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
+export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
   const routes = {
     unlockContent: (d) => service.unlock(d),
     getContent: (d) => service.get(d),
@@ -33,6 +35,9 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
     ...(reader ? { readCouponImage: (d) => reader.read(d) } : {}),
     ...(storyReview ? { getStoryReview: (d) => storyReview.review(d) } : {}),
     ...(account ? { deleteAccount: (d) => account.deleteAccount(d) } : {}),
+    // Abonelik: Google Play satın alma doğrulaması ve kullanıcının hakları (abonelik, deneme hakkı)
+    ...(billing ? { verifyPlaySubscription: (d) => billing.verify(d) } : {}),
+    ...(access ? { getEntitlement: (d) => access.entitlement(d.uid) } : {}),
     ...(lineup ? { getLineupUpdate: (d) => lineup.update(d) } : {}),
     ...(liveForecast ? { getLiveForecast: (d) => liveForecast.forecast(d) } : {}),
     ...(assistant ? { assistantAnalyze: (d) => assistant.analyze(d) } : {}),
@@ -40,7 +45,7 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
     ...(progress ? { checkIn: (d) => progress.checkIn(d) } : {}),
     ...(checker ? { checkCoupon: (d) => checker.check(d) } : {}),
     ...(admin
-      ? { adminSetRole: (d) => admin.setRole(d), adminAdjustTokens: (d) => admin.adjustTokens(d), adminSetBanned: (d) => admin.setBanned(d), adminSetSubscription: (d) => admin.setSubscription(d) }
+      ? { adminSetRole: (d) => admin.setRole(d), adminSetBanned: (d) => admin.setBanned(d), adminSetSubscription: (d) => admin.setSubscription(d) }
       : {}),
     ...(tts ? { tts: (d) => tts.speak(d) } : {}),
     ...(rewards ? { myInviteCode: (d) => rewards.myInviteCode(d), redeemInvite: (d) => rewards.redeemInvite(d) } : {}),
@@ -89,6 +94,20 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
     if (req.method === 'GET' && (url.pathname === '/health' || url.pathname === '/')) {
       res.writeHead(200, { 'content-type': 'text/plain' });
       return res.end('ok');
+    }
+    // Google Play gerçek zamanlı bildirimleri (Pub/Sub push). Kimlik: adresteki ?secret= (PLAY_RTDN_SECRET).
+    if (req.method === 'POST' && url.pathname === '/play/rtdn' && billing) {
+      try {
+        const raw = await readBody(req, 64 * 1024);
+        const r = await billing.handleRtdn(raw ? JSON.parse(raw) : {}, url.searchParams.get('secret'));
+        res.writeHead(r.status);
+        return res.end();
+      } catch (e) {
+        log.error?.(e);
+        // 5xx: Pub/Sub bildirimi daha sonra yeniden dener
+        res.writeHead(500);
+        return res.end();
+      }
     }
     const m = /^\/api\/([A-Za-z]+)$/.exec(url.pathname);
     if (!m || !Object.hasOwn(routes, m[1])) return fail(res, 'not-found', 'Bulunamadı.');

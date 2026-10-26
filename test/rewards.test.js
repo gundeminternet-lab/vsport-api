@@ -1,14 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { dailyReward, randomCode, normalizeCode, redeemProblem, DAILY_REWARDS } from '../rewards.js';
+import * as rewards from '../rewards.js';
 
-test('günlük ödül döngüsü', () => {
-  assert.equal(dailyReward(1), 5);
-  assert.equal(dailyReward(7), 50);
-  assert.equal(dailyReward(8), 5);
-  assert.equal(dailyReward(14), 50);
-  assert.equal(dailyReward(0), DAILY_REWARDS[0]);
+const { randomCode, normalizeCode, redeemProblem } = rewards;
+
+test('jeton ödülleri kaldırıldı: günlük ödül ve davet ödülü yok', () => {
+  assert.equal(rewards.dailyReward, undefined);
+  assert.equal(rewards.DAILY_REWARDS, undefined);
+  assert.equal(rewards.INVITE_REWARD, undefined);
 });
 
 test('davet kodu biçimi', () => {

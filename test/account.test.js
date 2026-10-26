@@ -15,7 +15,18 @@ function fakeDb(initial) {
     },
     collection: (name) => col(`${path}/${name}`),
   });
-  const col = (path) => ({ doc: (id) => ref(`${path}/${id}`) });
+  const col = (path) => ({
+    doc: (id) => ref(`${path}/${id}`),
+    // Üst düzey koleksiyonda alan eşleşmesi (play_tokens.uid)
+    where: (field, _op, value) => ({
+      limit: () => ({
+        get: async () => {
+          const hits = [...docs.entries()].filter(([k, v]) => k.split('/').length === path.split('/').length + 1 && k.startsWith(`${path}/`) && v?.[field] === value);
+          return { empty: hits.length === 0, size: hits.length, docs: hits.map(([k]) => ({ ref: ref(k) })) };
+        },
+      }),
+    }),
+  });
   return {
     docs,
     deleted,
@@ -61,6 +72,9 @@ const seed = () => ({
   'matches/k1/comments/c1': { uid: 'u1', text: 'gol' },
   'matches/k1/comments/c2': { uid: 'u2', text: 'yok' },
   'chats/global/messages/g1': { uid: 'u1', text: 'selam' },
+  'play_tokens/h1': { uid: 'u1', token: 'gizli' },
+  'play_tokens/h2': { uid: 'u2', token: 'diger' },
+  'billing/u1': { tokenHash: 'h1' },
 });
 
 test('onay metni olmadan ya da girişsiz silinmez', async () => {
@@ -77,10 +91,10 @@ test('kullanıcının bütün verisi ve giriş hesabı silinir; başka kullanıc
   const svc = new AccountService({ db, auth: { deleteUser: async (uid) => authDeleted.push(uid) }, log: {} });
   const r = await svc.deleteAccount({ uid: 'u1', confirm: DELETE_CONFIRM });
   assert.deepEqual(r, { deleted: true, skipped: [] });
-  for (const k of ['users/u1', 'users/u1/favorites/m1', 'users/u1/unlocks/x', 'usernames/ali', 'support/u1/messages/s1', 'support_threads/u1', 'user_stats/u1', 'leaderboards/2026-W43/entries/u1', 'matches/k1/comments/c1', 'chats/global/messages/g1']) {
+  for (const k of ['users/u1', 'users/u1/favorites/m1', 'users/u1/unlocks/x', 'usernames/ali', 'support/u1/messages/s1', 'support_threads/u1', 'user_stats/u1', 'leaderboards/2026-W43/entries/u1', 'matches/k1/comments/c1', 'chats/global/messages/g1', 'play_tokens/h1', 'billing/u1']) {
     assert.ok(!db.docs.has(k), `${k} silinmeliydi`);
   }
-  for (const k of ['users/u2', 'usernames/veli', 'leaderboards/2026-W43/entries/u2', 'matches/k1/comments/c2']) assert.ok(db.docs.has(k), `${k} kalmalıydı`);
+  for (const k of ['users/u2', 'usernames/veli', 'leaderboards/2026-W43/entries/u2', 'matches/k1/comments/c2', 'play_tokens/h2']) assert.ok(db.docs.has(k), `${k} kalmalıydı`);
   assert.deepEqual(authDeleted, ['u1']);
 });
 

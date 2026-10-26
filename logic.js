@@ -6,24 +6,24 @@
 //   saveContent(key, content) -> kaydedilen içerik (aynı anda iki kez üretilirse ilk kaydedilen döner)
 //   getEditorComment(key) -> metin | null
 //   hasUnlock(uid, key, type) -> bool
-//   getTokens(uid) -> number
 //   hasUnlockId(uid, unlockId) -> bool
-//   purchase({ uid, unlockId, price, record }) -> { charged, balance }  (tek işlemde: bakiye kontrolü, düşüm, kilit kaydı)
+//   getAccess(uid) -> { subscription, trialUsed }
+//   recordUnlock({ uid, unlockId, record }) -> { created }      (abonenin açtığı içerik geçmişe yazılır; ücret yok)
+//   useTrial({ uid, unlockId, record, limit }) -> { used, trialLeft }  (deneme hakkı: tek işlemde sayaç + kilit)
+//
+// Erişim: abonelik (subscription.js → AccessService). Jeton/token sistemi kaldırıldı.
 
 import { MatchSimulator } from './engine/service.js';
 import { TeamMemory } from './engine/memory.js';
-import { PRICES, RETIRED_TYPES, CONTENT_VERSION, buildAi, buildOdds, buildSim, buildReview, modelOf } from './content.js';
+import { CONTENT_TYPES, RETIRED_TYPES, CONTENT_VERSION, buildAi, buildOdds, buildSim, buildReview, modelOf } from './content.js';
 import { storyForContent } from './story.js';
-import { SPECIAL_TOPICS, SPECIAL_VERSION, specialPrice, buildSpecial } from './special.js';
+import { SPECIAL_TOPICS, SPECIAL_VERSION, buildSpecial } from './special.js';
 import { collectCornerSamples, expectedCorners } from './engine/corners.js';
 import { pendingEntry } from './track.js';
+import { AppError } from './errors.js';
+import { AccessService, TRIAL_MATCHES, subscriptionRequired } from './subscription.js';
 
-export class AppError extends Error {
-  constructor(code, message) {
-    super(message);
-    this.code = code; // 'invalid-argument' | 'not-found' | 'failed-precondition' | 'permission-denied'
-  }
-}
+export { AppError };
 
 /** Uygulamada gösterilen ligler (lib/models/league_catalog.dart ile aynı olmalı; Flutter testi bunu denetler). Başka lig için içerik üretilmez. */
 export const LEAGUES = [
@@ -46,20 +46,22 @@ const DAY = 86400000;
 const utcDay = (ms) => new Date(Math.floor(ms / DAY) * DAY);
 
 export class PaidContentService {
-  constructor({ store, espn, now = () => Date.now(), memoryFactory = () => new TeamMemory(), leagues = LEAGUES, track = null }) {
+  constructor({ store, espn, now = () => Date.now(), memoryFactory = () => new TeamMemory(), leagues = LEAGUES, track = null, access = null }) {
     this.track = track; // tahmin karnesi (TrackService): maç öncesi üretilen tahmin kaydedilir
     this.leagues = new Set(leagues);
     this.store = store;
     this.espn = espn;
     this.now = now;
     this.memoryFactory = memoryFactory;
+    // Abonelik denetimi (Google Play yenilemesi dahil); verilmezse yalnızca kayıttaki abonelik okunur
+    this.access = access ?? new AccessService({ store, now });
   }
 
   validate({ league, eventId, kickoff, type }, { needType = true } = {}) {
     if (typeof league !== 'string' || !this.leagues.has(league)) throw new AppError('invalid-argument', 'Geçersiz lig.');
     if (typeof eventId !== 'string' || !/^[0-9A-Za-z-]{1,30}$/.test(eventId)) throw new AppError('invalid-argument', 'Geçersiz maç.');
     if (!Number.isFinite(Date.parse(kickoff))) throw new AppError('invalid-argument', 'Geçersiz maç saati.');
-    if (needType && !Object.hasOwn(PRICES, type)) throw new AppError('invalid-argument', 'Geçersiz içerik türü.');
+    if (needType && !CONTENT_TYPES.includes(type)) throw new AppError('invalid-argument', 'Geçersiz içerik türü.');
   }
 
   /** Maçı ESPN'den doğrular (istemcinin gönderdiği takım/saat bilgisine güvenilmez). Önce maç kimliğiyle
@@ -206,49 +208,62 @@ export class PaidContentService {
   }
 
   /**
-   * Kullanıcının bu içeriği görme hakkı var mı? AI paketi (ai) simülasyonu ve Özel Yorum başlıklarını (sp_*) da kapsar.
+   * Kullanıcının bu içeriği görme hakkı var mı? Abonelik her şeyi kapsar. Abone değilse: açılmış kilit (deneme hakkıyla
+   * ya da eski jeton döneminde açılan AI paketi); AI paketi simülasyonu ve Özel Yorum başlıklarını (sp_*) da kapsar.
    */
   async covers(uid, key, type) {
     if (await this.store.hasUnlock(uid, key, type)) return true;
-    if (type === 'ai') return false;
-    return (type === 'sim' || type.startsWith('sp_')) && this.store.hasUnlock(uid, key, 'ai');
+    if (type !== 'ai' && (type === 'sim' || type.startsWith('sp_')) && (await this.store.hasUnlock(uid, key, 'ai'))) return true;
+    return this.access.isSubscriber(uid);
   }
 
-  /** Kilit aç: maç başlamamış olmalı. Daha önce açıldıysa (ya da AI paketi kapsıyorsa) tekrar ücret alınmaz. */
+  /** Kilit kaydı (açılan içerik geçmişi) için maç bilgisi. */
+  _record(match, key, type, extra = {}) {
+    return {
+      key,
+      type,
+      league: match.league,
+      eventId: String(match.id),
+      title: `${match.homeName} - ${match.awayName}`,
+      kickoff: new Date(match.timestamp).toISOString(),
+      ...extra,
+    };
+  }
+
+  /**
+   * İçeriği aç. Abone: her zaman (maç başladıysa maç öncesi veriyle). Abone değil: daha önce açtığı maç ya da
+   * deneme hakkı (yalnızca AI paketi, maç başlamadan önce, TRIAL_MATCHES maç). Hiçbir durumda ücret alınmaz.
+   */
   async unlock({ uid, league, eventId, kickoff, type }) {
     if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
     this.validate({ league, eventId, kickoff, type });
     const key = matchKey(league, eventId);
-    const already = await this.covers(uid, key, type);
-    if (!already && RETIRED_TYPES.includes(type)) throw new AppError('failed-precondition', 'Bu içerik artık sunulmuyor.');
+    if (RETIRED_TYPES.includes(type) && !(await this.store.hasUnlock(uid, key, type))) {
+      throw new AppError('failed-precondition', 'Bu içerik artık sunulmuyor.');
+    }
+    const unlocked = (await this.store.hasUnlock(uid, key, type)) || (type !== 'ai' && (await this.store.hasUnlock(uid, key, 'ai')));
+    const ent = unlocked ? null : await this.access.entitlement(uid);
     const match = await this.findMatch({ league, eventId, kickoff });
-    if (!already && (match.completed || match.timestamp <= this.now())) {
-      throw new AppError('failed-precondition', 'Maç başladı; ücretli içerikler yalnızca maç öncesi satın alınabilir.');
+    const started = match.completed || match.timestamp <= this.now();
+
+    let via = unlocked ? 'unlock' : null;
+    if (!via && ent.subscribed) via = 'subscription';
+    if (!via) {
+      // Deneme hakkı yalnızca AI paketiyle (simülasyon ve Özel Yorumlar onun içinde) ve maç öncesi kullanılır.
+      if (type !== 'ai' || ent.trialLeft <= 0) throw subscriptionRequired();
+      if (started) throw new AppError('failed-precondition', 'Maç başladı; ücretsiz deneme yalnızca maç öncesi kullanılabilir.');
+      via = 'trial';
     }
-    // Bakiyesi yetmeyen kullanıcı içerik üretimini (ESPN istekleri, hesaplama) tetikleyemez.
-    // Asıl kontrol yine satın alma işleminin içinde yapılır.
-    if (!already && (await this.store.getTokens(uid)) < PRICES[type]) {
-      throw new AppError('failed-precondition', `Yetersiz token: ${PRICES[type]} gerekli.`);
-    }
-    // Önce içerik üretilir: ESPN'e ulaşılamazsa kullanıcıdan ücret alınmaz.
-    const started = match.timestamp <= this.now();
+    // Önce içerik üretilir: ESPN'e ulaşılamazsa deneme hakkı harcanmaz.
     const content = await this.contentFor(match, started ? { asOf: match.timestamp - 60000 } : {});
-    const { charged, balance } = already
-      ? { charged: false, balance: null }
-      : await this.store.purchase({
-          uid,
-          unlockId: `${key}_${type}`,
-          price: PRICES[type],
-          record: {
-            key,
-            type,
-            league: match.league,
-            eventId: String(match.id),
-            title: `${match.homeName} - ${match.awayName}`,
-            kickoff: new Date(match.timestamp).toISOString(),
-          },
-        });
-    return { type, key, charged, balance, price: PRICES[type], data: await this.part(content, type) };
+    let trialLeft = ent?.trialLeft ?? null;
+    if (via === 'trial') {
+      ({ trialLeft } = await this.store.useTrial({ uid, unlockId: `${key}_${type}`, record: this._record(match, key, type, { via: 'trial' }), limit: TRIAL_MATCHES }));
+    } else if (via === 'subscription') {
+      // Abonenin açtığı maçlar "açtıklarım" listesinde ve kilit durumunda görünsün (ücret yok)
+      await this.store.recordUnlock?.({ uid, unlockId: `${key}_${type}`, record: this._record(match, key, type, { via: 'subscription' }) });
+    }
+    return { type, key, via, trialLeft, data: await this.part(content, type) };
   }
 
   /** Açılmış içeriği tekrar getir. Maç bittiyse herkese ücretsiz. */
@@ -268,7 +283,7 @@ export class PaidContentService {
       const content = await this.contentFor(match, started ? { asOf: match.timestamp - 60000 } : {});
       return { type, key, data: await this.part(content, type) };
     }
-    if (!match.completed) throw new AppError('permission-denied', 'Bu içerik kilitli.');
+    if (!match.completed) throw subscriptionRequired();
     const content = await this.contentFor(match, { asOf: match.timestamp - 60000 });
     return { type, key, data: await this.part(content, type) };
   }
@@ -285,44 +300,18 @@ export class PaidContentService {
     return SPECIAL_TOPICS.filter((t) => out.includes(t));
   }
 
-  /** Özel Yorum satın al: tek başlık 40, dört başlığın tamamı 120 token. Daha önce açılan başlıklar için tekrar ücret alınmaz. */
+  /** Özel Yorum: aboneler ve bu maçın AI paketini (deneme hakkıyla) açanlar için; ücret yok. */
   async unlockSpecial({ uid, league, eventId, kickoff, topics }) {
     if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
     this.validate({ league, eventId, kickoff }, { needType: false });
     const want = this.specialTopics(topics);
-    const match = await this.findMatch({ league, eventId, kickoff });
     const key = matchKey(league, eventId);
     const flags = await Promise.all(want.map((t) => this.covers(uid, key, `sp_${t}`)));
-    const missing = want.filter((_, i) => !flags[i]);
-    if (missing.length && (match.completed || match.timestamp <= this.now())) {
-      throw new AppError('failed-precondition', 'Maç başladı; Özel Yorum yalnızca maç öncesi satın alınabilir.');
-    }
-    const price = specialPrice(missing.length);
-    if (missing.length && (await this.store.getTokens(uid)) < price) {
-      throw new AppError('failed-precondition', `Yetersiz token: ${price} gerekli.`);
-    }
-    // Önce içerik üretilir: ESPN'e ulaşılamazsa kullanıcıdan ücret alınmaz.
-    const data = await this.specialFor(match, want);
-    let charged = false;
-    let balance = null;
-    if (missing.length) {
-      ({ charged, balance } = await this.store.purchaseBundle({
-        uid,
-        priceFor: specialPrice,
-        items: missing.map((t) => ({
-          unlockId: `${key}_sp_${t}`,
-          record: {
-            key,
-            type: `sp_${t}`,
-            league: match.league,
-            eventId: String(match.id),
-            title: `${match.homeName} - ${match.awayName}`,
-            kickoff: new Date(match.timestamp).toISOString(),
-          },
-        })),
-      }));
-    }
-    return { key, topics: want, charged, balance, price: missing.length ? price : 0, data };
+    if (flags.some((f) => !f)) throw subscriptionRequired('Özel Yorumlar abonelere özel (ya da bu maçın AI paketini açanlara).');
+    const match = await this.findMatch({ league, eventId, kickoff });
+    const started = match.completed || match.timestamp <= this.now();
+    const data = await this.specialFor(match, want, started ? { asOf: match.timestamp - 60000 } : {});
+    return { key, topics: want, data };
   }
 
   /** Açılmış Özel Yorum başlıklarını getir (maç bittiyse hepsi ücretsiz). */
