@@ -9,6 +9,7 @@
 //   PLAY_SERVICE_ACCOUNT       (isteğe bağlı) Play Console'a yetkili servis hesabı JSON'u; yoksa FIREBASE_SERVICE_ACCOUNT
 //   PLAY_RTDN_SECRET           Play abonelik bildirimleri adresindeki ?secret= değeri (/play/rtdn)
 //   ASSISTANT_OPEN=true        (yalnızca test) AI Asistan'ı abonelik aramadan herkese açar
+//   DAILY_PER_MINUTE           günlük tahminlerde dakikada hesaplanan yeni maç sayısı (varsayılan 4)
 //
 // Başlatma: node server.js
 
@@ -46,6 +47,7 @@ import { ASSISTANT_DAILY_LIMIT, AccessService, PLAN_PRICES_TL, PLAN_PRODUCTS, TR
 import { billingFromEnv } from './billing.js';
 import { createFeaturedService } from './featured.js';
 import { WheelService, WHEEL_WEIGHTS, WHEEL_SLICES, CREDIT_DAYS, ASSISTANT_PRIZE_HOURS } from './wheel.js';
+import { DailyPredictionService, createDailyStore } from './daily.js';
 
 function serviceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -92,10 +94,22 @@ const billing = billingFromEnv(baseStore);
 const access = new AccessService({ store: baseStore, billing });
 if (!billing.enabled) console.warn('[billing] Google Play doğrulaması kapalı: servis hesabı ya da paket adı eksik.');
 const paidService = new PaidContentService({ store, espn, track: trackService, access });
+// Günlük toplu tahminler: kendi liglerimizin bugünkü ve yarınki maçları, maç başlamadan hesaplanır
+const daily = new DailyPredictionService({
+  paid: paidService,
+  store: { ...createDailyStore(db, FieldValue), hasUnlock: baseStore.hasUnlock },
+  espn,
+  access,
+  perTick: Number(process.env.DAILY_PER_MINUTE) || 4,
+});
 const narrator = narratorFromEnv();
 const couponReader = readerFromEnv();
 const api = createApi({
-  verifyToken: async (token) => (await auth.verifyIdToken(token)).uid,
+  // Misafir (anonim oturum) yalnızca okuma uçlarını kullanabilir (app.js → GUEST_ROUTES)
+  verifyToken: async (token) => {
+    const t = await auth.verifyIdToken(token);
+    return { uid: t.uid, anonymous: t.firebase?.sign_in_provider === 'anonymous' };
+  },
   service: paidService,
   checker: new CouponCheckService({ paid: paidService, store, narrator }),
   rewards,
@@ -117,6 +131,7 @@ const api = createApi({
   access,
   // Günlük hediye çarkı (+10 XP ödülü seviyeye işlenir)
   wheel: new WheelService({ store: baseStore, progress }),
+  daily,
   progress,
   track: trackService,
   lineup: new LineupService({ paid: paidService, espn }),
@@ -127,7 +142,7 @@ const api = createApi({
   storyReview: new StoryReviewService({ paid: paidService }),
   account: new AccountService({ db, auth }),
   info: {
-    version: '2026-10-26-cark',
+    version: '2026-10-26-tahminler',
     assistantRequiresSubscription: process.env.ASSISTANT_OPEN !== 'true',
     billingEnabled: billing.enabled,
     plans: { prices: PLAN_PRICES_TL, products: PLAN_PRODUCTS, trialMatches: TRIAL_MATCHES },
@@ -146,6 +161,7 @@ const polls = createPollStore(db, FieldValue, Timestamp);
 const settler = new CouponSettler({ store: createSettleStore(db, FieldValue), espn });
 let lastSettle = 0;
 let lastTrack = 0;
+let lastDailyResolve = 0;
 let awardedWeek = null; // bellekte: aynı hafta için her dakika işlem açılmasın
 const watcher = new MatchWatcher({
   store,
@@ -156,6 +172,12 @@ const watcher = new MatchWatcher({
   onFinished: (m) => league.scoreMatch(m),
   // Pazartesi (Türkiye saati) geçen haftanın ilk üçüne token ödülü; tekrar dağıtılmaz
   onTick: async (now) => {
+    // Günlük tahminler: her dakika birkaç yeni maç hesaplanır; sonuçlar 10 dakikada bir işlenir
+    daily.tick().then((n) => n && console.log(`[daily] ${n} maç tahmini hazırlandı`)).catch((e) => console.error('[daily]', e?.message ?? e));
+    if (now - lastDailyResolve >= 10 * 60e3) {
+      lastDailyResolve = now;
+      daily.resolveDue().then((n) => n && console.log(`[daily] ${n} maç sonuçlandı`)).catch((e) => console.error('[daily]', e?.message ?? e));
+    }
     // Tahmin karnesi: bitmiş maçların bekleyen tahminleri sonuçlanır (10 dakikada bir)
     if (now - lastTrack >= 10 * 60e3) {
       lastTrack = now;

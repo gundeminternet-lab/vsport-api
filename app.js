@@ -4,11 +4,28 @@
 //   GET  /health                      → 200 "ok"  (uyku önleme / sağlık kontrolü)
 //   POST /api/{ad}  { data: {...} }   → 200 { result } | 4xx/5xx { error: { code, message } }
 //   POST /play/rtdn?secret=…            → Google Play abonelik bildirimi (Pub/Sub push)
-//        ad: unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze | getTrackRecord | getLineupUpdate | getLiveForecast | getWeeklyBulletin | readCouponImage | getStoryReview | deleteAccount | getVerdicts | verifyPlaySubscription | getEntitlement | spinWheel | getWheel
+//        ad: unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze | getTrackRecord | getLineupUpdate | getLiveForecast | getWeeklyBulletin | readCouponImage | getStoryReview | deleteAccount | getVerdicts | verifyPlaySubscription | getEntitlement | spinWheel | getWheel | getDailyPredictions
 //            setFeatured | clearFeatured | adminSetSubscription (ve diğer yönetim/ödül/ses uçları)
 //   Authorization: Bearer <Firebase ID token>   (uygulama her istekte gönderir)
+//   Misafir (Firebase anonim oturum) yalnızca GUEST_ROUTES'taki okuma uçlarını kullanabilir; deneme hakkı, çark,
+//   satın alma, sohbet ve Asistan gibi işlemler giriş ister.
 
 import { AppError } from './errors.js';
+
+/** Misafirin (anonim oturum) kullanabileceği uçlar: yalnızca okuma, hak harcamayan işlemler. */
+export const GUEST_ROUTES = new Set([
+  'getContent',
+  'getReview',
+  'getSpecial',
+  'getEntitlement',
+  'getDailyPredictions',
+  'getTrackRecord',
+  'getVerdicts',
+  'getLineupUpdate',
+  'getLiveForecast',
+  'getStoryReview',
+  'getWeeklyBulletin',
+]);
 
 const STATUS = {
   'invalid-argument': 400,
@@ -22,7 +39,7 @@ const STATUS = {
   unavailable: 503,
 };
 
-export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
+export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, daily = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
   const routes = {
     unlockContent: (d) => service.unlock(d),
     getContent: (d) => service.get(d),
@@ -40,6 +57,8 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
     ...(access ? { getEntitlement: (d) => access.entitlement(d.uid) } : {}),
     // Günlük hediye çarkı: günde bir ücretsiz çevirme (sonuç sunucuda belirlenir)
     ...(wheel ? { spinWheel: (d) => wheel.spin(d), getWheel: (d) => wheel.status(d) } : {}),
+    // Günlük toplu tahminler (Tahminler sekmesi, Ana Sayfa, Canlı takip)
+    ...(daily ? { getDailyPredictions: (d) => daily.list(d) } : {}),
     ...(lineup ? { getLineupUpdate: (d) => lineup.update(d) } : {}),
     ...(liveForecast ? { getLiveForecast: (d) => liveForecast.forecast(d) } : {}),
     ...(assistant ? { assistantAnalyze: (d) => assistant.analyze(d) } : {}),
@@ -121,12 +140,17 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
       const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
       if (!token) return fail(res, 'unauthenticated', 'Giriş yapmalısınız.');
       let uid;
+      let guest = false;
       try {
-        uid = await verifyToken(token);
+        // verifyToken: uid ya da { uid, anonymous } döner
+        const v = await verifyToken(token);
+        uid = typeof v === 'string' ? v : v?.uid;
+        guest = typeof v === 'object' && v !== null && v.anonymous === true;
       } catch {
         return fail(res, 'unauthenticated', 'Oturum doğrulanamadı; lütfen tekrar giriş yapın.');
       }
       if (!uid) return fail(res, 'unauthenticated', 'Giriş yapmalısınız.');
+      if (guest && !GUEST_ROUTES.has(m[1])) return fail(res, 'unauthenticated', 'Bu işlem için Google ile giriş yapmalısın.');
       if (limited(uid)) return fail(res, 'resource-exhausted', 'Çok fazla istek; biraz sonra tekrar deneyin.');
 
       let data = {};
@@ -141,8 +165,8 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
         }
         if (parsed && typeof parsed.data === 'object' && parsed.data !== null && !Array.isArray(parsed.data)) data = parsed.data;
       }
-      // uid her zaman doğrulanmış belgeden gelir; istemcinin gönderdiği uid yok sayılır.
-      const result = await routes[m[1]]({ ...data, uid });
+      // uid ve misafir bilgisi her zaman doğrulanmış belgeden gelir; istemcinin gönderdikleri yok sayılır.
+      const result = await routes[m[1]]({ ...data, uid, ...(guest ? { guest: true } : {}) });
       return send(res, 200, { result });
     } catch (e) {
       if (e instanceof AppError) return fail(res, e.code, e.message);
