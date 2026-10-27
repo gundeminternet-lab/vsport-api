@@ -31,6 +31,17 @@ const VOID_AFTER_MS = 3 * DAY;
 const MIN_LEAD_MS = 5 * 60e3;
 /** İstemcinin "açtım" dediği maçlardan en fazla bu kadarı doğrulanır. */
 const MAX_CLAIMS = 30;
+/** Tek maçın hesaplanması bundan uzun sürerse bırakılır (takılan bir istek bütün hattı durdurmasın). */
+const MATCH_TIMEOUT_MS = 3 * 60e3;
+/** Bir tur bundan uzun "meşgul" kalırsa takılmış sayılır, yeni tur başlar. */
+const STALE_BUSY_MS = 12 * 60e3;
+
+const withTimeout = (promise, ms, message) => {
+  let timer;
+  return Promise.race([promise, new Promise((_, reject) => (timer = setTimeout(() => reject(new Error(message)), ms)))]).finally(() =>
+    clearTimeout(timer),
+  );
+};
 
 export const MARKET_IDS = ['ms', 'iy', 'au', 'kg', 'iyg'];
 
@@ -140,6 +151,22 @@ export class DailyPredictionService {
     this._failed = new Map(); // key → son hata zamanı (30 dk beklenir)
     this._lists = new Map(); // day → { at, rows }
     this._busy = false;
+    this._busyAt = 0;
+    // Durum (sunucu /version adresinde görünür): hattın çalışıp çalışmadığı uzaktan anlaşılsın
+    this.stats = { ticks: 0, lastTickAt: null, planned: 0, pending: 0, made: 0, failed: 0, lastError: null, lastErrorAt: null, resolved: 0 };
+  }
+
+  /** /version'da gösterilen özet. */
+  status() {
+    return { ...this.stats, busy: this._busy, busySince: this._busy ? new Date(this._busyAt).toISOString() : null };
+  }
+
+  _error(key, e) {
+    const message = `${key}: ${e?.message ?? e}`;
+    this.stats.failed++;
+    this.stats.lastError = message.slice(0, 300);
+    this.stats.lastErrorAt = new Date(this.now()).toISOString();
+    this.log.error?.(`[daily] ${message}`);
   }
 
   /** Bugün ve yarının (Türkiye saati) maçları; lig başına tek fikstür isteği (3 günlük aralık), 30 dakika saklanır. */
@@ -180,11 +207,14 @@ export class DailyPredictionService {
 
   /** Dakikada bir çağrılır: henüz tahmini olmayan en yakın maçlardan [perTick] tanesini hesaplar. */
   async tick() {
-    if (this._busy) return 0;
+    if (this._busy && this.now() - this._busyAt < STALE_BUSY_MS) return 0;
     this._busy = true;
+    this._busyAt = this.now();
     let made = 0;
     try {
       const now = this.now();
+      this.stats.ticks++;
+      this.stats.lastTickAt = new Date(now).toISOString();
       await this._loadKnown(trDay(now));
       await this._loadKnown(trDay(now + DAY));
       const todo = (await this._matches()).filter((m) => {
@@ -194,21 +224,31 @@ export class DailyPredictionService {
         const failedAt = this._failed.get(key);
         return !(failedAt && now - failedAt < 30 * 60e3);
       });
+      this.stats.planned = (this._plan?.matches ?? []).length;
+      this.stats.pending = todo.length;
       for (const m of todo.slice(0, this.perTick)) {
         const key = matchKey(m.league, m.id);
         try {
-          const content = await this.paid.contentFor(m);
+          let content = await withTimeout(this.paid.contentFor(m), MATCH_TIMEOUT_MS, 'zaman aşımı');
+          // "model" alanı eklenmeden önce üretilmiş (önbellekteki) içerikte tahmin sayıları yeniden hesaplanır
+          if (!content?.model && typeof this.paid.modelFor === 'function') {
+            content = { ...content, model: await withTimeout(this.paid.modelFor(m, content), MATCH_TIMEOUT_MS, 'zaman aşımı') };
+          }
           const entry = dailyEntry(m, content, this.now());
           if (!entry) throw new Error('tahmin hesaplanamadı');
           await this.store.saveDaily(entry);
           this._known.add(key);
           this._lists.delete(entry.day);
           made++;
+          this.stats.made++;
         } catch (e) {
           this._failed.set(key, this.now());
-          this.log.error?.(`[daily] ${key}: ${e?.message ?? e}`);
+          this._error(key, e);
         }
       }
+    } catch (e) {
+      this._error('tur', e);
+      throw e;
     } finally {
       this._busy = false;
     }
@@ -237,6 +277,7 @@ export class DailyPredictionService {
       await this.store.saveDailyResult(d.key, settled);
       this._lists.delete(entry.day);
       done++;
+      this.stats.resolved++;
     }
     return done;
   }

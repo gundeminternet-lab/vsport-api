@@ -123,6 +123,36 @@ export function parseSummaryEvent(json, { league = null, eventId = null } = {}) 
   return m ?? null;
 }
 
+/**
+ * Skor tablosu yanıtını parseEvents'in okuduğu alanlara indirger (önbellekte bellek tasarrufu; ESPN olay başına
+ * onlarca KB istatistik, haber ve yayın bilgisi döndürür). Sonuç parseEvents ile aynı maç listesini verir.
+ */
+export function slimScoreboard(json) {
+  const team = (t) => (t ? { id: t.id, displayName: t.displayName, name: t.name, logo: t.logo, logos: t.logos?.[0] ? [{ href: t.logos[0].href }] : undefined } : undefined);
+  const status = (s) => (s?.type ? { type: { completed: s.type.completed, state: s.type.state, name: s.type.name } } : undefined);
+  return {
+    events: (json?.events ?? []).map((ev) => {
+      const comp = ev.competitions?.[0];
+      return {
+        id: ev.id,
+        date: ev.date,
+        league: ev.league?.slug ? { slug: ev.league.slug } : undefined,
+        status: status(ev.status),
+        competitions: comp
+          ? [
+              {
+                id: comp.id,
+                date: comp.date,
+                status: status(comp.status),
+                competitors: (comp.competitors ?? []).map((c) => ({ id: c.id, homeAway: c.homeAway, score: c.score, team: team(c.team) })),
+              },
+            ]
+          : [],
+      };
+    }),
+  };
+}
+
 export class EspnClient {
   constructor({ fetchImpl = globalThis.fetch, cacheTtlMs = ESPN.cacheTtlMs, timeoutMs = ESPN.timeoutMs, retries = ESPN.retries } = {}) {
     if (!fetchImpl) throw new Error('fetch bulunamadı (Node 18+ gerekir)');
@@ -133,7 +163,8 @@ export class EspnClient {
     this.cache = new Map();
   }
 
-  async _getJson(url, { maxAgeMs = this.cacheTtlMs } = {}) {
+  /** transform: önbelleğe yazmadan önce yanıtı küçültür (ör. skor tablosundan yalnızca gereken alanlar). */
+  async _getJson(url, { maxAgeMs = this.cacheTtlMs, transform = null } = {}) {
     const hit = this.cache.get(url);
     if (hit && Date.now() - hit.t < maxAgeMs) return hit.json;
 
@@ -147,10 +178,12 @@ export class EspnClient {
           // Bazı sunucular tanımsız istemcileri reddeder; sıradan bir tarayıcı gibi tanıtılır.
           headers: { accept: 'application/json', 'user-agent': 'Mozilla/5.0 (vSport API)' },
         });
-        clearTimeout(timer);
         if (res.status === 404) throw Object.assign(new Error(`ESPN 404: ${url}`), { fatal: true });
         if (!res.ok) throw new Error(`ESPN ${res.status}`);
-        const json = await res.json();
+        // Zaman aşımı gövde okunurken de geçerli (yarıda kalan bağlantı isteği sonsuza dek bekletmesin)
+        const raw = await res.json();
+        clearTimeout(timer);
+        const json = transform ? transform(raw) : raw;
         // Uzun süre çalışan sunucuda bellek şişmesin: en eski kayıtlar atılır.
         this.cache.delete(url);
         this.cache.set(url, { t: Date.now(), json });
@@ -219,6 +252,8 @@ export class EspnClient {
             const json = await this._getJson(`${ESPN.siteApi}/${league}/scoreboard?dates=${fmt(from)}-${fmt(to)}&limit=500`, {
               // Geçmiş dilimler değişmez; son dilim sık yenilenir
               maxAgeMs: to >= now - DAY ? 20 * 60 * 1000 : 6 * 3600 * 1000,
+              // 30 günlük dilim yanıtları büyük: önbellekte yalnızca maç listesi için gereken alanlar tutulur
+              transform: slimScoreboard,
             });
             if ((json?.events?.length ?? 0) >= 495) truncated++;
             for (const m of parseEvents(json, { league })) byId.set(m.id, m);
@@ -249,7 +284,7 @@ export class EspnClient {
   async getFixtures(league, from, to = from) {
     const fmt = (d) => d.toISOString().slice(0, 10).replaceAll('-', '');
     const range = fmt(from) === fmt(to) ? fmt(from) : `${fmt(from)}-${fmt(to)}`;
-    const json = await this._getJson(`${ESPN.siteApi}/${league}/scoreboard?dates=${range}`);
+    const json = await this._getJson(`${ESPN.siteApi}/${league}/scoreboard?dates=${range}`, { transform: slimScoreboard });
     return parseEvents(json, { league, includeUpcoming: true });
   }
 }

@@ -142,12 +142,19 @@ const api = createApi({
   storyReview: new StoryReviewService({ paid: paidService }),
   account: new AccountService({ db, auth }),
   info: {
-    version: '2026-10-26-tahminler',
+    version: '2026-10-27-tahminler-2',
     assistantRequiresSubscription: process.env.ASSISTANT_OPEN !== 'true',
     billingEnabled: billing.enabled,
     plans: { prices: PLAN_PRICES_TL, products: PLAN_PRODUCTS, trialMatches: TRIAL_MATCHES },
     wheel: { weights: WHEEL_WEIGHTS, slices: WHEEL_SLICES, creditDays: CREDIT_DAYS, assistantHours: ASSISTANT_PRIZE_HOURS },
     assistantDailyLimit: Number(process.env.ASSISTANT_DAILY_LIMIT) || ASSISTANT_DAILY_LIMIT,
+    // Günlük tahmin hattının durumu (her açılışta güncel): kaç tur döndü, kaç maç hazırlandı, son hata
+    get daily() {
+      return daily.status();
+    },
+    get memoryMb() {
+      return Math.round(process.memoryUsage().rss / 1048576);
+    },
   },
 });
 

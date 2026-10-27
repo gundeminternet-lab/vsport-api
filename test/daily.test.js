@@ -284,3 +284,63 @@ test('misafir (anonim oturum) yalnızca okuma uçlarını kullanır', async () =
     assert.equal(GUEST_ROUTES.has(r), false, r);
   }
 });
+
+test('takılan maç hesabı hattı durdurmaz; durum özeti hata ve sayıları gösterir', async () => {
+  const tomorrow = NOW + 20 * 3600e3;
+  const fixtures = [
+    { id: '1', league: 'demo.1', timestamp: tomorrow, homeId: 'a', awayId: 'b', homeName: 'A', awayName: 'B', completed: false },
+    { id: '2', league: 'demo.1', timestamp: tomorrow + 3600e3, homeId: 'c', awayId: 'd', homeName: 'C', awayName: 'D', completed: false },
+  ];
+  // Eski önbellek içeriği: model alanı yok → modelFor ile tamamlanır
+  const paid = {
+    async contentFor(m) {
+      if (m.id === '1') throw new Error('ESPN yok');
+      return { ...content, model: undefined };
+    },
+    async modelFor() {
+      return content.model;
+    },
+  };
+  const { svc, store } = service({ fixtures, paid });
+  assert.equal(await svc.tick(), 1);
+  const st = svc.status();
+  assert.equal(st.ticks, 1);
+  assert.equal(st.made, 1);
+  assert.equal(st.failed, 1);
+  assert.match(st.lastError, /demo_1_1: ESPN yok/);
+  assert.equal(st.busy, false);
+  assert.equal(store.rows.size, 1);
+});
+
+test('skor tablosu küçültülünce parseEvents aynı maçları verir', async () => {
+  const { slimScoreboard, parseEvents } = await import('../engine/espn.js');
+  const ev = (id, state, completed, hs, as) => ({
+    id,
+    uid: 'x',
+    date: '2026-10-27T19:45Z',
+    name: 'Ev vs Dep',
+    season: { year: 2026 },
+    status: { clock: 0, type: { state, completed, name: 'STATUS' } },
+    links: [{ href: 'https://example.com', text: 'Gamecast' }],
+    competitions: [
+      {
+        id,
+        date: '2026-10-27T19:45Z',
+        venue: { fullName: 'Stad' },
+        broadcasts: [{ names: ['TV'] }],
+        details: [{ type: { text: 'Goal' } }],
+        status: { type: { state, completed, name: 'STATUS' } },
+        competitors: [
+          { id: '10', homeAway: 'home', score: hs, statistics: [{ name: 'possessionPct', displayValue: '55' }], team: { id: '10', displayName: 'Ev FK', name: 'Ev', logo: 'https://l/10.png', logos: [{ href: 'https://l/10b.png' }, { href: 'x' }], links: [] } },
+          { id: '20', homeAway: 'away', score: as, team: { id: '20', displayName: 'Dep SK', logo: 'https://l/20.png' } },
+        ],
+      },
+    ],
+  });
+  const json = { leagues: [{ name: 'Lig' }], events: [ev('1', 'post', true, '2', '1'), ev('2', 'pre', false, '0', '0'), { id: 'bozuk' }] };
+  const slim = slimScoreboard(json);
+  for (const includeUpcoming of [false, true]) {
+    assert.deepEqual(parseEvents(slim, { league: 'demo.1', includeUpcoming }), parseEvents(json, { league: 'demo.1', includeUpcoming }));
+  }
+  assert.ok(JSON.stringify(slim).length < JSON.stringify(json).length);
+});
