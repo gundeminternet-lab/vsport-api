@@ -87,6 +87,8 @@ const store = {
   },
 };
 
+/** /version ve Tahminler tanılamasında görünen sürüm. */
+const SERVER_VERSION = '2026-10-27-tahminler-3';
 const espn = new EspnClient();
 const trackService = new TrackService({ store: createTrackStore(db), espn });
 // Abonelik: Google Play doğrulaması + erişim denetimi (bitmiş görünen Play aboneliği mağazadan yeniden okunur)
@@ -101,6 +103,8 @@ const daily = new DailyPredictionService({
   espn,
   access,
   perTick: Number(process.env.DAILY_PER_MINUTE) || 4,
+  isAdmin: async (uid) => (await db.doc(`users/${uid}`).get()).get('role') === 'admin',
+  statusExtra: () => ({ version: SERVER_VERSION, memoryMb: Math.round(process.memoryUsage().rss / 1048576) }),
 });
 const narrator = narratorFromEnv();
 const couponReader = readerFromEnv();
@@ -142,7 +146,7 @@ const api = createApi({
   storyReview: new StoryReviewService({ paid: paidService }),
   account: new AccountService({ db, auth }),
   info: {
-    version: '2026-10-27-tahminler-2',
+    version: SERVER_VERSION,
     assistantRequiresSubscription: process.env.ASSISTANT_OPEN !== 'true',
     billingEnabled: billing.enabled,
     plans: { prices: PLAN_PRICES_TL, products: PLAN_PRODUCTS, trialMatches: TRIAL_MATCHES },
@@ -168,7 +172,6 @@ const polls = createPollStore(db, FieldValue, Timestamp);
 const settler = new CouponSettler({ store: createSettleStore(db, FieldValue), espn });
 let lastSettle = 0;
 let lastTrack = 0;
-let lastDailyResolve = 0;
 let awardedWeek = null; // bellekte: aynı hafta için her dakika işlem açılmasın
 const watcher = new MatchWatcher({
   store,
@@ -179,12 +182,6 @@ const watcher = new MatchWatcher({
   onFinished: (m) => league.scoreMatch(m),
   // Pazartesi (Türkiye saati) geçen haftanın ilk üçüne token ödülü; tekrar dağıtılmaz
   onTick: async (now) => {
-    // Günlük tahminler: her dakika birkaç yeni maç hesaplanır; sonuçlar 10 dakikada bir işlenir
-    daily.tick().then((n) => n && console.log(`[daily] ${n} maç tahmini hazırlandı`)).catch((e) => console.error('[daily]', e?.message ?? e));
-    if (now - lastDailyResolve >= 10 * 60e3) {
-      lastDailyResolve = now;
-      daily.resolveDue().then((n) => n && console.log(`[daily] ${n} maç sonuçlandı`)).catch((e) => console.error('[daily]', e?.message ?? e));
-    }
     // Tahmin karnesi: bitmiş maçların bekleyen tahminleri sonuçlanır (10 dakikada bir)
     if (now - lastTrack >= 10 * 60e3) {
       lastTrack = now;
@@ -205,6 +202,19 @@ const watcher = new MatchWatcher({
   send: (message) => messaging.send(fcmMessage(message)),
 });
 watcher.start(60000);
+
+// Günlük tahminler kendi zamanlayıcısıyla döner (maç izleme turu bir istekte takılırsa tahminler durmasın):
+// her dakika birkaç yeni maç hesaplanır; sonuçlar 10 dakikada bir işlenir.
+setTimeout(() => {
+  const run = () =>
+    daily.tick().then((n) => n && console.log(`[daily] ${n} maç tahmini hazırlandı`)).catch((e) => console.error('[daily]', e?.message ?? e));
+  const resolve = () =>
+    daily.resolveDue().then((n) => n && console.log(`[daily] ${n} maç sonuçlandı`)).catch((e) => console.error('[daily]', e?.message ?? e));
+  run();
+  resolve();
+  setInterval(run, 60e3);
+  setInterval(resolve, 10 * 60e3);
+}, 15e3);
 
 // Ücretsiz Render servisi 15 dk istek gelmezse uyur ve maçları izleyemez. Sunucu 9 dakikada bir kendi adresini
 // çağırarak uyanık kalır (tek servis için aylık 750 ücretsiz saat buna yeter). RENDER_EXTERNAL_URL'i Render verir.

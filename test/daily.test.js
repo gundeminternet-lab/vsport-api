@@ -344,3 +344,27 @@ test('skor tablosu küçültülünce parseEvents aynı maçları verir', async (
   }
   assert.ok(JSON.stringify(slim).length < JSON.stringify(json).length);
 });
+
+test('liste boşken yöneticiye hat durumu gider; diğerlerine gitmez', async () => {
+  const store = dailyStore();
+  const svc = new DailyPredictionService({
+    paid: { contentFor: async () => content },
+    store,
+    espn: { getFixtures: async () => [] },
+    access: { entitlement: async () => ({ subscribed: false }) },
+    leagues: ['demo.1'],
+    now: () => NOW,
+    log: { error() {} },
+    isAdmin: async (uid) => uid === 'admin',
+    statusExtra: () => ({ version: 'test-1' }),
+  });
+  await svc.tick();
+  const day = new Date(NOW + 3 * 3600e3).toISOString().slice(0, 10);
+  const admin = await svc.list({ uid: 'admin', day });
+  assert.equal(admin.items.length, 0);
+  assert.equal(admin.diag.version, 'test-1');
+  assert.equal(admin.diag.ticks, 1);
+  assert.equal(admin.diag.planned, 0);
+  assert.equal((await svc.list({ uid: 'u1', day })).diag, undefined);
+  assert.equal((await svc.list({ uid: 'admin', day, guest: true })).diag, undefined);
+});

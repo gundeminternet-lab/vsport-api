@@ -108,11 +108,17 @@ export class MatchWatcher {
     const loop = async () => {
       if (!this._busy) {
         this._busy = true;
+        let timer;
         try {
-          await this.tick();
+          // Bir istek takılırsa tur sonsuza dek beklemesin: 5 dakikada bitmeyen tur bırakılır, izleme sürer
+          await Promise.race([
+            this.tick(),
+            new Promise((_, reject) => (timer = setTimeout(() => reject(new Error('tur 5 dakikada bitmedi')), 5 * 60e3))),
+          ]);
         } catch (e) {
           this.log.error?.(`[watcher] tur başarısız: ${e?.message ?? e}`);
         } finally {
+          clearTimeout(timer);
           this._busy = false;
         }
       }

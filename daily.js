@@ -134,7 +134,12 @@ const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
  *   saveDailyResult(key, { result, hits })   hasUnlock(uid, key, type) (users/{uid}/unlocks)
  */
 export class DailyPredictionService {
-  constructor({ paid, store, espn, access, leagues = LEAGUES, now = () => Date.now(), perTick = 4, planMs = 30 * 60e3, listCacheMs = 60e3, log = console }) {
+  constructor({ paid, store, espn, access, leagues = LEAGUES, now = () => Date.now(), perTick = 4, planMs = 30 * 60e3, listCacheMs = 60e3, log = console, isAdmin = null, statusExtra = null }) {
+    /** Liste boşken yöneticiye hat durumu gösterilsin diye (uid → bool). */
+    this.isAdmin = isAdmin;
+    /** Durum özetine eklenecek sunucu bilgisi (sürüm, bellek). */
+    this.statusExtra = statusExtra;
+    this.startedAt = now();
     this.paid = paid;
     this.store = store;
     this.espn = espn;
@@ -158,7 +163,14 @@ export class DailyPredictionService {
 
   /** /version'da gösterilen özet. */
   status() {
-    return { ...this.stats, busy: this._busy, busySince: this._busy ? new Date(this._busyAt).toISOString() : null };
+    return {
+      ...(this.statusExtra?.() ?? {}),
+      ...this.stats,
+      startedAt: new Date(this.startedAt).toISOString(),
+      uptimeMin: Math.round((this.now() - this.startedAt) / 60e3),
+      busy: this._busy,
+      busySince: this._busy ? new Date(this._busyAt).toISOString() : null,
+    };
   }
 
   _error(key, e) {
@@ -181,18 +193,35 @@ export class DailyPredictionService {
     const worker = async () => {
       while (next < this.leagues.length) {
         const league = this.leagues[next++];
+        let list;
         try {
-          for (const m of await this.espn.getFixtures(league, from, to)) {
-            if (!m.completed && Number.isFinite(m.timestamp) && days.has(trDay(m.timestamp))) out.push({ ...m, league: m.league ?? league });
-          }
+          list = await this.espn.getFixtures(league, from, to);
         } catch {
-          // lig alınamadı: sonraki planda yeniden denenir
+          // Tarih aralığı isteği reddedildiyse gün gün denenir; o da olmazsa lig sonraki planda yeniden denenir
+          list = [];
+          for (let t = from.getTime(); t <= to.getTime(); t += DAY) {
+            try {
+              list.push(...(await this.espn.getFixtures(league, new Date(t))));
+            } catch {
+              // bu gün alınamadı
+            }
+          }
+        }
+        for (const m of list) {
+          if (!m.completed && Number.isFinite(m.timestamp) && days.has(trDay(m.timestamp))) out.push({ ...m, league: m.league ?? league });
         }
       }
     };
     await Promise.all(Array.from({ length: 4 }, worker));
+    const seen = new Set();
+    for (let i = out.length - 1; i >= 0; i--) {
+      const k = matchKey(out[i].league, out[i].id);
+      if (seen.has(k)) out.splice(i, 1);
+      else seen.add(k);
+    }
     out.sort((a, b) => a.timestamp - b.timestamp);
-    this._plan = { at: now, matches: out };
+    // Hiç maç alınamadıysa (ESPN erişilemedi) plan 30 dakika beklemeden 5 dakika sonra yeniden kurulur
+    this._plan = { at: out.length ? now : now - this.planMs + 5 * 60e3, matches: out };
     return out;
   }
 
@@ -335,7 +364,10 @@ export class DailyPredictionService {
         result: r.result ?? null,
       };
     });
-    return { day: d, subscribed: ent.subscribed === true, items, summary: daySummary(rows) };
+    // Liste boşsa yöneticiye hattın durumu da gönderilir (Tahminler ekranında görünür; neden boş olduğu anlaşılsın)
+    let diag = null;
+    if (!rows.length && !guest && this.isAdmin) diag = (await this.isAdmin(uid).catch(() => false)) ? this.status() : null;
+    return { day: d, subscribed: ent.subscribed === true, items, summary: daySummary(rows), ...(diag ? { diag } : {}) };
   }
 }
 
