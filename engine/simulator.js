@@ -42,11 +42,13 @@ function buildClock(rng, fixed = null) {
   return { slots, total, firstHalfClock };
 }
 
+// Dakika temposu: maçın başı sakin, ikinci yarı ve son dakikalar daha gollü. Büyük liglerde gollerin ~%44-45'i
+// ilk yarıda atılır; ilk yarının orta bölümü buna göre ayarlı (önceki 1,0 → ilk yarı payı ~%47'ydi).
 function tempoOf(slot) {
   if (slot.half === 1) {
-    if (slot.minute <= 10 && !slot.extra) return 0.88;
-    if (slot.minute >= 38) return 1.05;
-    return 1;
+    if (slot.minute <= 10 && !slot.extra) return 0.86;
+    if (slot.minute >= 38) return 1.0;
+    return 0.95;
   }
   if (slot.extra || slot.minute >= 85) return 1.16;
   if (slot.minute >= 75) return 1.1;
@@ -331,17 +333,29 @@ export function simulateMatch(analysis, { seed, rng: external } = {}) {
  * (şutlar, kornerler, kartlar, gol dakikaları) simülatörün kendi sürecinden gelir; yalnızca son skor seçilir.
  * Hiç denemede tutmazsa aynı sonuçla (1/X/2) biten en yakın deneme, o da yoksa ilk deneme döner.
  */
-export function simulateToScore(analysis, { seed, target, maxTries = 800 } = {}) {
+/**
+ * Hedef skorla biten bir maç bulana kadar oynatır (reddetme örneklemesi; maçın akışı modelin kendi dağılımından gelir).
+ * htTarget verilirse devre skoru da onunla aynı olan maç aranır; bulunamazsa yalnızca final skoru tutan maç kullanılır.
+ */
+export function simulateToScore(analysis, { seed, target, htTarget = null, maxTries = 800 } = {}) {
   let fallback = null;
   let sameOutcome = null;
+  let finalOnly = null;
   const outcome = (s) => Math.sign(s.home - s.away);
-  for (let k = 0; k < maxTries; k++) {
+  const tries = htTarget ? maxTries * 3 : maxTries;
+  for (let k = 0; k < tries; k++) {
     const t = simulateMatch(analysis, { seed: k === 0 ? seed : `${seed}#${k}` });
-    if (t.score.home === target.home && t.score.away === target.away) return Object.assign(t, { conditioned: { target, tries: k + 1, hit: true } });
+    if (t.score.home === target.home && t.score.away === target.away) {
+      const htHit = !htTarget || (t.halftimeScore.home === htTarget.home && t.halftimeScore.away === htTarget.away);
+      if (htHit) return Object.assign(t, { conditioned: { target, htTarget, tries: k + 1, hit: true } });
+      finalOnly ??= t;
+      if (k >= maxTries && finalOnly) break; // devre skoru tutan maç nadirse fazla bekleme
+    }
     fallback ??= t;
     if (!sameOutcome && outcome(t.score) === outcome(target)) sameOutcome = t;
   }
-  return Object.assign(sameOutcome ?? fallback, { conditioned: { target, tries: maxTries, hit: false } });
+  if (finalOnly) return Object.assign(finalOnly, { conditioned: { target, htTarget, tries, hit: true, htHit: false } });
+  return Object.assign(sameOutcome ?? fallback, { conditioned: { target, htTarget, tries, hit: false } });
 }
 
 // Aynı analizle çok sayıda maç oynatıp dağılımı özetler (güven aralığı / kalibrasyon için)

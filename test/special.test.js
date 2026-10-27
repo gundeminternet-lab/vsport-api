@@ -136,3 +136,21 @@ test('getSpecial: abone her başlığı alır, abone olmayan almaz; biten maçta
   const got = await svc(sub).getSpecial({ uid: 'u1', ...fixture });
   assert.deepEqual(got.topics, SPECIAL_TOPICS);
 });
+
+test('ilk yarı skoru: tek skor olarak hep 0-0 değil; favori varsa 1-0/0-1, dengeli ve az gollü maçta 0-0', () => {
+  const ht = (lambdaHome, lambdaAway) =>
+    buildSpecial(['htscore'], { homeName: 'Ev', awayName: 'Dep', model: { lambdaHome, lambdaAway, sigma: 0.15 }, seed: 'x' }).htscore;
+  const fav = ht(2.1, 0.8);
+  assert.equal(fav.big, '1 - 0');
+  assert.equal(fav.meta.predicted, '1-0');
+  assert.equal(fav.bigCaption, 'tahmini ilk yarı skoru');
+  assert.equal(ht(0.8, 2.1).meta.predicted, '0-1');
+  const even = ht(1.1, 1.1);
+  assert.equal(even.meta.predicted, '0-0');
+  assert.equal(even.meta.scenario, 'nil');
+  // Senaryo tablosu: dört senaryo toplamı ~%100
+  const sc = fav.groups.find((g) => g.title === 'İlk yarı senaryoları').rows.reduce((a, r) => a + r.pct, 0);
+  assert.ok(sc >= 98 && sc <= 102, String(sc));
+  // Tahmin en sık tek skordan farklıysa açıklanır
+  if (fav.meta.topScore !== fav.meta.predicted) assert.ok(fav.summary.some((l) => l.includes(`Tek skor olarak en sık görülen ${fav.meta.topScore}`)));
+});

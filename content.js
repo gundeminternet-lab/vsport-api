@@ -4,7 +4,7 @@
 //   odds : kazanabilecek bahis ihtimalleri (MS, çifte şans, KG, alt/üst, İY, en olası skorlar, adil oran)
 //   sim  : 60 saniyelik simülasyon; oyuncu/top konumları kare kare hazırlanır, telefon yalnızca çizer
 
-import { scoreMatrix, scoresForOutcome } from './engine/analysis.js';
+import { baseMatrix, mixtureNodes, scoreMatrix, scoresForOutcome } from './engine/analysis.js';
 import { simulateMatch, simulateToScore } from './engine/simulator.js';
 import { createRng, seedToInt } from './engine/rng.js';
 import { MODEL } from './engine/config.js';
@@ -35,7 +35,7 @@ function sumMatrix(m, pred) {
 export function markets(lambdaHome, lambdaAway, sigma = 0) {
   const ft = scoreMatrix(lambdaHome, lambdaAway, MODEL.dcRho, 10, sigma);
   // İlk yarıda gollerin ~%45'i atılır.
-  const ht = scoreMatrix(lambdaHome * 0.45, lambdaAway * 0.45, MODEL.dcRho, 10, sigma);
+  const ht = scoreMatrix(lambdaHome * 0.45, lambdaAway * 0.45, MODEL.dcRhoHalf, 10, sigma);
   const p = {
     ms1: sumMatrix(ft, (i, j) => i > j),
     msX: sumMatrix(ft, (i, j) => i === j),
@@ -115,6 +115,54 @@ export function matrixOf(analysis) {
  * "En olası skor": tahmin edilen sonuçla (1/X/2) uyumlu en olası skor. Tablonun genel zirvesi çoğu zaman 1-1 olur;
  * model "ev sahibi kazanır" derken 1-1 göstermek tutarsızdır.
  */
+/** İlk yarıda atılan gol payı (markets ve Özel Yorum ile aynı). */
+export const HT_SHARE = 0.45;
+
+/**
+ * İlk yarı skor tablosu ve tahmini ilk yarı skoru (Özel Yorum ve AI simülasyonu ortak kullanır; ikisi aynı devre
+ * skorunu anlatsın). Tek skor olarak en sık görülen neredeyse her maçta 0-0'dır, ama çoğu maçta ilk yarıda gol olma
+ * ihtimali %65'in üstündedir. Bu yüzden önce dört senaryodan en olası olanı seçilir (ev sahibi önde, deplasman önde,
+ * golsüz, gollü beraberlik), sonra o senaryonun en olası skoru: dengeli ya da az gollü maçta 0-0, belirgin favorili
+ * maçta 1-0 / 0-1, çok gollü dengeli maçta 1-1.
+ */
+export function halfTimeTable(lambdaHome, lambdaAway, sigma = 0, maxG = 6) {
+  const lh1 = lambdaHome * HT_SHARE;
+  const la1 = lambdaAway * HT_SHARE;
+  const m = Array.from({ length: maxG + 1 }, () => new Array(maxG + 1).fill(0));
+  for (const n of mixtureNodes(lh1, la1, sigma)) {
+    const b = baseMatrix(n.lh, n.la, MODEL.dcRhoHalf, maxG);
+    for (let i = 0; i <= maxG; i++) for (let j = 0; j <= maxG; j++) m[i][j] += n.w * b[i][j];
+  }
+  const scores = [];
+  let win = 0;
+  let draw = 0;
+  let lose = 0;
+  let over05 = 0;
+  let over15 = 0;
+  for (let i = 0; i <= maxG; i++) {
+    for (let j = 0; j <= maxG; j++) {
+      const p = m[i][j];
+      scores.push({ score: `${i}-${j}`, home: i, away: j, p });
+      if (i > j) win += p;
+      else if (i === j) draw += p;
+      else lose += p;
+      if (i + j >= 1) over05 += p;
+      if (i + j >= 2) over15 += p;
+    }
+  }
+  scores.sort((a, b) => b.p - a.p);
+  const goalless = m[0][0];
+  const scenarios = [
+    { key: 'home', p: win, fits: (s) => s.home > s.away },
+    { key: 'away', p: lose, fits: (s) => s.home < s.away },
+    { key: 'nil', p: goalless, fits: (s) => s.home === 0 && s.away === 0 },
+    { key: 'sdraw', p: draw - goalless, fits: (s) => s.home === s.away && s.home > 0 },
+  ].sort((a, b) => b.p - a.p);
+  const scenario = scenarios[0].key;
+  const predicted = scores.find(scenarios[0].fits) ?? scores[0];
+  return { lh1, la1, scores, win, draw, lose, goalless, over05, over15, scenario, predicted };
+}
+
 export function predictedScore(analysis) {
   return scoresForOutcome(matrixOf(analysis), predictedOutcome(analysis))[0];
 }
@@ -500,7 +548,10 @@ export function pickSimTarget(analysis, seed) {
 
 export function buildSim(analysis, { seed, durationSeconds = 60 } = {}) {
   const target = pickSimTarget(analysis, seed);
-  const timeline = simulateToScore(analysis, { seed, target: { home: target.home, away: target.away } });
+  // Devre skoru Özel Yorum'daki tahmini ilk yarı skoruyla aynı olsun (final skoruyla uyumluysa)
+  const ht = halfTimeTable(analysis.lambdaHome, analysis.lambdaAway, analysis.sigma ?? 0).predicted;
+  const htTarget = ht.home <= target.home && ht.away <= target.away ? { home: ht.home, away: ht.away } : null;
+  const timeline = simulateToScore(analysis, { seed, target: { home: target.home, away: target.away }, htTarget });
   const choreo = buildChoreography(timeline, { durationSeconds });
   const form = (l) => (l >= 1.6 ? '4-3-3' : '4-4-2');
   const players = buildPlayers(choreo, { homeFormation: form(analysis.lambdaHome), awayFormation: form(analysis.lambdaAway) });

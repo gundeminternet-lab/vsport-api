@@ -101,6 +101,9 @@ export const MODEL = {
   lambdaMin: 0.3,
   lambdaMax: 3.8,
   dcRho: -0.06, // Dixon-Coles düşük skor düzeltmesi (yalnızca olasılık tablosunda)
+  // Yarı skorlarında düşük skor bağımlılığı daha zayıf: tam düzeltme ilk yarı 0-0 ihtimalini gerçekte görülenden
+  // (~%27-30) yukarı itiyordu.
+  dcRhoHalf: -0.03,
 };
 
 export const SIM = {

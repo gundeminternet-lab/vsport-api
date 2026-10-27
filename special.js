@@ -15,7 +15,7 @@
 import { baseMatrix, mixtureNodes } from './engine/analysis.js';
 import { MODEL } from './engine/config.js';
 import { cornerDistribution, expectedCorners } from './engine/corners.js';
-import { markets, phraser } from './content.js';
+import { halfTimeTable, markets, phraser } from './content.js';
 
 export const SPECIAL_TOPICS = ['corners', 'htscore', 'htft', 'btts'];
 export const SPECIAL_LABELS = {
@@ -25,7 +25,8 @@ export const SPECIAL_LABELS = {
   btts: 'KG var senaryoları',
 };
 // Özel Yorumlar ayrıca satılmaz: abonelikte ve AI paketinin içindedir (jeton fiyatı kaldırıldı).
-export const SPECIAL_VERSION = 1;
+// 2: ilk yarı skoru artık "tahmini skor" (dört senaryodan en olası olanın skoru), yarı tablolarında hafif düzeltme
+export const SPECIAL_VERSION = 2;
 
 /** İlk yarıda atılan gol payı (content.js markets ile aynı). */
 const HT_SHARE = 0.45;
@@ -53,8 +54,8 @@ export function halfModel({ lambdaHome, lambdaAway, sigma = 0 }) {
   let bttsSh = 0;
   let bttsBoth = 0;
   for (const node of mixtureNodes(lambdaHome, lambdaAway, sigma)) {
-    const h1 = baseMatrix(node.lh * HT_SHARE, node.la * HT_SHARE, MODEL.dcRho, maxG);
-    const h2 = baseMatrix(node.lh * (1 - HT_SHARE), node.la * (1 - HT_SHARE), MODEL.dcRho, maxG);
+    const h1 = baseMatrix(node.lh * HT_SHARE, node.la * HT_SHARE, MODEL.dcRhoHalf, maxG);
+    const h2 = baseMatrix(node.lh * (1 - HT_SHARE), node.la * (1 - HT_SHARE), MODEL.dcRhoHalf, maxG);
     let b1 = 0;
     let b2 = 0;
     for (let i = 0; i <= maxG; i++) {
@@ -228,81 +229,69 @@ function cornersTopic({ H, A, say, corners, lambdaHome, lambdaAway }) {
 }
 
 function htscoreTopic({ H, A, say, lambdaHome, lambdaAway, sigma }) {
-  const lh1 = lambdaHome * HT_SHARE;
-  const la1 = lambdaAway * HT_SHARE;
-  // İlk yarı skor tablosu: content.js markets ile aynı model (aynı belirsizlik karışımı)
-  const nodes = mixtureNodes(lh1, la1, sigma);
-  const maxG = 6;
-  const m = Array.from({ length: maxG + 1 }, () => new Array(maxG + 1).fill(0));
-  for (const n of nodes) {
-    const b = baseMatrix(n.lh, n.la, MODEL.dcRho, maxG);
-    for (let i = 0; i <= maxG; i++) for (let j = 0; j <= maxG; j++) m[i][j] += n.w * b[i][j];
-  }
-  const scores = [];
-  let win = 0;
-  let draw = 0;
-  let lose = 0;
-  let over05 = 0;
-  let over15 = 0;
-  for (let i = 0; i <= maxG; i++) {
-    for (let j = 0; j <= maxG; j++) {
-      scores.push({ score: `${i}-${j}`, p: m[i][j] });
-      if (i > j) win += m[i][j];
-      else if (i === j) draw += m[i][j];
-      else lose += m[i][j];
-      if (i + j >= 1) over05 += m[i][j];
-      if (i + j >= 2) over15 += m[i][j];
-    }
-  }
-  scores.sort((a, b) => b.p - a.p);
-  const top = scores.slice(0, 5);
+  // İlk yarı tablosu ve tahmini skor: AI simülasyonuyla ortak (content.js → halfTimeTable)
+  const t = halfTimeTable(lambdaHome, lambdaAway, sigma);
+  const { lh1, la1, win, draw, lose, goalless, over05, over15, predicted } = t;
+  const scene = { key: t.scenario };
+  const top = t.scores.slice(0, 5);
   const best = top[0];
   const tot = lh1 + la1;
-
   const lead = win >= lose ? { T: H, p: win } : { T: A, p: lose };
+
+  const why =
+    scene.key === 'nil'
+      ? say('hs.why.nil', [
+          `İki takımın ilk yarı gol beklentisi düşük (toplam ${tr1(tot)}); golsüz devre (%${pct(goalless)}) diğer senaryolardan önde.`,
+          `Dengeli ve temkinli bir ilk yarı bekleniyor: golsüz devre ihtimali %${pct(goalless)} ile en yüksek senaryo.`,
+        ])
+      : scene.key === 'sdraw'
+        ? `İki takım da ilk yarıda gol bulmaya yakın; gollü beraberlik ihtimali %${pct(draw - goalless)}.`
+        : say('hs.why.lead', [
+            `İlk yarıda gol olma ihtimali %${pct(over05)}; ${lead.T} devreyi önde kapatma ihtimali (%${pct(lead.p)}) golsüz devreden (%${pct(goalless)}) yüksek.`,
+            `${lead.T} ilk 45 dakikada daha üretken: devreyi önde kapatma ihtimali %${pct(lead.p)}, golsüz devre %${pct(goalless)}.`,
+          ]);
+
   const summary = [
     say('hs.exp', [
       `İlk yarıda ${H} için ${tr1(lh1)}, ${A} için ${tr1(la1)} gol bekleniyor.`,
       `Model ilk 45 dakikaya ${H} ${tr1(lh1)}, ${A} ${tr1(la1)} gol yazıyor.`,
     ]),
-    say('hs.top', [
-      `En olası ilk yarı skoru ${best.score} (%${pct(best.p)}); ardından ${top[1].score} (%${pct(top[1].p)}) ve ${top[2].score} (%${pct(top[2].p)}) geliyor.`,
-      `İlk yarı için ilk sırada ${best.score} var (%${pct(best.p)}), sonra ${top[1].score} (%${pct(top[1].p)}) ve ${top[2].score} (%${pct(top[2].p)}).`,
-    ]),
+    `Tahmini ilk yarı skoru ${predicted.score}. ${why}`,
+    predicted.score === best.score
+      ? `Skor tablosunda da ilk sırada ${best.score} var (%${pct(best.p)}); ardından ${top[1].score} (%${pct(top[1].p)}) ve ${top[2].score} (%${pct(top[2].p)}).`
+      : `Tek skor olarak en sık görülen ${best.score} (%${pct(best.p)}); ${predicted.score} ihtimali %${pct(predicted.p)}.`,
     `İlk yarıda en az bir gol ihtimali %${pct(over05)}, en az iki gol ihtimali %${pct(over15)}.`,
-    draw >= Math.max(win, lose)
-      ? say('hs.draw', ['Devreye beraberlikle girmek en güçlü senaryo.', 'İlk yarı büyük ihtimalle eşitlikle kapanır.'])
-      : say('hs.lead', [`Devreyi ${lead.T} önde kapatma ihtimali %${pct(lead.p)}.`, `İlk yarı sonunda ${lead.T} üstünlüğü %${pct(lead.p)} ihtimalle görünüyor.`]),
   ];
 
   const speech = [
     say('hs.s.top', [
-      `İlk yarının en olası skoru ${spokenScore(best.score)}, ihtimali yüzde ${pct(best.p)}.`,
-      `İlk yarıda en çok ${spokenScore(best.score)} bekliyorum, ihtimali yüzde ${pct(best.p)}.`,
+      `İlk yarı için tahminim ${spokenScore(predicted.score)}.`,
+      `Devre arasına ${spokenScore(predicted.score)} ile gidilmesini bekliyorum.`,
     ]),
     `İlk yarıda en az bir gol ihtimali yüzde ${pct(over05)}.`,
-    draw >= Math.max(win, lose) ? 'Devreye büyük ihtimalle eşit gidilir.' : `Devreyi ${lead.T} önde kapatma ihtimali yüzde ${pct(lead.p)}.`,
+    scene.key === 'nil' ? `Golsüz devre ihtimali yüzde ${pct(goalless)}.` : `Devreyi ${lead.T} önde kapatma ihtimali yüzde ${pct(lead.p)}.`,
   ].join(' ');
 
   return {
     topic: 'htscore',
     title: SPECIAL_LABELS.htscore,
-    headline: say('hs.head', [`İlk yarı için en olası skor ${best.score}`, `Devre arası skoru ${best.score} olabilir`, `İlk 45 dakika: ${best.score} öne çıkıyor`]),
-    big: best.score.replace('-', ' - '),
-    bigCaption: 'en olası ilk yarı skoru',
+    headline: say('hs.head', [`İlk yarı tahmini: ${predicted.score}`, `Devre arası skoru ${predicted.score} olabilir`, `İlk 45 dakika: ${predicted.score} bekleniyor`]),
+    big: predicted.score.replace('-', ' - '),
+    bigCaption: 'tahmini ilk yarı skoru',
     facts: [
       { label: H, value: tr1(lh1) },
       { label: A, value: tr1(la1) },
       { label: 'İY gol', value: tr1(tot) },
     ],
     groups: [
-      { title: 'İlk yarı skorları', rows: top.map((s) => ({ label: s.score, pct: pct(s.p) })) },
+      { title: 'İlk yarı skorları', rows: top.map((x) => ({ label: x.score, pct: pct(x.p) })) },
       {
-        title: 'İlk yarı sonucu',
+        title: 'İlk yarı senaryoları',
         rows: [
           { label: `${H} önde`, pct: pct(win) },
-          { label: 'Berabere', pct: pct(draw) },
           { label: `${A} önde`, pct: pct(lose) },
+          { label: 'Golsüz (0-0)', pct: pct(goalless) },
+          { label: 'Gollü beraberlik', pct: pct(draw - goalless) },
         ],
       },
       {
@@ -317,7 +306,7 @@ function htscoreTopic({ H, A, say, lambdaHome, lambdaAway, sigma }) {
     speech,
     mood: 'warm',
     note: null,
-    meta: { topScore: best.score },
+    meta: { topScore: best.score, predicted: predicted.score, scenario: scene.key },
   };
 }
 
