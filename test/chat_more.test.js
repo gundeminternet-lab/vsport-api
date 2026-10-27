@@ -79,3 +79,45 @@ test('öneriler maçın durumuna göre değişir', () => {
   assert.ok(suggestionsFor('live').includes('Ev sahibi gol atarsa?'));
   assert.ok(suggestionsFor('pre').includes('Korner beklentisi?'));
 });
+
+test('ilk yarı sorusu: devre sonucu olasılıkları ve tahmini devre skoru', async () => {
+  const { intentOf: io, followUpAnswer: fu } = await import('../chat.js');
+  assert.equal(io('İlk yarı kim önde?'), 'first');
+  assert.equal(io('devreyi kim önde kapatır'), 'first');
+  assert.equal(io('ikinci yarı nasıl'), 'second');
+  const r = fu({ intent: 'first', H: 'Ev', A: 'Dep', model: { lambdaHome: 2.1, lambdaAway: 0.8, sigma: 0.1 }, content: { ai: { pick: '1', probabilities: { home: 60, draw: 22, away: 18 }, topScore: '2-0' } }, importance: { label: 'Orta', score: 50, reasons: [] }, state: 'pre', live: null });
+  assert.match(r.answer, /^İlk yarı: Ev önde %\d+, beraberlik %\d+, Dep önde %\d+; tahmini devre skoru 1-0/);
+});
+
+test('neden yanıtı tahmini destekleyen etkenleri sıralar, karşı etkeni de söyler', async () => {
+  const { whyAnswer } = await import('../chat.js');
+  const text = whyAnswer({
+    H: 'Ev',
+    A: 'Dep',
+    model: { lambdaHome: 1.9, lambdaAway: 0.9, homePpg: 2.2, awayPpg: 1.1, homeRank: 2, awayRank: 14, homeGf: 2.0, homeGa: 0.8, awayGf: 1.0, awayGa: 1.6, homeFormPoints: 4, homeFormMatches: 5, awayFormPoints: 12, awayFormMatches: 5, h2h: { n: 0 } },
+    content: { ai: { pick: '1', probabilities: { home: 62, draw: 22, away: 16 } } },
+    importance: { reasons: [] },
+  });
+  assert.match(text, /^Model Ev kazanır diyor/);
+  assert.match(text, /gol beklentisi Ev 1,9, Dep 0,9/);
+  assert.match(text, /puan ortalaması Ev 2,2, Dep 1,1 \(Ev 2\., Dep 14\.\)/);
+  assert.match(text, /Karşı yönde: son maçlar: Ev 4\/15, Dep 12\/15 puan/);
+});
+
+test('neden: tarafsız sahada ev sahibi avantajı söylenmez; farklı liglerde lig gücü gerekçe olur', async () => {
+  const { whyAnswer } = await import('../chat.js');
+  const base = { lambdaHome: 1.0, lambdaAway: 1.9, h2h: { n: 0 }, neutral: true, leagueRatio: 0.62, homeLeague: 'tur.1', awayLeague: 'eng.1' };
+  const text = whyAnswer({ H: 'Ev', A: 'Dep', model: base, content: { ai: { pick: '2', probabilities: { home: 22, draw: 24, away: 54 } } }, importance: { reasons: [] } });
+  assert.doesNotMatch(text, /ev sahibi avantajı\)/);
+  assert.match(text, /lig gücü: Dep daha güçlü bir ligden \(Ev: Süper Lig, Dep: Premier League\)/);
+});
+
+test('senaryo: dakika ve skor birlikte; skorun parçası dakika sayılmaz', async () => {
+  const { scenarioOf: so } = await import('../chat.js');
+  const base = { minute: 30, home: 0, away: 0 };
+  assert.deepEqual(so('75. dakikada ev sahibi gol atarsa?', { H: 'Ev', A: 'Dep', base }), { minute: 75, home: 1, away: 0, label: 'Ev gol atarsa' });
+  assert.deepEqual(so("2-1'de biterse? 2-1 olursa", { H: 'Ev', A: 'Dep', base }), { minute: 30, home: 2, away: 1, label: 'Skor 2-1 olursa' });
+  // göreli dakika ("10 dk sonra") ve geçmiş dakika (şimdiki dakika kullanılır)
+  assert.equal(so('10 dk sonra deplasman gol atarsa', { H: 'Ev', A: 'Dep', base }).minute, 40);
+  assert.equal(so('20. dakikada deplasman gol atarsa', { H: 'Ev', A: 'Dep', base }).minute, 30);
+});

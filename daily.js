@@ -35,6 +35,8 @@ const MAX_CLAIMS = 30;
 const MATCH_TIMEOUT_MS = 3 * 60e3;
 /** Bir tur bundan uzun "meşgul" kalırsa takılmış sayılır, yeni tur başlar. */
 const STALE_BUSY_MS = 12 * 60e3;
+/** Sonuçlanamayan maçın yeniden denenmesi için beklenen süre. */
+const RETRY_MS = 30 * 60e3;
 
 const withTimeout = (promise, ms, message) => {
   let timer;
@@ -284,12 +286,19 @@ export class DailyPredictionService {
     return made;
   }
 
-  /** Bitmiş maçların sonucunu işler (10 dakikada bir). */
+  /**
+   * Bitmiş maçların sonucunu işler (10 dakikada bir). Henüz bitmemiş ya da okunamayan maç yarım saat yeniden
+   * denenmez: listenin başında takılı kalan eski maçlar (ertelenmiş, geçici veri sorunu) yeni biten maçları bekletmesin.
+   */
   async resolveDue({ limit = 30 } = {}) {
     const now = this.now();
-    const due = await this.store.listDailyDue(now - FINISH_GRACE_MS, limit);
+    this._tried ??= new Map();
+    for (const [k, t] of this._tried) if (now - t > RETRY_MS) this._tried.delete(k);
+    const listed = await this.store.listDailyDue(now - FINISH_GRACE_MS, limit * 4);
+    const due = listed.filter((d) => !this._tried.has(d.key)).slice(0, limit);
     let done = 0;
     for (const d of due) {
+      this._tried.set(d.key, now);
       const entry = await this.store.getDaily(d.key);
       if (!entry) {
         await this.store.saveDailyResult(d.key, null);
@@ -304,6 +313,7 @@ export class DailyPredictionService {
       const settled = settleEntry(entry, facts, now);
       if (!settled) continue;
       await this.store.saveDailyResult(d.key, settled);
+      this._tried.delete(d.key);
       this._lists.delete(entry.day);
       done++;
       this.stats.resolved++;

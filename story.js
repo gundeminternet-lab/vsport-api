@@ -75,8 +75,19 @@ export function buildStory({ lambdaHome, lambdaAway, sigma = 0, homeName: H, awa
   }
   const outcomes = { home, draw, away };
   const p = { home: pct(home, sims), draw: pct(draw, sims), away: pct(away, sims) };
-  const pick = home >= draw && home >= away ? '1' : away >= draw && away >= home ? '2' : 'X';
-  const topScores = [...counts.entries()].sort((x, y) => y[1] - x[1]).slice(0, 3).map(([score, c]) => ({ score, pct: pct(c, sims) }));
+  // Tahmin (1/X/2) örneklemden değil, tablonun kendisinden: AI analizindeki tercihle birebir aynı olsun (iki sonuç
+  // birbirine çok yakınken örnekleme gürültüsü tercihi çevirmesin).
+  const exact = outcomeProbs(lambdaHome, lambdaAway, sigma);
+  const pick = exact.home >= exact.draw && exact.home >= exact.away ? '1' : exact.away >= exact.draw && exact.away >= exact.home ? '2' : 'X';
+  const sorted = [...counts.entries()].sort((x, y) => y[1] - x[1]);
+  const topScores = sorted.slice(0, 3).map(([score, c]) => ({ score, pct: pct(c, sims) }));
+  // Kontrol listesindeki skor tahmini, sonuç tahminiyle uyumlu en sık skordur ("ev sahibi kazanır" derken 1-1 yazmasın)
+  const fitsPick = (score) => {
+    const [h, a] = score.split('-').map(Number);
+    return (h > a ? '1' : h < a ? '2' : 'X') === pick;
+  };
+  const pickScore = sorted.find(([score]) => fitsPick(score)) ?? sorted[0];
+  const predicted = pickScore ? { score: pickScore[0], pct: pct(pickScore[1], sims) } : null;
 
   // İlk gol: golsüz biten maçlar dışında, gol hızlarının oranıyla bölünür (Poisson süreçlerinde ilk golün sahibi).
   const none = (counts.get('0-0') ?? 0) / sims;
@@ -118,6 +129,7 @@ export function buildStory({ lambdaHome, lambdaAway, sigma = 0, homeName: H, awa
     pct: p,
     pick,
     topScores,
+    predicted,
     goals,
     firstGoal,
     confident,
@@ -131,19 +143,33 @@ export function buildStory({ lambdaHome, lambdaAway, sigma = 0, homeName: H, awa
     // Kontrol listesinin maç sonunda değerlendirilebilen biçimi (checklist ile aynı sırada).
     checks: [
       { type: 'result', value: pick },
-      { type: 'score', value: topScores[0]?.score ?? null },
+      { type: 'score', value: predicted?.score ?? null },
       { type: 'over25', value: goals.over25 >= 50 },
       { type: 'btts', value: goals.btts >= 50 },
       { type: 'firstGoal', value: firstGoal.home >= firstGoal.away ? 'home' : 'away' },
     ],
     checklist: [
       { label: `Sonuç: ${pickLabel}`, pct: pickPct },
-      { label: `Skor: ${topScores[0]?.score ?? '-'}`, pct: topScores[0]?.pct ?? 0 },
+      { label: `Skor: ${predicted?.score ?? '-'}`, pct: predicted?.pct ?? 0 },
       { label: goals.over25 >= 50 ? 'En az 3 gol' : 'En fazla 2 gol', pct: goals.over25 >= 50 ? goals.over25 : 100 - goals.over25 },
       { label: goals.btts >= 50 ? 'İki takım da gol atar' : 'En az bir takım gol atamaz', pct: goals.btts >= 50 ? goals.btts : 100 - goals.btts },
       { label: `İlk golü ${firstFav[0]} atar`, pct: firstFav[1] },
     ],
   };
+}
+
+/** Tablodan kesin 1/X/2 olasılıkları (tahmin seçimi için). */
+function outcomeProbs(lambdaHome, lambdaAway, sigma) {
+  const m = scoreMatrix(lambdaHome, lambdaAway, MODEL.dcRho, 10, sigma);
+  let home = 0;
+  let draw = 0;
+  let away = 0;
+  for (let i = 0; i < m.length; i++) for (let j = 0; j < m[i].length; j++) {
+    if (i > j) home += m[i][j];
+    else if (i === j) draw += m[i][j];
+    else away += m[i][j];
+  }
+  return { home, draw, away };
 }
 
 const cache = new Map();

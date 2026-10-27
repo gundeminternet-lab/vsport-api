@@ -7,7 +7,7 @@
 import { baseMatrix, mixtureNodes, scoreMatrix, scoresForOutcome } from './engine/analysis.js';
 import { simulateMatch, simulateToScore } from './engine/simulator.js';
 import { createRng, seedToInt } from './engine/rng.js';
-import { MODEL } from './engine/config.js';
+import { MODEL, LEAGUES } from './engine/config.js';
 import { buildChoreography } from './engine/animation/choreography.js';
 import { buildPlayers } from './engine/animation/players.js';
 
@@ -35,7 +35,7 @@ function sumMatrix(m, pred) {
 export function markets(lambdaHome, lambdaAway, sigma = 0) {
   const ft = scoreMatrix(lambdaHome, lambdaAway, MODEL.dcRho, 10, sigma);
   // İlk yarıda gollerin ~%45'i atılır.
-  const ht = scoreMatrix(lambdaHome * 0.45, lambdaAway * 0.45, MODEL.dcRhoHalf, 10, sigma);
+  const ht = scoreMatrix(lambdaHome * HT_SHARE, lambdaAway * HT_SHARE, MODEL.dcRhoHalf, 10, sigma);
   const p = {
     ms1: sumMatrix(ft, (i, j) => i > j),
     msX: sumMatrix(ft, (i, j) => i === j),
@@ -251,6 +251,7 @@ export function modelOf(analysis) {
   const ph = analysis.home.profile;
   const pa = analysis.away.profile;
   const h2h = analysis.h2h ?? {};
+  const f = analysis.factors ?? {};
   return {
     lambdaHome: analysis.lambdaHome,
     lambdaAway: analysis.lambdaAway,
@@ -274,6 +275,13 @@ export function modelOf(analysis) {
     homeFormMatches: fin(ph.form.matches),
     awayFormMatches: fin(pa.form.matches),
     h2h: { n: fin(h2h.n) ?? 0, homeWins: fin(h2h.homeWins) ?? 0, draws: fin(h2h.draws) ?? 0, awayWins: fin(h2h.awayWins) ?? 0 },
+    neutral: analysis.neutral === true,
+    // Farklı liglerin takımları: lig gücü oranı (1'den büyükse ev sahibinin ligi daha güçlü) ve ligler
+    leagueRatio: fin(f.leagueRatio) ?? 1,
+    homeLeague: f.homeLeague ?? null,
+    awayLeague: f.awayLeague ?? null,
+    newHome: f.newHome === true,
+    newAway: f.newAway === true,
   };
 }
 
@@ -421,13 +429,22 @@ export function buildAi(analysis, { editorComment = null, seed = null } = {}) {
   }
   sections.push({ title: 'Aralarındaki maçlar', text: h2hText });
 
-  // Maçın anahtarı
+  // Maçın anahtarı. Hücum/savunma gücü: lig geneli model varsa onun rakibe göre düzeltilmiş değerleri (ham gol
+  // ortalaması rakip kalitesini bilmez); yoksa takım geçmişinden. Ligler arası maçta değerler takımın kendi ligine
+  // göredir: hücum-savunma eşleşmesi kıyaslanmaz, yalnızca belirgin güçlü savunma söylenir.
+  const fx = analysis.factors ?? {};
+  const rated = fx.model === 'lig-gücü' || fx.model === 'ligler-arası';
+  const cross = fx.model === 'ligler-arası';
+  const powerOf = (prof, side) =>
+    rated && fi(fx[`attack${side}`]) !== null && fi(fx[`defense${side}`]) !== null
+      ? { attack: fx[`attack${side}`], defense: fx[`defense${side}`], form: prof.form }
+      : prof;
   const factors = [];
   for (const [T, O, mine, theirs, k] of [
-    [H, A, pH, pA, 'h'],
-    [A, H, pA, pH, 'a'],
+    [H, A, powerOf(pH, 'Home'), powerOf(pA, 'Away'), 'h'],
+    [A, H, powerOf(pA, 'Away'), powerOf(pH, 'Home'), 'a'],
   ]) {
-    if (fi(mine.attack) !== null && fi(theirs.defense) !== null && mine.attack >= 1.2 && theirs.defense >= 1.1) {
+    if (!cross && fi(mine.attack) !== null && fi(theirs.defense) !== null && mine.attack >= 1.2 && theirs.defense >= 1.1) {
       factors.push({
         w: mine.attack - 1 + (theirs.defense - 1),
         text: say(`kf.atk.${k}`, ['{T} hücumu, {O} savunmasının açık verdiği noktalara denk geliyor.', '{T} hücum gücü, {O} savunmasının zayıf karnını yoklayabilir.'], { T, O }),
@@ -446,6 +463,19 @@ export function buildAi(analysis, { editorComment = null, seed = null } = {}) {
         text: say(`kf.form.${k}`, ['{T} formda bir adım önde; son maçlardaki özgüven sahaya yansıyabilir.', '{T} son haftalarda daha formda, bu özgüven fark yaratabilir.'], { T }),
       });
     }
+  }
+  // Farklı liglerin takımları: lig gücü farkı (Avrupa kupası, ulusal kupada farklı basamaklar)
+  if (cross && Number.isFinite(fx.leagueRatio) && Math.abs(Math.log(fx.leagueRatio)) > 0.1) {
+    const name = (slug) => (slug ? LEAGUES[slug]?.name ?? slug : fx.crossKind === 'national' ? 'alt liglerden biri' : 'farklı bir lig');
+    const homeStronger = fx.leagueRatio > 1;
+    factors.push({
+      w: Math.abs(Math.log(fx.leagueRatio)) * 1.2,
+      text: say('kf.league', ['{T} daha güçlü bir ligden geliyor ({LH} – {LA}); model bu farkı hesaba katıyor.', 'Lig farkı {T} lehine: {LH} ile {LA} arasındaki güç farkı tahmine yansıdı.'], {
+        T: homeStronger ? H : A,
+        LH: name(fx.homeLeague),
+        LA: name(fx.awayLeague),
+      }),
+    });
   }
   const under = Math.min(pr.homeWin, pr.awayWin);
   if (Math.abs(gap) > 0.2 && under >= 0.2) {
@@ -467,7 +497,7 @@ export function buildAi(analysis, { editorComment = null, seed = null } = {}) {
   const firstGoal = say(
     'kf.first',
     [
-      'İlk golün {T} tarafından gelme ihtimali yaklaşık %{p}; erken gol maçın planını baştan değiştirebilir.',
+      'Gol olursa ilk golün {T} tarafından gelme ihtimali yaklaşık %{p}; erken gol maçın planını baştan değiştirebilir.',
       'Gol gelirse ilk golü {T} atar diyorum (%{p}); skoru ilk açan taraf maçı rahatlatabilir.',
     ],
     { T: firstTeam, p: firstPct },

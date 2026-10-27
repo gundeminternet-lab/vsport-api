@@ -24,24 +24,27 @@ export const LIVE = Object.freeze({
   sotXg: 0.24, // isabetli şut başına kaba gol değeri
   shotXg: 0.04, // isabetsiz / bloklanan şut başına
   priorShots: 3, // maç öncesi gücün "maç" cinsinden ağırlığı (şut verisi varken); yapay maç denemesinde en iyi 2-3
-  priorGoals: 14, // şut verisi yokken goller çok gürültülü: maç öncesi güç çok daha ağır basar
-  trail1: 1.12, // fark 1: geride olanın gol hızı
-  lead1: 0.92, // fark 1: önde olanın gol hızı
-  trail2: 1.05, // fark ≥ 2
-  lead2: 0.97,
+  priorGoals: 20, // şut verisi yokken goller çok gürültülü: maç öncesi güç çok daha ağır basar
+  // Skor etkisi: 2016-2026 arası 35.000+ gerçek maçta devre skorundan maç sonucuna bakılarak ayarlandı
+  // (geride kalan takımın geri dönüşü önceki değerlerle biraz az tahmin ediliyordu).
+  trail1: 1.2, // fark 1: geride olanın gol hızı
+  lead1: 0.88, // fark 1: önde olanın gol hızı
+  trail2: 1.15, // fark ≥ 2
+  lead2: 0.9,
   redOwn: 0.7, // eksik oyuncu başına kendi gol hızı (en çok 2 eksik sayılır)
   redOpp: 1.3, // eksik oyuncu başına rakibin gol hızı
   maxExtra: 10, // kalan sürede takım başı en çok ek gol (dağılım kesimi)
 });
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-const rate = (t) => 1 + (LIVE.ramp * t) / 90;
+// Zaman eğrisi ayarları (ramp, uzatmalar) parametre olarak verilebilir: kalibrasyon testleri aynı kodu farklı
+// katsayılarla çalıştırır. Önceden yalnızca güç güncellemesi parametreleri kullanılıyor, skor/kırmızı kart ve zaman
+// eğrisi ayarları sessizce yok sayılıyordu.
+const rateP = (P, t) => 1 + (P.ramp * t) / 90;
 /** ∫ r(t) dt, a..b (normal süre içinde). */
-const mass = (a, b) => (b - a) + (LIVE.ramp * (b * b - a * a)) / 180;
-
-const HALF1 = mass(0, 45) + LIVE.stoppage1 * rate(45);
-const HALF2 = mass(45, 90) + LIVE.stoppage2 * rate(90);
-export const TOTAL_MASS = HALF1 + HALF2;
+const massP = (P, a, b) => (b - a) + (P.ramp * (b * b - a * a)) / 180;
+const totalMass = (P) => massP(P, 0, 45) + P.stoppage1 * rateP(P, 45) + massP(P, 45, 90) + P.stoppage2 * rateP(P, 90);
+export const TOTAL_MASS = totalMass(LIVE);
 
 /**
  * Maçın neresindeyiz: oynanan dakika + devre bilgisi. ESPN "45'+2'" saatini 47 olarak verir; devre 1 ise bu ilk yarının
@@ -49,7 +52,10 @@ export const TOTAL_MASS = HALF1 + HALF2;
  * Dönen: { remaining: kalan yoğunluk, played: oynanan yoğunluk, remShare: kalan pay (0..1), segments: [{ t, w }] }
  * segments: kalan sürenin dakikalık adımları (t: dakika, w: o adımın yoğunluk payı); toplamı remaining'e eşittir.
  */
-export function timeline({ minute = 0, period = 0, halftime = false } = {}) {
+export function timeline({ minute = 0, period = 0, halftime = false } = {}, P = LIVE) {
+  const rate = (t) => rateP(P, t);
+  const mass = (a, b) => massP(P, a, b);
+  const TOTAL = totalMass(P);
   const m = Math.max(0, Number(minute) || 0);
   // Devre 1 ama dakika ilk yarının uzatmasına sığmıyorsa (yanlış devre bilgisi) ikinci yarı sayılır
   if (period === 1 && m > 55) period = 2;
@@ -78,32 +84,32 @@ export function timeline({ minute = 0, period = 0, halftime = false } = {}) {
   const firstHalf = !halftime && (period === 1 || (period !== 2 && m <= 45));
   if (halftime) {
     run(45, 90);
-    extra(90, LIVE.stoppage2, rate(90));
+    extra(90, P.stoppage2, rate(90));
   } else if (firstHalf) {
     if (m <= 45) {
       run(m, 45);
-      extra(45, LIVE.stoppage1, rate(45));
+      extra(45, P.stoppage1, rate(45));
     } else {
-      extra(m, Math.max(LIVE.stoppage1 - (m - 45), 0.5), rate(45));
+      extra(m, Math.max(P.stoppage1 - (m - 45), 0.5), rate(45));
     }
     run(45, 90);
-    extra(90, LIVE.stoppage2, rate(90));
+    extra(90, P.stoppage2, rate(90));
   } else if (m <= 90) {
     run(Math.max(m, 45), 90);
-    extra(90, LIVE.stoppage2, rate(90));
+    extra(90, P.stoppage2, rate(90));
   } else {
-    extra(m, Math.max(LIVE.stoppage2 - (m - 90), 1), rate(90));
+    extra(m, Math.max(P.stoppage2 - (m - 90), 1), rate(90));
   }
   const remaining = segs.reduce((s, x) => s + x.w, 0);
-  const remShare = clamp(remaining / TOTAL_MASS, 0, 1);
-  return { remaining, played: TOTAL_MASS - remaining, remShare, segments: segs };
+  const remShare = clamp(remaining / TOTAL, 0, 1);
+  return { remaining, played: TOTAL - remaining, remShare, segments: segs, total: TOTAL };
 }
 
 /** Kaba xG: isabetli şut ağırlıklı. */
-export function shotValue({ shots = 0, onTarget = 0 } = {}) {
+export function shotValue({ shots = 0, onTarget = 0 } = {}, P = LIVE) {
   const sot = Math.max(0, Number(onTarget) || 0);
   const all = Math.max(sot, Number(shots) || 0);
-  return LIVE.sotXg * sot + LIVE.shotXg * (all - sot);
+  return P.sotXg * sot + P.shotXg * (all - sot);
 }
 
 /**
@@ -118,8 +124,8 @@ export function updatedRates({ lambdaHome, lambdaAway }, { elapsed, stats, goals
   if (hasShots) {
     const k = P.priorShots;
     return {
-      home: (lambdaHome * k + shotValue(stats.home)) / (k + e),
-      away: (lambdaAway * k + shotValue(stats.away)) / (k + e),
+      home: (lambdaHome * k + shotValue(stats.home, P)) / (k + e),
+      away: (lambdaAway * k + shotValue(stats.away, P)) / (k + e),
       weight: e / (k + e),
       source: 'shots',
     };
@@ -134,20 +140,20 @@ export function updatedRates({ lambdaHome, lambdaAway }, { elapsed, stats, goals
 }
 
 /** Skor ve kırmızı kart çarpanları: [ev, dep]. diff = ev − dep (o anki), reds = [ev eksik, dep eksik]. */
-export function stateFactors(diff, reds = [0, 0]) {
+export function stateFactors(diff, reds = [0, 0], P = LIVE) {
   let fh = 1;
   let fa = 1;
   if (diff === 1 || diff === -1) {
-    fh = diff > 0 ? LIVE.lead1 : LIVE.trail1;
-    fa = diff > 0 ? LIVE.trail1 : LIVE.lead1;
+    fh = diff > 0 ? P.lead1 : P.trail1;
+    fa = diff > 0 ? P.trail1 : P.lead1;
   } else if (Math.abs(diff) >= 2) {
-    fh = diff > 0 ? LIVE.lead2 : LIVE.trail2;
-    fa = diff > 0 ? LIVE.trail2 : LIVE.lead2;
+    fh = diff > 0 ? P.lead2 : P.trail2;
+    fa = diff > 0 ? P.trail2 : P.lead2;
   }
   const rh = clamp(Number(reds[0]) || 0, 0, 2);
   const ra = clamp(Number(reds[1]) || 0, 0, 2);
-  fh *= LIVE.redOwn ** rh * LIVE.redOpp ** ra;
-  fa *= LIVE.redOwn ** ra * LIVE.redOpp ** rh;
+  fh *= P.redOwn ** rh * P.redOpp ** ra;
+  fa *= P.redOwn ** ra * P.redOpp ** rh;
   return [fh, fa];
 }
 
@@ -156,21 +162,21 @@ export function stateFactors(diff, reds = [0, 0]) {
  * Her adımda gol olasılıkları o anki skora göre değişir (skor etkisi). rates: maç başı gol hızı.
  * Dönen: { m: (ek ev × ek dep) olasılık tablosu, next: [ev, dep, yok] }
  */
-export function remainingDistribution({ rateHome, rateAway, segments, home = 0, away = 0, reds = [0, 0] }) {
-  const N = LIVE.maxExtra;
+export function remainingDistribution({ rateHome, rateAway, segments, home = 0, away = 0, reds = [0, 0], total = TOTAL_MASS, P = LIVE }) {
+  const N = P.maxExtra;
   let p = Array.from({ length: N + 1 }, () => new Float64Array(N + 1));
   p[0][0] = 1;
   let none = 1; // henüz hiç ek gol yok
   let nextH = 0;
   let nextA = 0;
   for (const { w } of segments) {
-    const share = w / TOTAL_MASS;
+    const share = w / total;
     const q = Array.from({ length: N + 1 }, () => new Float64Array(N + 1));
     for (let i = 0; i <= N; i++) {
       for (let j = 0; j <= N; j++) {
         const v = p[i][j];
         if (v < 1e-14) continue;
-        const [fh, fa] = stateFactors(home + i - (away + j), reds);
+        const [fh, fa] = stateFactors(home + i - (away + j), reds, P);
         // Adım içinde gol sayısı Poisson; adım küçük olduğu için en çok bir gol (0, ev, dep) yeterli
         const lh = rateHome * fh * share;
         const la = rateAway * fa * share;
@@ -202,18 +208,18 @@ export function liveForecast(model, live, params = null) {
   const home = Number(live.home) || 0;
   const away = Number(live.away) || 0;
   const reds = live.reds ?? [0, 0];
-  const tl = timeline({ minute: live.minute ?? 0, period: live.period ?? 0, halftime: !!live.halftime });
+  const tl = timeline({ minute: live.minute ?? 0, period: live.period ?? 0, halftime: !!live.halftime }, P);
   const elapsed = 1 - tl.remShare;
   const upd = updatedRates(model, { elapsed, stats: live.stats ?? null, goals: [home, away] }, P);
   // Güç belirsizliği maç içi veriyle azalır
   const sigma = (model.sigma ?? 0) * (1 - upd.weight);
   const nodes = mixtureNodes(upd.home, upd.away, sigma);
 
-  const N = LIVE.maxExtra;
+  const N = P.maxExtra;
   const m = Array.from({ length: N + 1 }, () => new Array(N + 1).fill(0));
   const next = [0, 0, 0];
   for (const node of nodes) {
-    const d = remainingDistribution({ rateHome: node.lh, rateAway: node.la, segments: tl.segments, home, away, reds });
+    const d = remainingDistribution({ rateHome: node.lh, rateAway: node.la, segments: tl.segments, home, away, reds, total: tl.total, P });
     for (let i = 0; i <= N; i++) for (let j = 0; j <= N; j++) m[i][j] += node.w * d.m[i][j];
     for (let k = 0; k < 3; k++) next[k] += node.w * d.next[k];
   }

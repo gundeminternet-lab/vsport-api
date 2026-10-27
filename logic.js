@@ -106,6 +106,7 @@ export class PaidContentService {
       awayId: match.awayId,
       homeName: match.homeName,
       awayName: match.awayName,
+      neutral: match.neutral === true,
       // Maç bittikten sonra üretiliyorsa yalnızca maç öncesi veriler kullanılır.
       now: asOf ?? this.now(),
     });

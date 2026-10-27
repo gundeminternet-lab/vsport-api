@@ -8,8 +8,10 @@ export const ESPN = {
   cacheTtlMs: 5 * 60 * 1000,
 };
 
-// Lig güç katsayıları: SADECE farklı liglerden takımlar karşılaşırsa (Şampiyonlar Ligi vb.) kullanılır.
-// Bunlar resmi değil, kabaca tahmindir; kendi Elo/UEFA verinle değiştirebilirsin.
+// Lig güç katsayıları: SADECE farklı liglerden takımlar karşılaşırsa (Avrupa kupaları, ulusal kupada farklı basamaklar)
+// kullanılır. Etkisi (s_ev / s_dep)^leagueStrengthExp. Üst ligler kabaca tahmindir (Şampiyonlar Ligi maçlarıyla
+// sınandı); aynı ülkenin alt basamakları 2010-2025 arası çıkan/düşen takımların iki sezondaki gücünden ölçüldü
+// (ör. Championship takımı Premier Lig'e çıkınca güç farkı ≈ 1.38 kat).
 export const LEAGUES = {
   'eng.1': { name: 'Premier League', strength: 1.0 },
   'esp.1': { name: 'La Liga', strength: 0.97 },
@@ -23,14 +25,15 @@ export const LEAGUES = {
   'sco.1': { name: 'İskoç Premiership', strength: 0.7 },
   'gre.1': { name: 'Yunanistan Süper Ligi', strength: 0.7 },
   // Alt ligler ve diğer ülkeler (yalnızca farklı liglerin takımları karşılaşırsa kullanılır; kabaca tahmin)
-  'eng.2': { name: 'Championship', strength: 0.7 },
-  'esp.2': { name: 'La Liga 2', strength: 0.62 },
-  'ita.2': { name: 'Serie B', strength: 0.6 },
-  'ger.2': { name: '2. Bundesliga', strength: 0.64 },
-  'fra.2': { name: 'Ligue 2', strength: 0.56 },
-  'eng.3': { name: 'League One', strength: 0.56 },
-  'eng.4': { name: 'League Two', strength: 0.5 },
-  'tur.2': { name: 'TFF 1. Lig', strength: 0.5 },
+  'eng.2': { name: 'Championship', strength: 0.72 },
+  'esp.2': { name: 'La Liga 2', strength: 0.76 },
+  'ita.2': { name: 'Serie B', strength: 0.7 },
+  'ger.2': { name: '2. Bundesliga', strength: 0.72 },
+  'ger.3': { name: '3. Liga', strength: 0.59 },
+  'fra.2': { name: 'Ligue 2', strength: 0.66 },
+  'eng.3': { name: 'League One', strength: 0.585 },
+  'eng.4': { name: 'League Two', strength: 0.505 },
+  'tur.2': { name: 'TFF 1. Lig', strength: 0.62 },
   'rus.1': { name: 'Rusya Premier Ligi', strength: 0.68 },
   'aut.1': { name: 'Avusturya Bundesliga', strength: 0.66 },
   'sui.1': { name: 'İsviçre Süper Ligi', strength: 0.62 },
@@ -80,7 +83,9 @@ export const MODEL = {
   h2hWeightPerMatch: 0.03,
   h2hMaxWeight: 0.15,
 
-  leagueStrengthExp: 0.6,
+  // Lig güç oranının üssü. Şampiyonlar Ligi (434 maç) ve Almanya Kupası (118 maç) geriye dönük testinde 1.2-1.5
+  // aralığı en iyi; 0.6 güçlü lig takımlarını belirgin biçimde küçümsüyordu.
+  leagueStrengthExp: 1.4,
   eloK: 0.0008, // her iki takıma yarı yarıya uygulanan Elo farkı katsayısı
 
   // Lig geneli takım gücü (engine/ratings.js)
@@ -89,7 +94,23 @@ export const MODEL = {
   ratingPrior: 8, // az maçı olan takımı lig ortalamasına çeken "sahte maç" sayısı
   ratingMinWeight: 5, // takımın ligde en az bu kadar (ağırlıklı) maçı olmalı, yoksa eski yönteme dönülür
   ratingFormWeight: 0.1, // güç zaten güncel maçlara ağırlık verir; son 5 maç formu yalnızca hafif etkiler
-  ratingH2hMaxWeight: 0.06,
+  ratingH2hMaxWeight: 0.03, // ikili geçmiş lig gücünün üstüne çok az bilgi ekliyor (test)
+  // Toplam gol beklentisi ligin ortalamasına çekilir, güç farkı biraz açılır (analysis.shapeLambdas). 2017-2026
+  // arası 15 ligde haftalık yeniden kurulan modelle ayarlandı (eğitim 2017-22, doğrulama 2022-26).
+  ratingTotalK: 0.6,
+  ratingSupK: 1.1,
+  ratingUncMul: 0.3, // aynı ligde belirsizlik katmanının payı (tam katman olasılıkları gereğinden fazla ortaya çekiyordu)
+  // Ligde yeni takım (son 300 günde ligde ilk maçı): az maçta lig ortalamasına değil, daha zayıf bir merkeze çekilir
+  // (alt ligden çıkan takımlar ortalamanın altındadır). Sezonun ilk maçında bile lig gücü kullanılabilir.
+  ratingNewTeam: { days: 300, att: 0.9, def: 1.1 },
+  // Alt basamakta yeni takım üst ligden düşmüşse güçlü merkez (çıkan/düşen ayrımı geriye dönük testte belirgin fark etti)
+  ratingRelegatedTeam: { att: 1.1, def: 0.9 },
+  ratingMinWeightNew: 0,
+  // Kupada listedeki hiçbir ligde bulunamayan takım: ülkenin en alt basamağından bu kat zayıf (amatör/bölgesel lig)
+  unknownTierGap: 1.3,
+  // Kıta turnuvasında listede olmayan ligin takımı: o ligin üst sıralarında (turnuvaya katılmış) varsayılır
+  unknownContinentalStrength: 0.55,
+  unknownContinentalTeam: { att: 1.25, def: 0.8 },
 
   // Belirsizlik: iki takımın güç farkı kesin bilinmez. Olasılıklar bu belirsizlik üzerinden ortalanır
   // (aşırı iddialı %80'lik tahminleri gerçeğe yaklaştırır). sigma = uncBase + uncScale / sqrt(etkin maç + 2)
@@ -100,10 +121,12 @@ export const MODEL = {
 
   lambdaMin: 0.3,
   lambdaMax: 3.8,
-  dcRho: -0.06, // Dixon-Coles düşük skor düzeltmesi (yalnızca olasılık tablosunda)
+  // Dixon-Coles düşük skor düzeltmesi (yalnızca olasılık tablosunda). 2017-22 verisi -0.1'i, son sezonlar (beraberlik
+  // oranı düştü) -0.04'ü seçiyor; ikisinin arası.
+  dcRho: -0.06,
   // Yarı skorlarında düşük skor bağımlılığı daha zayıf: tam düzeltme ilk yarı 0-0 ihtimalini gerçekte görülenden
   // (~%27-30) yukarı itiyordu.
-  dcRhoHalf: -0.03,
+  dcRhoHalf: -0.015,
 };
 
 export const SIM = {

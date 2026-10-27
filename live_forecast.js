@@ -53,6 +53,9 @@ export class LiveForecastService {
         score: { home: info.home, away: info.away },
         reds: info.reds,
         ...forecastView(f),
+        // Maç öncesi gol beklentileri: uygulama sunucuya kısa süre ulaşamazsa (ör. gol yeni olduysa) yaklaşık hesabı
+        // takım gücüne dayandırır.
+        prematch: { home: Math.round(model.lambdaHome * 100) / 100, away: Math.round(model.lambdaAway * 100) / 100 },
       };
     }
     this._forecasts.set(key, { at: this.now(), value });

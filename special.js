@@ -15,7 +15,7 @@
 import { baseMatrix, mixtureNodes } from './engine/analysis.js';
 import { MODEL } from './engine/config.js';
 import { cornerDistribution, expectedCorners } from './engine/corners.js';
-import { halfTimeTable, markets, phraser } from './content.js';
+import { HT_SHARE, halfTimeTable, markets, phraser } from './content.js';
 
 export const SPECIAL_TOPICS = ['corners', 'htscore', 'htft', 'btts'];
 export const SPECIAL_LABELS = {
@@ -27,9 +27,6 @@ export const SPECIAL_LABELS = {
 // Özel Yorumlar ayrıca satılmaz: abonelikte ve AI paketinin içindedir (jeton fiyatı kaldırıldı).
 // 2: ilk yarı skoru artık "tahmini skor" (dört senaryodan en olası olanın skoru), yarı tablolarında hafif düzeltme
 export const SPECIAL_VERSION = 2;
-
-/** İlk yarıda atılan gol payı (content.js markets ile aynı). */
-const HT_SHARE = 0.45;
 
 const pct = (p) => Math.round(p * 100);
 const tr1 = (x) => (Math.round(x * 10) / 10).toFixed(1).replace('.', ',');

@@ -2,7 +2,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { fitRatings, ratingLambdas } from '../engine/ratings.js';
+import { fitRatings, ratingLambdas, crossRatingLambdas } from '../engine/ratings.js';
+import { MODEL } from '../engine/config.js';
 import { makeSyntheticLeague, walkForward } from '../engine/backtest.js';
 import { scoreMatrix, matchProbabilities, scoresForOutcome } from '../engine/analysis.js';
 import { simulateToScore } from '../engine/simulator.js';
@@ -47,12 +48,53 @@ test('lig gücü: gerçek hücum/savunma ve ev avantajı yeniden bulunur, ham go
 test('lig gücü: az veri ya da bilinmeyen takım için null döner (eski yönteme geçilir)', () => {
   assert.equal(fitRatings([], {}), null);
   const { matches } = makeSyntheticLeague({ seed: 'x' });
-  const r = fitRatings(matches, { now: matches.at(-1).timestamp + DAY });
+  const r = fitRatings(matches, { now: matches.at(-1).timestamp + DAY, newTeam: null });
   assert.equal(ratingLambdas(r, '100', 'yok'), null);
   assert.equal(ratingLambdas(null, '100', '101'), null);
   // gelecekteki maçlar kullanılmaz
   const early = fitRatings(matches, { now: matches[0].timestamp + DAY });
   assert.equal(early, null);
+});
+
+test('lig gücü: ligde yeni takım zayıf merkeze çekilir, sezonun ilk maçında bile tahmin edilir', () => {
+  const { matches } = makeSyntheticLeague({ seed: 'x' });
+  const now = matches.at(-1).timestamp + DAY;
+  const nt = { days: 300, att: 0.9, def: 1.1 };
+  const r = fitRatings(matches, { now, newTeam: nt });
+  // hiç maçı olmayan takım: merkezden
+  const first = ratingLambdas(r, '100', 'yeni', { minWeightNew: 0 });
+  assert.ok(first && first.newAway && first.away.attack === 0.9 && first.away.defense === 1.1);
+  assert.equal(ratingLambdas(r, '100', 'yeni', { minWeightNew: 1 }), null, 'eşik üstünde değilse eski yönteme dönülür');
+  // az maçla yeni takım: ön bilgi lig ortalamasına değil zayıf merkeze çeker
+  const t0 = now - 20 * DAY;
+  const extra = [0, 1, 2].map((i) => ({ id: `n${i}`, timestamp: t0 + i * 3 * DAY, homeId: 'yeni', awayId: String(100 + i), homeGoals: 1, awayGoals: 1 }));
+  const withNew = fitRatings([...matches, ...extra], { now, newTeam: nt });
+  const plain = fitRatings([...matches, ...extra], { now, newTeam: null });
+  assert.ok(withNew.teams.get('yeni').isNew);
+  assert.ok(withNew.teams.get('yeni').att < plain.teams.get('yeni').att);
+  assert.ok(withNew.teams.get('yeni').def > plain.teams.get('yeni').def);
+  // yeni takım değil: uzun süredir ligde olan takım etkilenmez
+  assert.equal(withNew.teams.get('100').isNew, false);
+  // üst ligden düşen takım için ayrı merkez
+  const down = fitRatings([...matches, ...extra], { now, newTeam: { ...nt, center: (id) => (id === 'yeni' ? { att: 1.2, def: 0.85 } : null) } });
+  assert.ok(down.teams.get('yeni').att > plain.teams.get('yeni').att);
+});
+
+test('ligler arası: güçlü ligin takımı lig katsayısı oranında öne geçer; aynı güçte lig farkı yok', () => {
+  const { matches } = makeSyntheticLeague({ seed: 'x' });
+  const now = matches.at(-1).timestamp + DAY;
+  const r = fitRatings(matches, { now, newTeam: null });
+  const same = ratingLambdas(r, '100', '101');
+  const eq = crossRatingLambdas({ ratings: r, id: '100', strength: 0.8 }, { ratings: r, id: '101', strength: 0.8 });
+  assert.ok(Math.abs(eq.lh - same.lh) < 1e-9 && Math.abs(eq.la - same.la) < 1e-9 && eq.leagueRatio === 1);
+  const strong = crossRatingLambdas({ ratings: r, id: '100', strength: 1.0 }, { ratings: r, id: '101', strength: 0.8 }, { strengthExp: 1.4 });
+  assert.ok(Math.abs(strong.leagueRatio - 1.25 ** 1.4) < 1e-9);
+  // hiçbir ligde bulunamayan takım (ör. amatör kulüp) dışarıdan verilen güçle
+  const amateur = crossRatingLambdas({ ratings: r, id: '100', strength: 1 }, { ratings: r, team: { att: 1, def: 1 }, strength: 0.4 });
+  assert.ok(amateur.virtualAway && amateur.leagueRatio > 3);
+  // tarafsız saha: ev avantajı yok
+  const n = crossRatingLambdas({ ratings: r, id: '100', strength: 0.8 }, { ratings: r, id: '100', strength: 0.8 }, { neutral: true });
+  assert.ok(Math.abs(n.lh - n.la) < 1e-9);
 });
 
 test('yürüyen deneme: yeni yöntem eskisinden iyi olasılık üretir ve tahminle skor hep tutarlıdır', () => {
@@ -88,7 +130,7 @@ test('belirsizlik katmanı: olasılıklar toplamı 1, ortalama gol korunur, aş�
   assert.ok(soft.homeWin < sharp.homeWin, 'büyük favori olasılığı biraz azalmalı');
   assert.ok(soft.awayWin > sharp.awayWin, 'sürpriz ihtimali artmalı');
   // sigma 0 = eski davranış
-  assert.deepEqual(scoreMatrix(1.4, 1.1), scoreMatrix(1.4, 1.1, -0.06, 10, 0));
+  assert.deepEqual(scoreMatrix(1.4, 1.1), scoreMatrix(1.4, 1.1, MODEL.dcRho, 10, 0));
 });
 
 test('en olası skor tahminle hiçbir λ kombinasyonunda çelişmez', () => {
@@ -203,6 +245,26 @@ test('lig maçları: çok dilim başarısızsa hata; az sayıda başarısızlık
 });
 
 // --- Servis: lig gücü kullanımı ve geri dönüş -----------------------------------------------------------------
+test('ESPN istemcisi: eşzamanlı aynı istek tek istekte birleşir; takım listesi ayrı önbellekte, alınamayan lig yarım saat istenmez', async () => {
+  let calls = 0;
+  const fetchImpl = async (url) => {
+    calls++;
+    await new Promise((r) => setTimeout(r, 5));
+    if (url.includes('/yok.1/')) return { ok: false, status: 404, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => ({ sports: [{ leagues: [{ teams: [{ team: { id: 7, displayName: 'A' } }] }] }] }) };
+  };
+  const espn = new EspnClient({ fetchImpl, retries: 0 });
+  const [a, b] = await Promise.all([espn.getTeams('tur.1', { maxAgeMs: 3600e3 }), espn.getTeams('tur.1', { maxAgeMs: 3600e3 })]);
+  assert.equal(calls, 1);
+  assert.equal(a[0].id, '7');
+  assert.deepEqual(a, b);
+  await espn.getTeams('tur.1', { maxAgeMs: 3600e3 });
+  assert.equal(calls, 1, 'önbellekten');
+  await assert.rejects(() => espn.getTeams('yok.1', { maxAgeMs: 3600e3 }));
+  await assert.rejects(() => espn.getTeams('yok.1', { maxAgeMs: 3600e3 }));
+  assert.equal(calls, 2, 'alınamayan lig hemen yeniden istenmez');
+});
+
 function fakeEspn(leagueMatches, { failLeague = false } = {}) {
   return {
     async getStandings() { return { entries: new Map(), teamCount: 0, leagueAvgGoals: null }; },
@@ -233,11 +295,68 @@ test('servis: yerel ligde lig gücü modeli kullanılır; veri alınamazsa uyar�
   assert.equal(without.dataQuality.model, 'takım-geçmişi');
   assert.ok(without.dataQuality.warnings.some((w) => w.includes('lig verisi alınamadı')));
 
-  // Avrupa kupası: lig gücü hiç denenmez
+  // Avrupa kupası: takımların ligi bilinmiyorsa (takım listesi yok) lig gücü denenmez
   let asked = false;
   const espn = fakeEspn(matches);
   espn.getLeagueMatches = async () => { asked = true; return matches; };
   const sim = new MatchSimulator({ espn, memory: new TeamMemory() });
   await sim.prepare({ league: 'uefa.champions', homeId: best.id, awayId: worst.id, now });
   assert.equal(asked, false);
+});
+
+test('servis: Avrupa kupası ve ulusal kupada takımlar kendi liglerinin gücüyle, lig farkıyla değerlendirilir', async () => {
+  const eng = makeSyntheticLeague({ seed: 'ing' }).matches;
+  const tur = makeSyntheticLeague({ seed: 'tur' }).matches.map((m) => ({ ...m, id: `t${m.id}`, homeId: String(+m.homeId + 100), awayId: String(+m.awayId + 100) }));
+  const now = Math.max(eng.at(-1).timestamp, tur.at(-1).timestamp) + DAY;
+  const leagues = { 'eng.1': eng, 'tur.1': tur };
+  const teamCalls = [];
+  const espn = {
+    async getStandings() { return { entries: new Map(), teamCount: 0, leagueAvgGoals: null }; },
+    async getTeamMatches() { return []; },
+    async getLeagueMatches(lg) {
+      if (!leagues[lg]) throw new Error('yok');
+      return leagues[lg];
+    },
+    async getTeams(lg) {
+      teamCalls.push(lg);
+      const ms = leagues[lg];
+      if (!ms) return [];
+      return [...new Set(ms.flatMap((m) => [m.homeId, m.awayId]))].map((id) => ({ id }));
+    },
+  };
+  const run = (league, homeId, awayId, extra = {}) => new MatchSimulator({ espn, memory: new TeamMemory() }).prepare({ league, homeId, awayId, now, ...extra });
+  // aynı sıradaki (ligin ortasındaki) takımlar: İngiliz takımı lig farkıyla öne geçer
+  const mid = (ms) => {
+    const r = fitRatings(ms, { now, newTeam: null });
+    return [...r.teams.values()].sort((a, b) => a.att / a.def - b.att / b.def)[10].id;
+  };
+  const e = mid(eng);
+  const t = mid(tur);
+  const a = await run('uefa.champions', t, e);
+  assert.equal(a.dataQuality.model, 'ligler-arası');
+  assert.ok(a.factors.leagueRatio < 1 && a.factors.homeLeague === 'tur.1' && a.factors.awayLeague === 'eng.1');
+  const b = await run('uefa.champions', e, t);
+  assert.ok(b.probabilities.homeWin > a.probabilities.awayWin, 'güçlü lig takımı evinde daha da favori');
+  assert.ok(b.lambdaHome / b.lambdaAway > 1.5);
+  // içerikte saklanan model: lig bilgisi ve tarafsız saha bayrağı (Asistan "neden" cevabı kullanır)
+  const { modelOf } = await import('../content.js');
+  const mb = modelOf(b);
+  assert.ok(mb.leagueRatio > 1 && mb.homeLeague === 'eng.1' && mb.awayLeague === 'tur.1' && mb.neutral === false);
+  // tarafsız saha (final): iki yön simetrik
+  const n1 = await run('uefa.champions', e, t, { neutral: true });
+  const n2 = await run('uefa.champions', t, e, { neutral: true });
+  assert.ok(Math.abs(n1.probabilities.homeWin - n2.probabilities.awayWin) < 0.03);
+  // aynı ligin iki takımı kupada: o ligin güç tablosu
+  const same = await run('eng.fa', eng[0].homeId, eng[0].awayId);
+  assert.equal(same.dataQuality.model, 'lig-gücü');
+  // ulusal kupada listede olmayan (amatör) takım: en alt basamaktan da zayıf
+  const amateur = await run('eng.fa', 'amatör', e);
+  assert.equal(amateur.dataQuality.model, 'ligler-arası');
+  assert.ok(amateur.probabilities.awayWin > 0.6, `${amateur.probabilities.awayWin}`);
+  assert.equal(amateur.dataQuality.confidence, 'düşük');
+  assert.ok(amateur.dataQuality.warnings.some((w) => w.includes('bulunamadı')));
+  // milli takım turnuvasında kulüp ligleri aranmaz
+  teamCalls.length = 0;
+  await run('fifa.world', '1', '2');
+  assert.equal(teamCalls.length, 0);
 });

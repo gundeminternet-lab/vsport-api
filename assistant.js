@@ -310,13 +310,15 @@ export function buildAssistantReply({ match, content, model, specials, importanc
     });
   }
 
-  // 8) Özel Yorum başlıkları: sorulan konu önce gelir; canlı maçta maç öncesi korner/İY başlıkları atlanır
+  // 8) Özel Yorum başlıkları: sorulan konu önce gelir. Bunlar maç öncesi tahminlerdir: maç başladıysa ya da bittiyse
+  // yalnızca kullanıcı özellikle sorduysa gösterilir (ve "maç öncesi" diye işaretlenir), yoksa güncel durumla çelişebilir.
   if (specials) {
     const order = [...focus.filter((t) => specials[t]), ...SPECIAL_TOPICS.filter((t) => specials[t] && !focus.includes(t))];
     for (const t of order) {
-      if (state === 'live' && (t === 'htscore' || t === 'htft')) continue;
-      if (state === 'post' && (t === 'htscore' || t === 'htft')) continue;
-      scenes.push(specialScene(t, specials[t]));
+      const started = state === 'live' || state === 'post';
+      if (started && !focus.includes(t)) continue;
+      const scene = specialScene(t, specials[t]);
+      scenes.push(started ? { ...scene, kicker: `MAÇ ÖNCESİ · ${scene.kicker}` } : scene);
     }
   }
 

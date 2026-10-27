@@ -173,6 +173,28 @@ test('TrackService: ertelenen ya da çok uzun süredir bitmeyen maç karneye gir
   assert.equal(pending.size, 0, 'bekleyen kayıt temizlenir');
 });
 
+test('TrackService: bitmemiş eski kayıtlar listenin başında takılı kalsa da yeni biten maç sonuçlanır', async () => {
+  let now = NOW;
+  const pending = new Map();
+  for (let i = 0; i < 50; i++) pending.set(`s${i}`, { key: `s${i}`, league: 'tur.1', eventId: `s${i}`, kickoffMs: NOW - 86400e3 + i, probs: { '1': 40, X: 30, '2': 30 }, pick: '1', topScore: '1-0' });
+  pending.set('bitti', { key: 'bitti', league: 'tur.1', eventId: 'bitti', kickoffMs: NOW - 3 * 3600e3, probs: { '1': 40, X: 30, '2': 30 }, pick: '1', topScore: '1-0' });
+  const saved = [];
+  const store = {
+    async listPendingBefore(cutoff, limit) {
+      return [...pending.values()].filter((p) => p.kickoffMs <= cutoff).sort((a, b) => a.kickoffMs - b.kickoffMs).slice(0, limit);
+    },
+    async deletePending(key) { pending.delete(key); },
+    async saveResolved(r) { saved.push(r); pending.delete(r.key); },
+  };
+  const notStarted = { header: { competitions: [{ status: { type: { state: 'in', completed: false } }, competitors: [] }] } };
+  const espn = { async getSummary(lg, id) { return id === 'bitti' ? completedJson(2, 1) : notStarted; } };
+  const svc = new TrackService({ store, espn, now: () => now });
+  await svc.resolveDue({ limit: 40 });
+  now += 10 * 60e3;
+  await svc.resolveDue({ limit: 40 });
+  assert.deepEqual(saved.map((r) => r.key), ['bitti']);
+});
+
 test('TRACK_MIN_SAMPLE: az veri eşiği makul', () => {
   assert.ok(TRACK_MIN_SAMPLE >= 20);
 });

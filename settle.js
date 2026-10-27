@@ -5,7 +5,10 @@
 
 import { readSummary } from './notify.js';
 
-/** Maç özeti → sonuç bilgileri (İY skoru dahil). */
+/**
+ * Maç özeti → sonuç bilgileri (İY skoru dahil). Tahminler 90 dakikaya göre sonuçlanır: uzatmaya giden kupa maçında
+ * (AET / penaltılar) skor, ilk iki yarının toplamıdır; uzatma golleri MS, alt/üst ve KG'yi değiştirmez.
+ */
 export function matchFacts(json) {
   const s = readSummary(json);
   const comp = json?.header?.competitions?.[0] ?? {};
@@ -14,29 +17,44 @@ export function matchFacts(json) {
   const cs = comp.competitors ?? [];
   const home = cs.find((c) => c.homeAway === 'home');
   const away = cs.find((c) => c.homeAway === 'away');
-  const ls = (c) => {
-    const v = c?.linescores?.[0];
+  const ls = (c, i = 0) => {
+    const v = c?.linescores?.[i];
     const n = Number(typeof v === 'object' && v !== null ? v.value ?? v.displayValue : v);
     return Number.isFinite(n) ? n : null;
   };
+  // Gol olayları (ilk yarı ve 90 dakika sayımı için): "45'+2'" ilk yarı, "90'+4'" normal süre, 91'+ uzatma
+  const goals = [];
+  for (const e of json?.keyEvents ?? []) {
+    const t = String(e.type?.text ?? '').toLowerCase();
+    const goal = e.scoringPlay === true || t.startsWith('goal') || t.includes('own goal') || (t.includes('penalty') && t.includes('scored'));
+    if (!goal || e.shootout) continue;
+    const minute = parseInt(String(e.clock?.displayValue ?? ''), 10);
+    goals.push({ minute: Number.isFinite(minute) ? minute : null, team: String(e.team?.id ?? '') });
+  }
   if (ls(home) !== null && ls(away) !== null) {
     ht = [ls(home), ls(away)];
   } else if (s.completed) {
-    // Gol olaylarından: "45'+2'" ilk yarı, 46' ve sonrası ikinci yarı
-    let h = 0, a = 0, any = false;
-    for (const e of json?.keyEvents ?? []) {
-      const t = String(e.type?.text ?? '').toLowerCase();
-      const goal = e.scoringPlay === true || t.startsWith('goal') || t.includes('own goal') || (t.includes('penalty') && t.includes('scored'));
-      if (!goal || e.shootout) continue;
-      any = true;
-      const minute = parseInt(String(e.clock?.displayValue ?? ''), 10);
-      if (!Number.isFinite(minute) || minute > 45) continue;
-      if (String(e.team?.id) === s.home.id) h++;
-      else if (String(e.team?.id) === s.away.id) a++;
+    let h = 0;
+    let a = 0;
+    for (const g of goals) {
+      if (g.minute === null || g.minute > 45) continue;
+      if (g.team === s.home.id) h++;
+      else if (g.team === s.away.id) a++;
     }
-    if (any || s.score[0] + s.score[1] === 0) ht = [h, a];
+    if (goals.length || s.score[0] + s.score[1] === 0) ht = [h, a];
   }
-  return { completed: s.completed, postponed, home: s.score[0], away: s.score[1], ht };
+  let [hg, ag] = s.score;
+  const extraTime = /AET|PEN|EXTRA|SHOOTOUT/i.test(s.statusName) || (home?.linescores?.length ?? 0) > 2 || (away?.linescores?.length ?? 0) > 2;
+  if (extraTime && s.completed) {
+    if ([ls(home, 0), ls(home, 1), ls(away, 0), ls(away, 1)].every((x) => x !== null)) {
+      hg = ls(home, 0) + ls(home, 1);
+      ag = ls(away, 0) + ls(away, 1);
+    } else if (goals.length && goals.every((g) => g.minute !== null)) {
+      hg = goals.filter((g) => g.minute <= 90 && g.team === s.home.id).length;
+      ag = goals.filter((g) => g.minute <= 90 && g.team === s.away.id).length;
+    }
+  }
+  return { completed: s.completed, postponed, home: hg, away: ag, ht, extraTime };
 }
 
 /** Tek tahmin: true (tuttu), false (yattı), null (karar verilemedi — İY bilgisi yok gibi). */

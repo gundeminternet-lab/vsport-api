@@ -2,7 +2,7 @@
 // iki takımın bu maçtaki "beklenen gol" (λ) değerlerini ve sonuç olasılıklarını hesaplar.
 
 import { MODEL, LEAGUES } from './config.js';
-import { ratingLambdas } from './ratings.js';
+import { ratingLambdas, crossRatingLambdas } from './ratings.js';
 
 const DAY = 86400000;
 export const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
@@ -259,6 +259,20 @@ export function scoresForOutcome(matrix, outcome) {
   return list.sort((a, b) => b.p - a.p);
 }
 
+/**
+ * Toplam gol beklentisini ligin ortalamasına doğru çeker (totalK < 1) ve iki takım arasındaki farkı biraz açar
+ * (supK > 1); log ölçeğinde. Geriye dönük testte (2017-2026, 15 lig, ~36 bin maç, haftalık yeniden kurulum) takım bazlı
+ * toplam gol farkları gerçekte görülenden abartılı, güç farkı ise biraz çekingen çıktı. base: ligin bu sahadaki maç
+ * başı toplam gol beklentisi.
+ */
+export function shapeLambdas(lh, la, base, totalK = MODEL.ratingTotalK ?? 1, supK = MODEL.ratingSupK ?? 1) {
+  if (!(base > 0) || !(lh > 0) || !(la > 0) || (totalK === 1 && supK === 1)) return [lh, la];
+  const total = base * ((lh + la) / base) ** totalK;
+  const s = Math.log(lh / la) * supK;
+  const a = total / (1 + Math.exp(s));
+  return [total - a, a];
+}
+
 // ---------------------------------------------------------------------------
 // Ana fonksiyon
 // ---------------------------------------------------------------------------
@@ -274,6 +288,9 @@ export function analyzeMatch({
   awayLeague = null,
   elo = null, // { home: 1650, away: 1580 } isteğe bağlı
   ratings = null, // fitRatings() çıktısı: aynı ligdeki iki takım için lig geneli güç
+  // Farklı liglerin takımları (Avrupa kupası, ulusal kupa): { home: { ratings, id, strength, league, form? }, away: {...} }
+  // Her takım kendi liginin güç tablosundan değerlendirilir; lig farkı güç katsayısıyla eklenir.
+  cross = null,
   neutral = false,
   uncertainty = true, // false: belirsizlik katmanı kapalı (karşılaştırma/deney için)
   now = Date.now(),
@@ -304,16 +321,30 @@ export function analyzeMatch({
   const attA = pA.attack * formMult(pA) ** MODEL.formAttackExp;
   const defA = pA.defense * formMult(pA) ** MODEL.formDefenseExp;
 
-  // Aynı ligdeki iki takım: lig geneli (rakibe göre düzeltilmiş) güç varsa o kullanılır
-  const rl = ratingLambdas(ratings, home.id, away.id, { neutral });
+  // Aynı ligdeki iki takım: lig geneli (rakibe göre düzeltilmiş) güç varsa o kullanılır.
+  // Farklı liglerin takımları: her biri kendi liginin gücüyle (cross).
+  const rl = cross ? crossRatingLambdas(cross.home, cross.away, { neutral }) : ratingLambdas(ratings, home.id, away.id, { neutral });
   let lambdaHome;
   let lambdaAway;
   let factors;
   if (rl) {
-    const fm = (p) => 1 + MODEL.ratingFormWeight * (p.form.index - MODEL.formNeutral);
-    lambdaHome = rl.lh * fm(pH);
-    lambdaAway = rl.la * fm(pA);
-    factors = { model: 'lig-gücü', base: round(ratings.mu, 3), homeAdvantage: round(rl.homeAdvantage, 3), attackHome: round(rl.home.attack, 3), defenseHome: round(rl.home.defense, 3), attackAway: round(rl.away.attack, 3), defenseAway: round(rl.away.defense, 3) };
+    // Form: ligler arası maçta takımın kendi ligindeki son maçları (kupa maçları az ve seyrek)
+    const fm = (idx) => 1 + MODEL.ratingFormWeight * ((Number.isFinite(idx) ? idx : MODEL.formNeutral) - MODEL.formNeutral);
+    lambdaHome = rl.lh * fm(cross?.home?.form ?? pH.form.index);
+    lambdaAway = rl.la * fm(cross?.away?.form ?? pA.form.index);
+    factors = { model: cross ? 'ligler-arası' : 'lig-gücü', base: round(rl.base / 2, 3), homeAdvantage: round(rl.homeAdvantage, 3), attackHome: round(rl.home.attack, 3), defenseHome: round(rl.home.defense, 3), attackAway: round(rl.away.attack, 3), defenseAway: round(rl.away.defense, 3) };
+    if (rl.newHome) factors.newHome = true;
+    if (rl.newAway) factors.newAway = true;
+    if (cross) {
+      factors.homeLeague = cross.home.league ?? null;
+      factors.awayLeague = cross.away.league ?? null;
+      factors.crossKind = cross.kind ?? null;
+      // Toplam gol ve güç farkı biçimlendirmesi lig farkından önce (aynı ligdeymiş gibi) uygulanır
+      [lambdaHome, lambdaAway] = shapeLambdas(lambdaHome, lambdaAway, rl.base);
+      lambdaHome *= rl.leagueRatio;
+      lambdaAway /= rl.leagueRatio;
+      factors.leagueRatio = round(rl.leagueRatio, 3);
+    }
   } else {
     const ha = neutral ? 0 : MODEL.homeAdvantage;
     lambdaHome = base * (1 + ha) * attH * defA;
@@ -354,12 +385,18 @@ export function analyzeMatch({
     factors.h2hWeight = round(w, 3);
   }
 
+  // Aynı lig: toplam gol ligin ortalamasına çekilir, güç farkı biraz açılır (geriye dönük testle ayarlı)
+  if (rl && !cross) [lambdaHome, lambdaAway] = shapeLambdas(lambdaHome, lambdaAway, rl.base);
+
   lambdaHome = clamp(lambdaHome, MODEL.lambdaMin, MODEL.lambdaMax);
   lambdaAway = clamp(lambdaAway, MODEL.lambdaMin, MODEL.lambdaMax);
 
   // Güç farkı belirsizliği: etkin maç sayısı azaldıkça artar
   const effective = rl ? Math.min(rl.effHome, rl.effAway) : Math.min(pH.matchesUsed, pA.matchesUsed) * 0.55;
-  const sigma = !uncertainty ? 0 : clamp(MODEL.uncBase + MODEL.uncScale / Math.sqrt(effective + 2), MODEL.uncMin, MODEL.uncMax);
+  // Lig geneli güç zaten ön bilgiyle düzenlenmiş: aynı ligde belirsizlik katmanı küçük tutulur (test: tam katman
+  // olasılıkları gereğinden fazla ortaya çekiyordu). Ligler arası maçta lig katsayısı belirsizliği de var: tam katman.
+  const uncMul = rl && !cross ? MODEL.ratingUncMul ?? 1 : 1;
+  const sigma = !uncertainty ? 0 : uncMul * clamp(MODEL.uncBase + MODEL.uncScale / Math.sqrt(effective + 2), MODEL.uncMin, MODEL.uncMax);
   factors.sigma = round(sigma, 3);
 
   const probabilities = matchProbabilities(lambdaHome, lambdaAway, sigma);
@@ -375,6 +412,7 @@ export function analyzeMatch({
     lambdaHome: round(lambdaHome, 3),
     lambdaAway: round(lambdaAway, 3),
     sigma: round(sigma, 3),
+    neutral: Boolean(neutral),
     probabilities,
     h2h,
     factors,

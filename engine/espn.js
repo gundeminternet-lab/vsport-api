@@ -103,6 +103,8 @@ export function parseEvents(json, { league = null, includeUpcoming = false } = {
       homeLogo: home.team?.logos?.[0]?.href ?? home.team?.logo ?? null,
       awayLogo: away.team?.logos?.[0]?.href ?? away.team?.logo ?? null,
     };
+    // Tarafsız saha (final, turnuva maçı): ev sahibi avantajı uygulanmaz
+    if (comp.neutralSite === true) base.neutral = true;
     const hg = num(home.score);
     const ag = num(away.score);
     if (completed && Number.isFinite(hg) && Number.isFinite(ag)) {
@@ -144,6 +146,7 @@ export function slimScoreboard(json) {
                 id: comp.id,
                 date: comp.date,
                 status: status(comp.status),
+                neutralSite: comp.neutralSite === true ? true : undefined,
                 competitors: (comp.competitors ?? []).map((c) => ({ id: c.id, homeAway: c.homeAway, score: c.score, team: team(c.team) })),
               },
             ]
@@ -167,7 +170,20 @@ export class EspnClient {
   async _getJson(url, { maxAgeMs = this.cacheTtlMs, transform = null } = {}) {
     const hit = this.cache.get(url);
     if (hit && Date.now() - hit.t < maxAgeMs) return hit.json;
+    // Aynı adrese eşzamanlı istekler tek istekte birleşir (aynı adres hep aynı transform ile çağrılır)
+    this.inflight ??= new Map();
+    const pending = this.inflight.get(url);
+    if (pending) return pending;
+    const p = this._fetchJson(url, transform);
+    this.inflight.set(url, p);
+    try {
+      return await p;
+    } finally {
+      this.inflight.delete(url);
+    }
+  }
 
+  async _fetchJson(url, transform) {
     let lastError;
     for (let attempt = 0; attempt <= this.retries; attempt++) {
       const ctrl = new AbortController();
@@ -199,7 +215,25 @@ export class EspnClient {
     throw new Error(`ESPN isteği başarısız (${url}): ${lastError?.message}`);
   }
 
-  async getTeams(league) {
+  async getTeams(league, { maxAgeMs } = {}) {
+    // Takım listeleri seyrek değişir: genel önbellekten (skor tablosu dilimleriyle dolup taşan) ayrı tutulur
+    if (maxAgeMs) {
+      this.teamsCache ??= new Map();
+      const hit = this.teamsCache.get(league);
+      // Alınamayan liste (ör. veri sağlayıcısında olmayan lig) yarım saat yeniden istenmez
+      if (hit && Date.now() - hit.t < (hit.failed ? 30 * 60e3 : maxAgeMs)) {
+        if (hit.failed) throw new Error(`${league} takım listesi alınamadı`);
+        return hit.teams;
+      }
+      try {
+        const teams = parseTeams(await this._getJson(`${ESPN.siteApi}/${league}/teams`, { maxAgeMs }));
+        this.teamsCache.set(league, { t: Date.now(), teams });
+        return teams;
+      } catch (e) {
+        this.teamsCache.set(league, { t: Date.now(), teams: [], failed: true });
+        throw e;
+      }
+    }
     return parseTeams(await this._getJson(`${ESPN.siteApi}/${league}/teams`));
   }
 

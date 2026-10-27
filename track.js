@@ -12,6 +12,8 @@ export const TRACK_MIN_SAMPLE = 30;
 const VOID_AFTER_MS = 3 * 86400e3;
 /** Bir maç bitmiş sayılmadan önce beklenen süre (uzatmalar ve bitiş gecikmesi). */
 const FINISH_GRACE_MS = 110 * 60e3;
+/** Sonuçlanamayan kaydın yeniden denenmesi için beklenen süre. */
+const RETRY_MS = 30 * 60e3;
 
 const outcomeOf = (h, a) => (h > a ? '1' : h < a ? '2' : 'X');
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -130,15 +132,23 @@ export class TrackService {
     return this.store.createPending(entry);
   }
 
-  /** Bitmiş maçların bekleyen tahminlerini sonuçlandırır. Dönen değer sonuçlanan kayıt sayısıdır. */
+  /**
+   * Bitmiş maçların bekleyen tahminlerini sonuçlandırır. Dönen değer sonuçlanan kayıt sayısıdır.
+   * Henüz bitmemiş ya da okunamayan kayıt yarım saat yeniden denenmez: listenin başında takılı kalan eski kayıtlar
+   * (ertelenmiş maç, geçici veri sorunu) yeni biten maçların sonuçlanmasını engellemesin.
+   */
   async resolveDue({ limit = 40 } = {}) {
     if (this._busy) return 0;
     this._busy = true;
     let done = 0;
+    this._tried ??= new Map();
     try {
       const now = this.now();
-      const due = await this.store.listPendingBefore(now - FINISH_GRACE_MS, limit);
+      for (const [k, t] of this._tried) if (now - t > RETRY_MS) this._tried.delete(k);
+      const listed = await this.store.listPendingBefore(now - FINISH_GRACE_MS, limit * 4);
+      const due = listed.filter((p) => !this._tried.has(p.key)).slice(0, limit);
       for (const p of due) {
+        this._tried.set(p.key, now);
         let facts;
         try {
           facts = matchFacts(await this.espn.getSummary(p.league, p.eventId, { maxAgeMs: 10 * 60e3 }));
@@ -152,6 +162,7 @@ export class TrackService {
         if (!facts.completed || typeof facts.home !== 'number' || typeof facts.away !== 'number') continue;
         const resolved = resolveEntry(p, { home: facts.home, away: facts.away }, now);
         await this.store.saveResolved(resolved);
+        this._tried.delete(p.key);
         done++;
       }
     } finally {
@@ -161,7 +172,6 @@ export class TrackService {
     return done;
   }
 
-  /** Karne (önbellekli). Herkes aynı karneyi görür; yalnızca giriş yapmış kullanıcılar okuyabilir. */
   /** Verilen maç anahtarlarından sonuçlanmış olanların hükmü: { verdicts: { key: verdictOf } }. En fazla 100 maç. */
   async verdicts({ uid, keys } = {}) {
     if (!uid) throw Object.assign(new Error('Giriş yapmalısınız.'), { code: 'permission-denied' });
@@ -172,6 +182,7 @@ export class TrackService {
     return { verdicts: Object.fromEntries(rows.map((r) => [r.key, verdictOf(r)])) };
   }
 
+  /** Karne (önbellekli). Herkes aynı karneyi görür; yalnızca giriş yapmış kullanıcılar okuyabilir. */
   async trackRecord({ uid, limit = 500 } = {}) {
     if (!uid) throw Object.assign(new Error('Giriş yapmalısınız.'), { code: 'permission-denied' });
     const now = this.now();

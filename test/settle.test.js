@@ -87,3 +87,27 @@ test('sonuçlandırıcı: tüm maçlar bitince bir kez kaydeder', async () => {
   assert.deepEqual(saved[0].result.results, ['won', 'won']);
   assert.equal(saved[0].report.won, 1);
 });
+
+test('uzatmaya giden kupa maçı 90 dakikanın skoruyla sonuçlanır', async () => {
+  const { matchFacts: facts, settleMarket: settle } = await import('../settle.js');
+  const json = {
+    header: {
+      competitions: [
+        {
+          status: { type: { state: 'post', completed: true, name: 'STATUS_FINAL_AET' } },
+          competitors: [
+            { homeAway: 'home', score: '2', team: { id: '1' }, linescores: [{ value: 0 }, { value: 1 }, { value: 1 }, { value: 0 }] },
+            { homeAway: 'away', score: '1', team: { id: '2' }, linescores: [{ value: 1 }, { value: 0 }, { value: 0 }, { value: 0 }] },
+          ],
+        },
+      ],
+    },
+  };
+  const f = facts(json);
+  assert.equal(f.extraTime, true);
+  assert.deepEqual([f.home, f.away], [1, 1]);
+  assert.deepEqual(f.ht, [0, 1]);
+  assert.equal(settle('MS X', f), true);
+  assert.equal(settle('MS 1', f), false);
+  assert.equal(settle('2.5 Alt', f), true);
+});

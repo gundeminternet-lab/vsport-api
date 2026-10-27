@@ -129,7 +129,7 @@ test('canlı ayrıştırma ve olasılıklar: önde olan takım avantajlı, süre
   assert.ok(Math.abs(level.p1 - level.p2) < 1e-6, 'eşit güç, eşit olasılık');
 });
 
-test('maç sürerken: canlı sahne, güncel olasılıklar ve maç öncesi İY başlıkları atlanır', async () => {
+test('maç sürerken: canlı sahne, güncel olasılıklar; maç öncesi Özel Yorum başlıkları (sorulmadıkça) atlanır', async () => {
   const now = FUTURE + 63 * 60000;
   const espn = makeEspn();
   espn.getSummary = async () => liveSummary(63, 1, 0);
@@ -143,7 +143,8 @@ test('maç sürerken: canlı sahne, güncel olasılıklar ve maç öncesi İY ba
   assert.match(first.kicker, /CANLI · 63/);
   const titles = r.scenes.map((s) => s.title);
   assert.ok(!titles.includes('İlk yarı skoru') && !titles.includes('İY/MS sürprizleri'));
-  assert.ok(titles.includes('Korner beklentisi'));
+  // Maç öncesi korner beklentisi canlı durumla çelişebilir: yalnızca sorulursa ve "maç öncesi" etiketiyle gösterilir
+  assert.ok(!titles.includes('Korner beklentisi'));
   assert.match(r.answer, /1-0/);
   // Canlıda tek "tahmini final" yerine: skorun böyle bitme ihtimali, en az bir gol daha ve en olası finaller
   assert.ok(first.chips.some(([k]) => k === 'Skor böyle biter'));

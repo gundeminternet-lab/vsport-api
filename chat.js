@@ -6,7 +6,9 @@
 // second (ikinci yarı), winner (kim kazanır), importance (önem).
 // Bunlardan biri yoksa (ya da korner, İY/MS, KG gibi Özel Yorum konusu varsa) mevcut tam yanıt kullanılır.
 
-import { markets } from './content.js';
+import { HT_SHARE, halfTimeTable, markets } from './content.js';
+import { scoreMatrix } from './engine/analysis.js';
+import { MODEL, LEAGUES } from './engine/config.js';
 
 const pct = (p) => Math.round(p * 100);
 const tr1 = (x) => (Math.round(x * 10) / 10).toFixed(1).replace('.', ',');
@@ -28,6 +30,8 @@ const RULES = [
   ['review', /\b(tuttu|tutmadi|nasil bitti|degerlendir\w*|isabet\w*)\b/],
   ['whatif', /\b(atarsa|bulursa|olursa|yerse|gelirse)\b/],
   ['why', /\b(neden|niye|nedeni|sebep|sebebi)\b/],
+  // İlk yarı soruları ("ilk yarı kim önde", "devreyi kim alır"); skor/gol içerenler Özel Yorum'a (htscore) gider
+  ['first', /(\bilk yari\w*|\bilk devre\w*|\bdevre arasi\w*|\bdevreyi\b|\biy\b)/],
   ['score', /\b(skor|kac kac|kacar|en olasi skor|tahmini skor)\b/],
   ['goals', /\b(kac gol|gol sayisi|kac tane gol|gollu|toplam gol|ust|alt|2 5|2,5)\b/],
   ['second', /\b(ikinci yari|2 yari|2\. yari|ikinci devre|ikinci yarida)\b/],
@@ -51,6 +55,7 @@ export const SUGGESTIONS = {
   second: ['Kaç gol?', 'Kim kazanır?'],
   why: ['Maçın önemi?', 'Kim kazanır?'],
   importance: ['Neden?', 'Kim kazanır?'],
+  first: ['İkinci yarı?', 'Kim kazanır?', 'Kaç gol?'],
   general: ['Kim kazanır?', 'Skor tahmini?', 'Kaç gol?', 'Korner beklentisi?'],
   review: ['Skor tahmini?', 'Kaç gol?'],
   whatif: ['Deplasman gol atarsa?', 'Kim kazanır?'],
@@ -102,7 +107,7 @@ export function followUpAnswer({ intent, question = '', H, A, model, content, im
       }
       const before = probAt(base);
       const after = probAt(sc);
-      const when = state === 'live' ? `${base.minute}. dakikada` : 'maçın başında';
+      const when = sc.minute !== base.minute ? `${sc.minute}. dakikada` : state === 'live' ? `${base.minute}. dakikada` : 'maçın başında';
       const arrow = (a, b) => `%${pct(a)} → %${pct(b)}`;
       return {
         answer: `${sc.label} (${when}): ${H} ${arrow(before.p1, after.p1)}, beraberlik ${arrow(before.pX, after.pX)}, ${A} ${arrow(before.p2, after.p2)}.`,
@@ -151,22 +156,35 @@ export function followUpAnswer({ intent, question = '', H, A, model, content, im
         suggestions: SUGGESTIONS.goals,
       };
     case 'second': {
-      // İlk yarıda gollerin %45'i atılır (ana model ile aynı oran); ikinci yarı kalanıdır.
-      const h1 = 1 - Math.exp(-0.45 * total);
-      const h2 = 1 - Math.exp(-0.55 * total);
+      // Canlı maçta ikinci yarı (ya da devre arası): kalan süre canlı modelden
+      if (state === 'live' && live?.probs?.remainingGoals && (live.halftime || (live.period ?? 0) >= 2 || (live.minute ?? 0) > 45)) {
+        const lp = live.probs;
+        return {
+          answer: `${live.halftime ? 'İkinci yarıda' : 'Kalan sürede'} beklenen gol: ${H} ${tr1(lp.remainingGoals.home)}, ${A} ${tr1(lp.remainingGoals.away)}. En az bir gol daha %${pct(lp.moreGoals)}; sıradaki golü ${lp.nextGoal.home >= lp.nextGoal.away ? H : A} atmaya daha yakın (%${pct(Math.max(lp.nextGoal.home, lp.nextGoal.away))}).`,
+          suggestions: SUGGESTIONS.second,
+        };
+      }
+      // Maç öncesi: yarıların gol beklentisi ve en az bir gol ihtimali ana modelle aynı tablolardan (belirsizlik dahil)
+      const ht = halfTimeTable(lh, la, sigma);
+      const sh = scoreMatrix(lh * (1 - HT_SHARE), la * (1 - HT_SHARE), MODEL.dcRhoHalf, 8, sigma);
       return {
-        answer: `İlk yarıda beklenen gol ${tr1(total * 0.45)}, ikinci yarıda ${tr1(total * 0.55)}. Kabaca, ilk yarıda en az bir gol %${pct(h1)}, ikinci yarıda en az bir gol %${pct(h2)} ihtimalle.`,
+        answer: `${post}İlk yarıda beklenen gol ${tr1(total * HT_SHARE)}, ikinci yarıda ${tr1(total * (1 - HT_SHARE))}. İlk yarıda en az bir gol %${pct(ht.over05)}, ikinci yarıda en az bir gol %${pct(1 - sh[0][0])} ihtimalle; ikinci yarılar genelde daha gollü geçer.`,
         suggestions: SUGGESTIONS.second,
       };
     }
+    case 'first': {
+      const ht = halfTimeTable(lh, la, sigma);
+      const table = `${H} önde %${pct(ht.win)}, beraberlik %${pct(ht.draw)}, ${A} önde %${pct(ht.lose)}`;
+      const guess = `tahmini devre skoru ${ht.predicted.score}, ilk yarıda en az bir gol %${pct(ht.over05)}`;
+      if (state === 'live' && live) {
+        if (live.halftime) return { answer: `İlk yarı ${live.home}-${live.away} bitti. Maç öncesi ilk yarı tahmini: ${table}; ${guess}.`, suggestions: SUGGESTIONS.first };
+        if ((live.period ?? 0) >= 2 || (live.minute ?? 0) > 45) return { answer: `İlk yarı tamamlandı; maç ${live.minute}. dakikada ${live.home}-${live.away}. Maç öncesi ilk yarı tahmini: ${table}.`, suggestions: SUGGESTIONS.first };
+        return { answer: `Maç ${live.minute}. dakikada ${live.home}-${live.away}. Maç öncesi ilk yarı tahmini: ${table}; ${guess}.`, suggestions: SUGGESTIONS.first };
+      }
+      return { answer: `${post ? 'Maç bitti; maç öncesi ilk yarı tahmini: ' : 'İlk yarı: '}${table}; ${guess}.`, suggestions: SUGGESTIONS.first };
+    }
     case 'why': {
-      const reasons = (importance?.reasons ?? []).slice(0, 2).join(' ');
-      const ppg =
-        model.homePpg != null && model.awayPpg != null ? ` Puan ortalaması: ${H} ${tr1(model.homePpg)}, ${A} ${tr1(model.awayPpg)}.` : '';
-      return {
-        answer: `Beklenen gol: ${H} ${tr1(lh)}, ${A} ${tr1(la)}.${ppg} ${reasons} Tahmin bu rakamlardan çıkıyor.`.replace(/\s+/g, ' ').trim(),
-        suggestions: SUGGESTIONS.why,
-      };
+      return { answer: whyAnswer({ H, A, model, content, importance }), suggestions: SUGGESTIONS.why };
     }
     case 'importance':
       return {
@@ -231,23 +249,118 @@ function sideOf(t, H, A) {
  * Dönen: { minute, home, away, label } ya da anlaşılamazsa null.
  */
 export function scenarioOf(question, { H, A, base }) {
-  const t = norm(question);
+  let t = norm(question);
+  // "75. dakikada", "75 dk", "75'te": senaryonun dakikası (şimdiden önce olamaz, 95'i geçemez)
+  let minute = base.minute;
+  // Skorun parçası olan sayı ("2-1'de") dakika sayılmaz
+  const dk = t.match(/(?<![-:\d]\s*)(\d{1,3})\s*(?:\.|'|’)?\s*(?:dk|dakika\w*|te\b|de\b|da\b|ta\b)/);
+  if (dk) {
+    const v = Number(dk[1]);
+    if (v >= 1 && v <= 95) {
+      // "10 dk sonra" göreli, "75. dakikada" mutlak dakikadır
+      const relative = /^\s*sonra\b/.test(t.slice(dk.index + dk[0].length));
+      minute = relative ? Math.min(95, base.minute + v) : Math.max(base.minute, v);
+      t = t.replace(dk[0], ' ');
+    }
+  }
   const exact = t.match(/(\d+)\s*[-:]\s*(\d+)/);
   if (exact) {
     const home = Number(exact[1]);
     const away = Number(exact[2]);
     // Skor geri gidemez: mevcut skordan düşük senaryo anlamsızdır.
     if (home < base.home || away < base.away || home > 9 || away > 9) return null;
-    return { minute: base.minute, home, away, label: `Skor ${home}-${away} olursa` };
+    return { minute, home, away, label: `Skor ${home}-${away} olursa` };
   }
   const side = sideOf(t, H, A);
   if (!side) return null;
   const concedes = /\byerse\b/.test(t);
   const scorer = concedes ? (side === 'home' ? 'away' : 'home') : side;
   return {
-    minute: base.minute,
+    minute,
     home: base.home + (scorer === 'home' ? 1 : 0),
     away: base.away + (scorer === 'away' ? 1 : 0),
     label: `${scorer === 'home' ? H : A} gol atarsa`,
   };
+}
+
+/**
+ * "Neden?" yanıtı: tahmini en çok etkileyen etkenler, büyüklüklerine göre sıralı (gol beklentisi, puan ortalaması ve
+ * sıra, hücum/savunma, form, ev sahibi avantajı, aralarındaki maçlar). Tercih edilen sonucu destekleyenler önce gelir;
+ * karşı yöndeki güçlü bir etken de dürüstçe söylenir.
+ */
+export function whyAnswer({ H, A, model, content, importance }) {
+  const ai = content.ai;
+  const lh = model.lambdaHome;
+  const la = model.lambdaAway;
+  const said = ai.pick === '1' ? `${H} kazanır` : ai.pick === '2' ? `${A} kazanır` : 'beraberlik çıkar';
+  const fin = (x) => Number.isFinite(x);
+  const items = []; // { side: +1 ev lehine / -1 deplasman lehine / 0 denge, w, text }
+  const ratio = lh / la;
+  items.push({
+    side: ratio > 1.08 ? 1 : ratio < 0.93 ? -1 : 0,
+    w: Math.abs(Math.log(ratio)) * 2 + 0.01,
+    text: `gol beklentisi ${H} ${tr1(lh)}, ${A} ${tr1(la)}`,
+  });
+  if (fin(model.homePpg) && fin(model.awayPpg) && Math.abs(model.homePpg - model.awayPpg) >= 0.25) {
+    const d = model.homePpg - model.awayPpg;
+    const rank = fin(model.homeRank) && fin(model.awayRank) ? ` (${H} ${model.homeRank}., ${A} ${model.awayRank}.)` : '';
+    items.push({ side: Math.sign(d), w: Math.abs(d), text: `puan ortalaması ${H} ${tr1(model.homePpg)}, ${A} ${tr1(model.awayPpg)}${rank}` });
+  }
+  if (fin(model.homeGf) && fin(model.awayGa) && fin(model.awayGf) && fin(model.homeGa)) {
+    const hEdge = model.homeGf - model.awayGa; // ev hücumu, deplasmanın yediğinden ne kadar fazla
+    const aEdge = model.awayGf - model.homeGa;
+    const d = model.homeGf - model.homeGa - (model.awayGf - model.awayGa);
+    if (Math.abs(d) >= 0.4) {
+      items.push({
+        side: Math.sign(d),
+        w: Math.abs(d) * 0.8,
+        text: `gol averajı (maç başı) ${H} ${tr1(model.homeGf)}/${tr1(model.homeGa)}, ${A} ${tr1(model.awayGf)}/${tr1(model.awayGa)}`,
+      });
+    } else if (Math.max(hEdge, aEdge) >= 0.6) {
+      items.push({ side: 0, w: 0.3, text: 'iki takımın da hücumu rakibin savunmasını zorlayacak düzeyde' });
+    }
+  }
+  if (model.homeFormMatches >= 3 && model.awayFormMatches >= 3 && fin(model.homeFormPoints) && fin(model.awayFormPoints)) {
+    const fh = model.homeFormPoints / (3 * model.homeFormMatches);
+    const fa = model.awayFormPoints / (3 * model.awayFormMatches);
+    if (Math.abs(fh - fa) >= 0.2) {
+      items.push({
+        side: Math.sign(fh - fa),
+        w: Math.abs(fh - fa),
+        text: `son maçlar: ${H} ${model.homeFormPoints}/${model.homeFormMatches * 3}, ${A} ${model.awayFormPoints}/${model.awayFormMatches * 3} puan`,
+      });
+    }
+  }
+  // Farklı liglerin takımları (Avrupa kupası, ulusal kupa): lig gücü farkı
+  if (fin(model.leagueRatio) && Math.abs(Math.log(model.leagueRatio)) > 0.05) {
+    const name = (slug) => (slug ? LEAGUES[slug]?.name ?? slug : 'farklı bir lig');
+    const homeStronger = model.leagueRatio > 1;
+    items.push({
+      side: homeStronger ? 1 : -1,
+      w: Math.abs(Math.log(model.leagueRatio)) * 1.5,
+      text: `lig gücü: ${homeStronger ? H : A} daha güçlü bir ligden (${H}: ${name(model.homeLeague)}, ${A}: ${name(model.awayLeague)})`,
+    });
+  }
+  if (!model.neutral) items.push({ side: 1, w: 0.15, text: `${H} kendi sahasında oynuyor (ev sahibi avantajı)` });
+  else items.push({ side: 0, w: 0.1, text: 'maç tarafsız sahada (ev sahibi avantajı yok)' });
+  const h2h = model.h2h ?? {};
+  if (h2h.n >= 3 && Math.abs(h2h.homeWins - h2h.awayWins) >= 2) {
+    items.push({
+      side: Math.sign(h2h.homeWins - h2h.awayWins),
+      w: 0.1 * Math.abs(h2h.homeWins - h2h.awayWins),
+      text: `son ${h2h.n} karşılaşmada ${H} ${h2h.homeWins}, ${A} ${h2h.awayWins} galibiyet`,
+    });
+  }
+  const dir = ai.pick === '1' ? 1 : ai.pick === '2' ? -1 : 0;
+  const support = items.filter((x) => (dir === 0 ? x.side === 0 || x.w < 0.3 : x.side === dir)).sort((a, b) => b.w - a.w).slice(0, 3);
+  const against = dir === 0 ? null : items.filter((x) => x.side === -dir && x.w >= 0.3).sort((a, b) => b.w - a.w)[0];
+  const list = (support.length ? support : items.slice(0, 2)).map((x) => x.text);
+  const reason = (importance?.reasons ?? [])[0];
+  const parts = [
+    `Model ${said} diyor (${H} %${ai.probabilities.home}, beraberlik %${ai.probabilities.draw}, ${A} %${ai.probabilities.away}).`,
+    `Başlıca nedenler: ${list.join('; ')}.`,
+  ];
+  if (against) parts.push(`Karşı yönde: ${against.text}; bu yüzden tahmin kesin değil.`);
+  if (reason) parts.push(reason);
+  return parts.join(' ');
 }
