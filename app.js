@@ -4,7 +4,7 @@
 //   GET  /health                      → 200 "ok"  (uyku önleme / sağlık kontrolü)
 //   POST /api/{ad}  { data: {...} }   → 200 { result } | 4xx/5xx { error: { code, message } }
 //   POST /play/rtdn?secret=…            → Google Play abonelik bildirimi (Pub/Sub push)
-//        ad: unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze | getTrackRecord | getLineupUpdate | getLiveForecast | getWeeklyBulletin | readCouponImage | getStoryReview | deleteAccount | getVerdicts | verifyPlaySubscription | getEntitlement | spinWheel | getWheel | getDailyPredictions | adminMarketStatus
+//        ad: unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze | getTrackRecord | getLineupUpdate | getLiveForecast | getWeeklyBulletin | readCouponImage | getStoryReview | deleteAccount | getVerdicts | verifyPlaySubscription | getEntitlement | spinWheel | getWheel | getDailyPredictions | getPredictionDetail | adminMarketStatus
 //            setFeatured | clearFeatured | adminSetSubscription (ve diğer yönetim/ödül/ses uçları)
 //   Authorization: Bearer <Firebase ID token>   (uygulama her istekte gönderir)
 //   Misafir (Firebase anonim oturum) yalnızca GUEST_ROUTES'taki okuma uçlarını kullanabilir; deneme hakkı, çark,
@@ -19,6 +19,7 @@ export const GUEST_ROUTES = new Set([
   'getSpecial',
   'getEntitlement',
   'getDailyPredictions',
+  'getPredictionDetail',
   'getTrackRecord',
   'getVerdicts',
   'getLineupUpdate',
@@ -58,7 +59,7 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
     // Günlük hediye çarkı: günde bir ücretsiz çevirme (sonuç sunucuda belirlenir)
     ...(wheel ? { spinWheel: (d) => wheel.spin(d), getWheel: (d) => wheel.status(d) } : {}),
     // Günlük toplu tahminler (Tahminler sekmesi, Ana Sayfa, Canlı takip)
-    ...(daily ? { getDailyPredictions: (d) => daily.list(d) } : {}),
+    ...(daily ? { getDailyPredictions: (d) => daily.list(d), getPredictionDetail: (d) => daily.detail(d) } : {}),
     // Yönetici: dış tahmin verisinin lig bazında kapsaması (yalnızca sayılar)
     ...(market ? { adminMarketStatus: (d) => market.adminStatus(d) } : {}),
     ...(lineup ? { getLineupUpdate: (d) => lineup.update(d) } : {}),

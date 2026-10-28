@@ -27,6 +27,7 @@ import { LEAGUES, matchKey } from './logic.js';
 import { matchFacts, settleMarket } from './settle.js';
 import { trDay } from './progress.js';
 import { AppError } from './errors.js';
+import { predictionDetail, DETAIL_MARKETS } from './prediction_detail.js';
 
 const DAY = 86400000;
 /** Maç bitmiş sayılmadan önce beklenen süre. */
@@ -310,6 +311,59 @@ export class DailyPredictionService {
     this.stats.liveUpdates++;
     this.stats.lastLiveAt = new Date(now).toISOString();
     return live;
+  }
+
+  /**
+   * Tahmin detayı (uygulamada tahmin kartına dokununca): bütün tahmin türleri, seçeneklerin olasılıkları ve kısa
+   * gerekçeler. Erişim listeyle aynı: abone, maçı deneme/çark hakkıyla açan ya da bitmiş maç. Kapalıysa yalnızca güven
+   * ve türlerin adları döner.
+   */
+  async detail({ uid, key, unlocked = false, guest = false }) {
+    if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
+    if (typeof key !== 'string' || !/^[A-Za-z0-9_]{3,120}$/.test(key)) throw new AppError('invalid-argument', 'Geçersiz maç.');
+    const entry = await this.store.getDaily(key);
+    if (!entry) throw new AppError('not-found', 'Bu maç için tahmin bulunamadı.');
+    const now = this.now();
+    const settled = entry.result?.status === 'done' || entry.result?.status === 'void';
+    let open = settled;
+    if (!open && !guest) {
+      const ent = await this.access.entitlement(uid);
+      open = ent.subscribed === true || (unlocked === true && (await this.store.hasUnlock(uid, key, 'ai')));
+    }
+    const fin = finalOf(entry);
+    const head = {
+      key,
+      league: entry.league,
+      eventId: entry.eventId,
+      kickoff: new Date(entry.kickoffMs).toISOString(),
+      home: entry.home,
+      away: entry.away,
+      best: fin.best,
+      confidence: fin.confidence,
+      open,
+      locked: settled || entry.kickoffMs - now < LIVE_LOCK_MS,
+      updatedAt: entry.live?.at ? new Date(entry.live.at).toISOString() : null,
+      result: entry.result ?? null,
+    };
+    if (!open) return { ...head, expected: null, markets: DETAIL_MARKETS.map((m) => ({ id: m.id, title: m.title, pick: null, pct: null, options: [], why: [], hit: null })) };
+    const d = predictionDetail(entry, fin, await this._contentModel(key));
+    return { ...head, ...d };
+  }
+
+  /** AI içeriğinin model alanı (form, sıra, gol ortalamaları); 30 dakika bellekte. Okunamazsa null. */
+  async _contentModel(key) {
+    this._cm ??= new Map();
+    const hit = this._cm.get(key);
+    if (hit && this.now() - hit.at < 30 * 60e3) return hit.model;
+    let model = null;
+    try {
+      model = (await this.paid?.store?.getContent?.(key))?.model ?? null;
+    } catch {
+      model = null;
+    }
+    this._cm.set(key, { at: this.now(), model });
+    if (this._cm.size > 500) this._cm.delete(this._cm.keys().next().value);
+    return model;
   }
 
   /** Maçın kilitlenen son gol beklentileri (canlı modelin maç öncesi tabanı). Canlı güncelleme yoksa null. */
