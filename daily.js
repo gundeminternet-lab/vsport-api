@@ -6,17 +6,23 @@
 //   kg  : karşılıklı gol                            → "KG Var" | "KG Yok"
 //   iyg : ilk yarıda gol (0,5 alt/üst)              → "İY 0.5 Üst" | "İY 0.5 Alt"
 // Oran gösterilmez; yalnızca tahmin ve olasılığı. Maçın "güven"i en güçlü tahminin olasılığıdır.
-// Tahminler maç başına bir kez hesaplanır ve değiştirilmez; maç bitince sonuç işlenir (tuttu / tutmadı).
+// İlk tahmin maç başına bir kez hesaplanır ve saklanır (markets). Sonra dış tahmin verisi değiştikçe (market.js)
+// gol beklentileri yeniden birleştirilir ve "live" alanı güncellenir: tahminler maç başlayana kadar hareket eder,
+// başlamadan bir dakika önce kilitlenir. Karne kilitlenen son tahmine göre tutulur (ilk tahminin sonucu da saklanır).
 //
 // Erişim: abone her tahmini görür; abone olmayan (ve misafir) güven yüzdesini ve kilitli kutuları görür. Maç bitince
 // tahminler ve sonuçları herkese açılır (karne şeffaf). Deneme/çark hakkıyla AI paketi açılmış maç da açık görünür.
 //
 // Kayıt (yalnızca sunucu; firestore.rules):
 //   daily_preds/{matchKey}   = { day, key, league, eventId, kickoffMs, home, away, markets, best, confidence, createdAt,
-//                                result?: { status: 'done'|'void', home, away, ht }, hits?: { ms: true|false|null, ... } }
+//                                model: { lh, la, sigma }, probs: { home, draw, away },
+//                                live?: { at, rev, weight, lambdas, sigma, markets, best, confidence, probs },
+//                                result?: { status: 'done'|'void', home, away, ht }, hits?: { ms: true|false|null, ... },
+//                                firstHits?: (canlı güncelleme olduysa ilk tahminin sonucu) }
 //   daily_pending/{matchKey} = { kickoffMs, league, eventId }   (sonuç bekleyenler)
 
 import { markets as marketProbs } from './content.js';
+import { blendLambdas, marketWeight } from './engine/blend.js';
 import { LEAGUES, matchKey } from './logic.js';
 import { matchFacts, settleMarket } from './settle.js';
 import { trDay } from './progress.js';
@@ -33,6 +39,8 @@ const MIN_LEAD_MS = 5 * 60e3;
 const MAX_CLAIMS = 30;
 /** Tek maçın hesaplanması bundan uzun sürerse bırakılır (takılan bir istek bütün hattı durdurmasın). */
 const MATCH_TIMEOUT_MS = 3 * 60e3;
+/** Başlamasına bundan az kalan maçın tahmini artık değişmez (kilit). */
+export const LIVE_LOCK_MS = 60e3;
 /** Bir tur bundan uzun "meşgul" kalırsa takılmış sayılır, yeni tur başlar. */
 const STALE_BUSY_MS = 12 * 60e3;
 /** Sonuçlanamayan maçın yeniden denenmesi için beklenen süre. */
@@ -49,6 +57,22 @@ export const MARKET_IDS = ['ms', 'iy', 'au', 'kg', 'iyg'];
 
 const pct = (p) => Math.round(p * 100);
 
+/** İlk yarı, alt/üst, KG ve İY gol tahminleri (saf): ms tahmini dışarıdan verilir. */
+function restMarkets(p, ms) {
+  const iy = [['1', p.iy1], ['X', p.iyX], ['2', p.iy2]].sort((a, b) => b[1] - a[1])[0];
+  const side = (prob, yes, no) => (prob >= 0.5 ? [yes, pct(prob)] : [no, pct(1 - prob)]);
+  const [au, auPct] = side(p.over25, '2.5 Üst', '2.5 Alt');
+  const [kg, kgPct] = side(p.kgVar, 'KG Var', 'KG Yok');
+  const [iyg, iygPct] = side(p.iyOver05, 'İY 0.5 Üst', 'İY 0.5 Alt');
+  return [
+    ms,
+    { id: 'iy', pick: `İY ${iy[0]}`, pct: pct(iy[1]) },
+    { id: 'au', pick: au, pct: auPct },
+    { id: 'kg', pick: kg, pct: kgPct },
+    { id: 'iyg', pick: iyg, pct: iygPct },
+  ];
+}
+
 /** AI içeriğinden beş tahmin (saf). content: logic.js → contentFor çıktısı (ai + model). */
 export function marketsFromContent(content) {
   const ai = content?.ai;
@@ -56,18 +80,55 @@ export function marketsFromContent(content) {
   if (!ai?.probabilities || !model || !Number.isFinite(model.lambdaHome) || !Number.isFinite(model.lambdaAway)) return null;
   const { p } = marketProbs(model.lambdaHome, model.lambdaAway, model.sigma ?? 0);
   const msPct = { '1': ai.probabilities.home, X: ai.probabilities.draw, '2': ai.probabilities.away }[ai.pick];
-  const iy = [['1', p.iy1], ['X', p.iyX], ['2', p.iy2]].sort((a, b) => b[1] - a[1])[0];
-  const side = (prob, yes, no) => (prob >= 0.5 ? [yes, pct(prob)] : [no, pct(1 - prob)]);
-  const [au, auPct] = side(p.over25, '2.5 Üst', '2.5 Alt');
-  const [kg, kgPct] = side(p.kgVar, 'KG Var', 'KG Yok');
-  const [iyg, iygPct] = side(p.iyOver05, 'İY 0.5 Üst', 'İY 0.5 Alt');
-  return [
-    { id: 'ms', pick: `MS ${ai.pick}`, pct: Number.isFinite(msPct) ? msPct : 0 },
-    { id: 'iy', pick: `İY ${iy[0]}`, pct: pct(iy[1]) },
-    { id: 'au', pick: au, pct: auPct },
-    { id: 'kg', pick: kg, pct: kgPct },
-    { id: 'iyg', pick: iyg, pct: iygPct },
-  ];
+  return restMarkets(p, { id: 'ms', pick: `MS ${ai.pick}`, pct: Number.isFinite(msPct) ? msPct : 0 });
+}
+
+/**
+ * Gol beklentilerinden beş tahmin, en güçlüsü ve 1X2 olasılıkları (saf). Canlı güncellemede kullanılır.
+ * Döner: { markets, best, confidence, probs }
+ */
+export function marketsFromModel(lh, la, sigma = 0) {
+  const { p } = marketProbs(lh, la, sigma);
+  const pick = p.ms1 >= p.msX && p.ms1 >= p.ms2 ? '1' : p.ms2 >= p.msX && p.ms2 >= p.ms1 ? '2' : 'X';
+  const list = restMarkets(p, { id: 'ms', pick: `MS ${pick}`, pct: pct({ '1': p.ms1, X: p.msX, '2': p.ms2 }[pick]) });
+  const best = list.reduce((a, b) => (b.pct > a.pct ? b : a));
+  return { markets: list, best: best.id, confidence: best.pct, probs: { home: pct(p.ms1), draw: pct(p.msX), away: pct(p.ms2) } };
+}
+
+/** Kaydın geçerli (son) tahmini: canlı güncelleme varsa o, yoksa ilk tahmin. */
+export function finalOf(entry) {
+  const l = entry?.live;
+  if (l && Array.isArray(l.markets) && l.markets.length) return { markets: l.markets, best: l.best, confidence: l.confidence };
+  return { markets: entry?.markets ?? [], best: entry?.best, confidence: entry?.confidence };
+}
+
+const r4 = (x) => Math.round(x * 1e4) / 1e4;
+
+/**
+ * Dış tahmin verisinin son görüntüsüyle kaydın canlı tahmini (saf). Değişiklik yoksa, maç kilitlendiyse ya da
+ * veri kullanılamıyorsa null.
+ */
+export function liveUpdate(entry, snap, now) {
+  if (!entry || entry.result || entry.resolved) return null;
+  if (!(entry.kickoffMs - now >= LIVE_LOCK_MS)) return null;
+  const m = entry.model;
+  if (!m || !Number.isFinite(m.lh) || !Number.isFinite(m.la)) return null;
+  const w = marketWeight(snap, { now });
+  if (w <= 0) return null;
+  const b = blendLambdas({ home: m.lh, away: m.la, sigma: m.sigma ?? 0 }, snap.lambdas, w);
+  const next = marketsFromModel(b.home, b.away, b.sigma);
+  const prev = entry.live;
+  if (prev?.markets?.length === next.markets.length && prev.markets.every((x, i) => x.pick === next.markets[i].pick && x.pct === next.markets[i].pct)) return null;
+  // İlk tahminle aynıysa (ve önceden canlı güncelleme yoksa) yazmaya gerek yok
+  if (!prev && entry.markets?.every((x, i) => x.pick === next.markets[i]?.pick && x.pct === next.markets[i]?.pct)) return null;
+  return {
+    at: now,
+    rev: (prev?.rev ?? 0) + 1,
+    weight: Math.round(w * 1000) / 1000,
+    lambdas: { home: r4(b.home), away: r4(b.away) },
+    sigma: r4(b.sigma),
+    ...next,
+  };
 }
 
 /** Kartta gösterilen kısa gerekçe: AI analizindeki "Maçın anahtarı" (yoksa "Genel bakış"), en fazla ~220 karakter. */
@@ -98,6 +159,9 @@ export function dailyEntry(match, content, now) {
     best: best.id,
     confidence: best.pct,
     reason: reasonOf(content),
+    // Canlı güncelleme için modelin kendi gol beklentileri (dış veriyle birleştirilecek taban)
+    model: { lh: r4(content.model.lambdaHome), la: r4(content.model.lambdaAway), sigma: r4(content.model.sigma ?? 0) },
+    probs: content.ai?.probabilities ?? null,
     createdAt: now,
   };
 }
@@ -108,8 +172,11 @@ export function settleEntry(entry, facts, now) {
     return { result: { status: 'void' }, hits: {} };
   }
   if (!facts.completed || typeof facts.home !== 'number' || typeof facts.away !== 'number') return null;
-  const hits = Object.fromEntries(entry.markets.map((m) => [m.id, settleMarket(m.pick, facts)]));
-  return { result: { status: 'done', home: facts.home, away: facts.away, ht: facts.ht ?? null }, hits };
+  // Karne maç başında kilitlenen son tahmine göre; canlı güncelleme olduysa ilk tahminin sonucu da saklanır
+  const hits = Object.fromEntries(finalOf(entry).markets.map((m) => [m.id, settleMarket(m.pick, facts)]));
+  const out = { result: { status: 'done', home: facts.home, away: facts.away, ht: facts.ht ?? null }, hits };
+  if (entry.live?.markets?.length) out.firstHits = Object.fromEntries(entry.markets.map((m) => [m.id, settleMarket(m.pick, facts)]));
+  return out;
 }
 
 /** Günün özeti (saf): sonuçlanan maçlarda en güçlü tahminin isabeti ve ortalama güven. */
@@ -118,12 +185,12 @@ export function daySummary(rows) {
   let hit = 0;
   let miss = 0;
   for (const r of done) {
-    const h = r.hits?.[r.best];
+    const h = r.hits?.[finalOf(r).best];
     if (h === true) hit++;
     else if (h === false) miss++;
   }
   const valid = rows.filter((r) => r.result?.status !== 'void');
-  const avg = valid.length ? Math.round(valid.reduce((s, r) => s + (r.confidence ?? 0), 0) / valid.length) : null;
+  const avg = valid.length ? Math.round(valid.reduce((s, r) => s + (finalOf(r).confidence ?? 0), 0) / valid.length) : null;
   return { total: valid.length, settled: hit + miss, hit, miss, rate: hit + miss ? Math.round((hit / (hit + miss)) * 100) : null, avgConfidence: avg };
 }
 
@@ -136,7 +203,9 @@ const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
  *   saveDailyResult(key, { result, hits })   hasUnlock(uid, key, type) (users/{uid}/unlocks)
  */
 export class DailyPredictionService {
-  constructor({ paid, store, espn, access, leagues = LEAGUES, now = () => Date.now(), perTick = 4, planMs = 30 * 60e3, listCacheMs = 60e3, log = console, isAdmin = null, statusExtra = null }) {
+  constructor({ paid, store, espn, access, leagues = LEAGUES, now = () => Date.now(), perTick = 4, planMs = 30 * 60e3, listCacheMs = 60e3, log = console, isAdmin = null, statusExtra = null, marketLatest = null }) {
+    /** Dış tahmin verisinin bellekteki son görüntüsü (market.js → latest): yeni tahmin hemen güncel veriyle başlasın. */
+    this.marketLatest = marketLatest;
     /** Liste boşken yöneticiye hat durumu gösterilsin diye (uid → bool). */
     this.isAdmin = isAdmin;
     /** Durum özetine eklenecek sunucu bilgisi (sürüm, bellek). */
@@ -160,7 +229,7 @@ export class DailyPredictionService {
     this._busy = false;
     this._busyAt = 0;
     // Durum (sunucu /version adresinde görünür): hattın çalışıp çalışmadığı uzaktan anlaşılsın
-    this.stats = { ticks: 0, lastTickAt: null, planned: 0, pending: 0, made: 0, failed: 0, lastError: null, lastErrorAt: null, resolved: 0 };
+    this.stats = { ticks: 0, lastTickAt: null, planned: 0, pending: 0, made: 0, failed: 0, lastError: null, lastErrorAt: null, resolved: 0, liveUpdates: 0 };
   }
 
   /** /version'da gösterilen özet. */
@@ -227,6 +296,29 @@ export class DailyPredictionService {
     return out;
   }
 
+  /**
+   * Dış tahmin verisi değişince (market.js → onUpdate) maçın tahminini günceller. Kilitli (başlamak üzere ya da
+   * başlamış) maça, değişiklik yoksa ya da veri zayıfsa dokunulmaz. Döner: yeni canlı tahmin | null.
+   */
+  async applyMarket(key, snap, { entry = null } = {}) {
+    const now = this.now();
+    const e = entry ?? (await this.store.getDaily(key));
+    const live = liveUpdate(e, snap, now);
+    if (!live) return null;
+    await this.store.saveDailyLive(key, live);
+    this._lists.delete(e.day);
+    this.stats.liveUpdates++;
+    this.stats.lastLiveAt = new Date(now).toISOString();
+    return live;
+  }
+
+  /** Maçın kilitlenen son gol beklentileri (canlı modelin maç öncesi tabanı). Canlı güncelleme yoksa null. */
+  async finalLambdas(key) {
+    const e = await this.store.getDaily(key);
+    const l = e?.live?.lambdas;
+    return l && Number.isFinite(l.home) && Number.isFinite(l.away) ? { home: l.home, away: l.away, sigma: e.live.sigma } : null;
+  }
+
   /** Bugün ve yarının başlamamış ya da sürmekte olan maçları (fikstür planı; dış veri toplayıcı da kullanır). */
   async upcoming() {
     return this._matches();
@@ -277,6 +369,8 @@ export class DailyPredictionService {
           this._lists.delete(entry.day);
           made++;
           this.stats.made++;
+          const snap = this.marketLatest?.(key);
+          if (snap) await this.applyMarket(key, snap, { entry }).catch((e) => this._error(key, e));
         } catch (e) {
           this._failed.set(key, this.now());
           this._error(key, e);
@@ -360,6 +454,9 @@ export class DailyPredictionService {
     const items = rows.map((r) => {
       const settled = r.result?.status === 'done' || r.result?.status === 'void';
       const visible = ent.subscribed || settled || open.has(r.key);
+      const fin = finalOf(r);
+      const moved = Boolean(r.live?.markets?.length);
+      const first = new Map((r.markets ?? []).map((m) => [m.id, m]));
       return {
         key: r.key,
         league: r.league,
@@ -367,15 +464,27 @@ export class DailyPredictionService {
         kickoff: new Date(r.kickoffMs).toISOString(),
         home: r.home,
         away: r.away,
-        confidence: r.confidence,
-        best: r.best,
+        confidence: fin.confidence,
+        best: fin.best,
         open: visible,
         reason: visible ? (r.reason ?? null) : null,
-        markets: r.markets.map((m) =>
+        markets: fin.markets.map((m) =>
           visible
-            ? { id: m.id, pick: m.pick, pct: m.pct, hit: r.hits?.[m.id] ?? null }
+            ? {
+                id: m.id,
+                pick: m.pick,
+                pct: m.pct,
+                hit: r.hits?.[m.id] ?? null,
+                // İlk tahmin (güncellendiyse): uygulama değişimi ok ve fark olarak gösterir
+                ...(moved && first.has(m.id) ? { from: { pick: first.get(m.id).pick, pct: first.get(m.id).pct } } : {}),
+              }
             : { id: m.id, pick: null, pct: null, hit: null },
         ),
+        // Güncelleme bilgisi: kaçıncı sürüm, ne zaman; maç başlamadan bir dakika önce kilitlenir
+        updatedAt: moved ? new Date(r.live.at).toISOString() : null,
+        rev: r.live?.rev ?? 0,
+        ...(moved ? { confidenceFrom: r.confidence } : {}),
+        locked: settled || r.kickoffMs - now < LIVE_LOCK_MS,
         result: r.result ?? null,
       };
     });
@@ -410,6 +519,10 @@ export function createDailyStore(db, FieldValue) {
     async listDailyDue(beforeMs, limit) {
       const q = await db.collection('daily_pending').where('kickoffMs', '<', beforeMs).orderBy('kickoffMs').limit(limit).get();
       return q.docs.map((d) => ({ key: d.id, ...d.data() }));
+    },
+    /** Canlı tahmin alanı bütünüyle değişir (update: iç içe birleştirme yapılmaz). */
+    async saveDailyLive(key, live) {
+      await db.doc(`daily_preds/${key}`).update({ live });
     },
     async saveDailyResult(key, settled) {
       if (settled) await db.doc(`daily_preds/${key}`).set({ ...settled, resolved: true, resolvedAt: FieldValue.serverTimestamp() }, { merge: true });

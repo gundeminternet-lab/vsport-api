@@ -58,10 +58,10 @@ function setup({ matches, core, summary = async () => ({ pickcenter: [] }), t0 =
 }
 
 test('yenileme aralığı başlama saatine yaklaştıkça kısalır', () => {
-  assert.equal(refreshEvery(40 * HOUR), 6 * HOUR);
-  assert.equal(refreshEvery(10 * HOUR), 3 * HOUR);
-  assert.equal(refreshEvery(3 * HOUR), HOUR);
-  assert.equal(refreshEvery(30 * MIN), 20 * MIN);
+  assert.equal(refreshEvery(40 * HOUR), 3 * HOUR);
+  assert.equal(refreshEvery(10 * HOUR), HOUR);
+  assert.equal(refreshEvery(3 * HOUR), 30 * MIN);
+  assert.equal(refreshEvery(30 * MIN), 10 * MIN);
 });
 
 test('açılış korunur, son güncellenir, kapanış başlama saatinde alınır ve kapsama sayılır', async () => {
@@ -81,13 +81,13 @@ test('açılış korunur, son güncellenir, kapanış başlama saatinde alınır
   assert.ok(d1.last.lambdas.home > d1.last.lambdas.away, 'favori ev sahibi');
   assert.equal(d1.history.length, 1);
 
-  // Bir saat dolmadan yeniden okunmaz
-  clock.t += 30 * MIN;
+  // Yarım saat dolmadan yeniden okunmaz
+  clock.t += 20 * MIN;
   assert.equal(await c.tick(), 0);
 
   // Fiyat değişir: son güncellenir, açılış aynı kalır
   price = -200;
-  clock.t += 31 * MIN;
+  clock.t += 11 * MIN;
   assert.equal(await c.tick(), 1);
   const d2 = store.docs.get(key);
   assert.equal(d2.open.x12.home, openHome);
@@ -156,14 +156,13 @@ test('veri yoksa sayılır; kapanışta kapsamaya "verisiz" yazılır; hiç veri
   assert.equal(c.windowStatus().leagues['tur.2'].checked, 7);
   assert.equal(c.windowStatus().leagues['tur.2'].withOdds, 0);
   assert.equal(calls.summary, 1, 'yedek kaynak lig başına 6 saatte bir');
-  // İlk 5 maç lig henüz "verisiz" sayılmadan okunduğu için 6 saat sonra yeniden okunur; sonra aralık 4 katına çıkar
+  // İlk 5 maç lig henüz "verisiz" sayılmadan okundu; artık bu ligde aralık dört katı
+  const { refreshEvery: every } = await import('../market.js');
+  assert.equal(c._interval(ms[0], clock.t), 4 * every(ms[0].timestamp - clock.t));
   const before = calls.core;
-  clock.t += 6 * HOUR + MIN;
+  clock.t += 3 * HOUR + MIN;
   await c.tick();
-  assert.equal(calls.core, before + 5);
-  clock.t += 6 * HOUR + MIN;
-  await c.tick();
-  assert.equal(calls.core, before + 5);
+  assert.equal(calls.core, before + 5, 'ilk beşi normal aralıkla, son ikisi uzun aralıkla');
   // Maçlar bitip listeden düşünce kapsamaya verisiz olarak yazılır
   clock.t = ms[6].timestamp + HOUR;
   const store = c.store;

@@ -89,7 +89,7 @@ const store = {
 };
 
 /** /version ve Tahminler tanılamasında görünen sürüm. */
-const SERVER_VERSION = '2026-10-28-market-1';
+const SERVER_VERSION = '2026-10-28-live-preds-1';
 const espn = new EspnClient();
 const trackService = new TrackService({ store: createTrackStore(db), espn });
 // Abonelik: Google Play doğrulaması + erişim denetimi (bitmiş görünen Play aboneliği mağazadan yeniden okunur)
@@ -106,6 +106,8 @@ const daily = new DailyPredictionService({
   perTick: Number(process.env.DAILY_PER_MINUTE) || 4,
   isAdmin: async (uid) => (await db.doc(`users/${uid}`).get()).get('role') === 'admin',
   statusExtra: () => ({ version: SERVER_VERSION, memoryMb: Math.round(process.memoryUsage().rss / 1048576) }),
+  // Yeni hazırlanan tahmin toplayıcının bellekteki son görüntüsüyle hemen güncellenir
+  marketLatest: (key) => market?.latest(key) ?? null,
 });
 // Dış tahmin verisi (yalnızca sunucuda model girdisi; uygulamada gösterilmez). MARKET_DATA=off ile kapatılır.
 const market =
@@ -117,6 +119,8 @@ const market =
         sources: espnSources(espn),
         perTick: Number(process.env.MARKET_PER_MINUTE) || 8,
         isAdmin: async (uid) => (await db.doc(`users/${uid}`).get()).get('role') === 'admin',
+        // Görüntü değişince tahminler hareket eder (maç başlamadan bir dakika önce kilitlenir)
+        onUpdate: (key, snap) => daily.applyMarket(key, snap),
       });
 const narrator = narratorFromEnv();
 const couponReader = readerFromEnv();
@@ -153,7 +157,7 @@ const api = createApi({
   track: trackService,
   lineup: new LineupService({ paid: paidService, espn }),
   // Tek canlı model: canlı kart, baskı kartı ve AI yorumcu aynı ihtimalleri buradan alır
-  liveForecast: new LiveForecastService({ paid: paidService }),
+  liveForecast: new LiveForecastService({ paid: paidService, lambdasFor: (key) => daily.finalLambdas(key) }),
   bulletin: new BulletinService({ espn, db }),
   reader: couponReader,
   storyReview: new StoryReviewService({ paid: paidService }),

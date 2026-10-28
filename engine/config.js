@@ -128,6 +128,13 @@ export const MODEL = {
   // Yarı skorlarında düşük skor bağımlılığı daha zayıf: tam düzeltme ilk yarı 0-0 ihtimalini gerçekte görülenden
   // (~%27-30) yukarı itiyordu.
   dcRhoHalf: -0.015,
+
+  // Dış tahmin verisiyle birleştirme (engine/blend.js): modelin ve piyasanın gol beklentileri log uzayında ağırlıklı
+  // ortalanır. weight 2. aşamadaki geriye dönük testle ayarlanacak; şimdilik yaygın bulgu esas (piyasanın kapanış
+  // görüşü tek başına çoğu modelden iyidir, ikisinin birleşimi her ikisinden de iyidir). Veri zayıfsa ağırlık azalır:
+  // tek kaynak (× singleSource), kaynaklar ayrışıyor (spread > spreadMax → ×0.5), λ çözümü zorlandı (fitErrorMax →
+  // ×0.5), veri eski (staleHours → ×0.5; iki katından eskiyse kullanılmaz).
+  marketBlend: { weight: 0.5, max: 0.65, singleSource: 0.8, spreadMax: 0.06, fitErrorMax: 0.03, staleHours: 12 },
 };
 
 export const SIM = {

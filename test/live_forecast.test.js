@@ -30,7 +30,7 @@ const summary = ({ minute = 63, period = 2, home = 1, away = 0, state = 'in', na
 const match = { league: 'tur.1', id: '77', homeId: '10', awayId: '20', homeName: 'Ev', awayName: 'Dep', timestamp: NOW - 63 * 60e3, completed: false };
 const model = { lambdaHome: 1.5, lambdaAway: 1.1, sigma: 0.15 };
 
-function make({ json = summary(), m = match, now = NOW } = {}) {
+function make({ json = summary(), m = match, now = NOW, lambdasFor = null } = {}) {
   const calls = { summary: 0, model: 0 };
   const paid = {
     validate() {},
@@ -52,7 +52,7 @@ function make({ json = summary(), m = match, now = NOW } = {}) {
     },
   };
   let t = now;
-  const svc = new LiveForecastService({ paid, now: () => t });
+  const svc = new LiveForecastService({ paid, now: () => t, lambdasFor });
   return { svc, calls, advance: (ms) => (t += ms) };
 }
 
@@ -118,4 +118,17 @@ test('kırmızı kart gören deplasman: ev sahibinin ihtimali artar', async () =
   const b = await make({ json: summary({ redAway: true }) }).svc.forecast(args);
   assert.ok(b.probabilities.home > a.probabilities.home);
   assert.deepEqual(b.reds, [0, 1]);
+});
+
+test('maç başında kilitlenen son tahmin varsa canlı model onun gol beklentileriyle başlar', async () => {
+  const base = await make().svc.forecast(args);
+  const asked = [];
+  const { svc } = make({ lambdasFor: async (key) => (asked.push(key), { home: 2.1, away: 0.7, sigma: 0.08 }) });
+  const r = await svc.forecast(args);
+  assert.deepEqual(asked, ['tur_1_77']);
+  assert.deepEqual(r.prematch, { home: 2.1, away: 0.7 });
+  assert.ok(r.nextGoal.home > base.nextGoal.home, 'ev sahibi daha güçlü başladı');
+  // Kaynak hata verirse modelin kendi sayılarıyla sürer
+  const { svc: s2 } = make({ lambdasFor: async () => { throw new Error('yok'); } });
+  assert.deepEqual((await s2.forecast(args)).prematch, { home: 1.5, away: 1.1 });
 });

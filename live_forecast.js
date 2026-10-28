@@ -12,8 +12,10 @@ const FORECAST_TTL = 15e3;
 const MODEL_TTL = 30 * 60e3;
 
 export class LiveForecastService {
-  constructor({ paid, now = () => Date.now(), ttlMs = FORECAST_TTL }) {
+  /** lambdasFor: async (key) → { home, away, sigma } | null — maç başında kilitlenen son tahminin gol beklentileri (daily.js). */
+  constructor({ paid, now = () => Date.now(), ttlMs = FORECAST_TTL, lambdasFor = null }) {
     this.paid = paid;
+    this.lambdasFor = lambdasFor;
     this.now = now;
     this.ttlMs = ttlMs;
     this._forecasts = new Map(); // key → { at, value }
@@ -69,7 +71,12 @@ export class LiveForecastService {
     if (hit && this.now() - hit.at < MODEL_TTL) return hit.model;
     const opts = { asOf: match.timestamp - 60000 };
     const content = await this.paid.contentFor(match, opts);
-    const model = await this.paid.modelFor(match, content, opts);
+    let model = await this.paid.modelFor(match, content, opts);
+    // Tahmin maç başına kadar dış veriyle güncellendiyse canlı model o son (kilitli) gol beklentileriyle başlar
+    const fin = this.lambdasFor ? await this.lambdasFor(key).catch(() => null) : null;
+    if (fin && Number.isFinite(fin.home) && Number.isFinite(fin.away)) {
+      model = { ...model, lambdaHome: fin.home, lambdaAway: fin.away, ...(Number.isFinite(fin.sigma) ? { sigma: fin.sigma } : {}) };
+    }
     this._models.set(key, { at: this.now(), model });
     if (this._models.size > 300) this._models.clear();
     return model;

@@ -10,6 +10,7 @@
 //                       hasOdds, closed, updatedAt }
 //   odds_coverage/{gün} = { day, leagues: { [lig]: { matches, withOdds, withX12, withOu, withClose } } }
 //
+// Görüntü değişince onUpdate(key, snap) çağrılır: daily.js → applyMarket tahminleri maç başına kadar günceller.
 // Kaynak değiştirilebilir: sources = [{ name, fetch(match) → ham yanıt }]. Varsayılan sıra lig bazında öğrenilir
 // (bir ligde ikinci kaynak veri verdiyse o lig için öne alınır).
 
@@ -22,12 +23,28 @@ const MIN = 60e3;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 
-/** Başlama saatine kalan süreye göre yenileme aralığı. */
+/** Başlama saatine kalan süreye göre yenileme aralığı (tahminler bu sıklıkta hareket edebilir). */
 export function refreshEvery(leadMs) {
-  if (leadMs > 24 * HOUR) return 6 * HOUR;
-  if (leadMs > 6 * HOUR) return 3 * HOUR;
-  if (leadMs > HOUR) return HOUR;
-  return 20 * MIN;
+  if (leadMs > 24 * HOUR) return 3 * HOUR;
+  if (leadMs > 6 * HOUR) return HOUR;
+  if (leadMs > HOUR) return 30 * MIN;
+  return 10 * MIN;
+}
+
+/** Değişmeyen görüntü en çok bu aralıkla yeniden yazılır (Firestore yazma sayısı). */
+const SAVE_EVERY_MS = 3 * HOUR;
+
+/** İki görüntü arasında anlamlı fark (≥ 0.5 puan ya da çizgi değişimi) var mı. */
+export function snapMoved(a, b) {
+  if (!a || !b) return true;
+  const keys = [
+    [a.x12?.home, b.x12?.home],
+    [a.x12?.draw, b.x12?.draw],
+    [a.x12?.away, b.x12?.away],
+    [a.ou?.over, b.ou?.over],
+  ];
+  if ((a.ou?.line ?? null) !== (b.ou?.line ?? null) || Boolean(a.x12) !== Boolean(b.x12)) return true;
+  return keys.some(([x, y]) => Number.isFinite(x) && Number.isFinite(y) && Math.abs(x - y) >= 0.005);
 }
 
 /** Kapanış penceresi: başlamadan 10 dk önce ile başladıktan 3 dk sonrası (sonrası canlı fiyattır, alınmaz). */
@@ -75,8 +92,12 @@ export class MarketCollector {
    * matches: async () → yaklaşan maçlar [{ id, league, timestamp, homeName, awayName, homeId, awayId }]
    * store: createMarketStore arayüzü. isAdmin: async (uid) → bool (yönetici durum ekranı için).
    */
-  constructor({ store, matches, sources, leagues = LEAGUES, now = () => Date.now(), perTick = 8, log = console, isAdmin = null, coverageCacheMs = 10 * MIN }) {
+  /**
+   * onUpdate: async (key, snap) → görüntü değişince çağrılır (daily.js → applyMarket: tahminler hareket eder).
+   */
+  constructor({ store, matches, sources, leagues = LEAGUES, now = () => Date.now(), perTick = 8, log = console, isAdmin = null, coverageCacheMs = 10 * MIN, onUpdate = null }) {
     this.store = store;
+    this.onUpdate = onUpdate;
     this.matches = matches;
     this.sources = sources;
     this.leagues = leagues;
@@ -244,24 +265,44 @@ export class MarketCollector {
     doc.source = providers.source;
     doc.providers = providers.list.slice(0, 8).map(slimProvider);
     const snap = snapOf(cons, now);
+    const moved = snapMoved(doc.last, snap);
     doc.last = snap;
     // Açılış: kaynağın bildirdiği açılış fiyatı varsa o, yoksa ilk görülen değer
     const reportedOpen = consensus(providers.list, { phase: 'open' });
     if (reportedOpen && doc.open?.from !== 'source') doc.open = snapOf(reportedOpen, doc.open?.at ?? now, 'source');
     else if (!doc.open) doc.open = { ...snap, from: 'first' };
     doc.history = pushHistory(doc.history ?? [], snap);
+    st.doc = doc;
+    // Tahminleri güncelle (değiştiyse ya da bu süreçte ilk kez görülüyorsa); hata toplayıcıyı durdurmaz
+    if (this.onUpdate && (moved || !st.notified)) {
+      st.notified = true;
+      try {
+        await this.onUpdate(key, snap);
+        this.stats.updates = (this.stats.updates ?? 0) + 1;
+      } catch (e) {
+        this._error(`${key} güncelleme`, e);
+      }
+    }
     if (closing) {
       const reportedClose = consensus(providers.list, { phase: 'close' });
       doc.close = reportedClose ? snapOf(reportedClose, now, 'source') : { ...snap, from: 'fetch' };
-      st.doc = doc;
       await this._finalize(key, st, now);
       return;
     }
-    doc.updatedAt = now;
-    await this.store.saveOdds(key, doc);
-    st.doc = doc;
+    // Değişmeyen görüntü 3 saatte bir yazılır (bellekte her zaman güncel)
+    if (moved || !st.savedAt || now - st.savedAt >= SAVE_EVERY_MS) {
+      doc.updatedAt = now;
+      await this.store.saveOdds(key, doc);
+      st.savedAt = now;
+    }
     st.nextAt = Math.min(now + this._interval(m, now), m.timestamp - CLOSE_WINDOW.before);
     if (st.nextAt <= now) st.nextAt = now + MIN;
+  }
+
+  /** Maçın bellekteki son görüntüsü (yeni hazırlanan tahmin hemen güncel veriyle başlasın). */
+  latest(key) {
+    const last = this._state.get(key)?.doc?.last;
+    return last?.x12 ? last : null;
   }
 
   /**
