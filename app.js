@@ -26,6 +26,13 @@ export const GUEST_ROUTES = new Set([
   'getLiveForecast',
   'getStoryReview',
   'getWeeklyBulletin',
+  // Oyun ve topluluk: misafir yalnızca tabloları görür ve arar (oynamak için giriş gerekir)
+  'photoBoard',
+  'quizBoard',
+  'creditLeaders',
+  'communityStats',
+  'gameSearchPlayers',
+  'presence',
 ]);
 
 const STATUS = {
@@ -40,7 +47,7 @@ const STATUS = {
   unavailable: 503,
 };
 
-export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, daily = null, market = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
+export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, daily = null, market = null, game = null, social = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
   const routes = {
     unlockContent: (d) => service.unlock(d),
     getContent: (d) => service.get(d),
@@ -60,6 +67,41 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
     ...(wheel ? { spinWheel: (d) => wheel.spin(d), getWheel: (d) => wheel.status(d) } : {}),
     // Günlük toplu tahminler (Tahminler sekmesi, Ana Sayfa, Canlı takip)
     ...(daily ? { getDailyPredictions: (d) => daily.list(d), getPredictionDetail: (d) => daily.detail(d) } : {}),
+    // Oyunlar: kredi, günlük bonus, görevler, Fotoğraftan Bil, bilgi yarışması, Benim 11'im, kredi liderleri
+    ...(game
+      ? {
+          gameState: (d) => game.state(d),
+          gameClaimBonus: (d) => game.claimBonus(d),
+          gameClaimMission: (d) => game.claimMission(d),
+          photoState: (d) => game.photoState(d),
+          photoStart: (d) => game.photoStart(d),
+          photoGuess: (d) => game.photoGuess(d),
+          photoBoard: (d) => game.photoBoard(d),
+          gameSearchPlayers: (d) => game.searchPlayers(d),
+          quizStart: (d) => game.quizStart(d),
+          quizAnswer: (d) => game.quizAnswer(d),
+          quizBoard: (d) => game.quizBoard(d),
+          packOpen: (d) => game.openPack(d),
+          welcomePack: (d) => game.welcomePack(d),
+          cardsSell: (d) => game.sellCards(d),
+          squadSave: (d) => game.saveSquad(d),
+          squadDelete: (d) => game.deleteSquad(d),
+          duelPlay: (d) => game.duel(d),
+          creditLeaders: (d) => game.leaders(d),
+        }
+      : {}),
+    // Sosyal akış ve topluluk sayıları
+    ...(social
+      ? {
+          socialPost: (d) => social.post(d),
+          socialLike: (d) => social.like(d),
+          socialComment: (d) => social.comment(d),
+          socialDelete: (d) => social.remove(d),
+          socialFollow: (d) => social.follow(d),
+          presence: (d) => social.presence(d),
+          communityStats: (d) => social.stats(d),
+        }
+      : {}),
     // Yönetici: dış tahmin verisinin lig bazında kapsaması (yalnızca sayılar)
     ...(market ? { adminMarketStatus: (d) => market.adminStatus(d) } : {}),
     ...(lineup ? { getLineupUpdate: (d) => lineup.update(d) } : {}),

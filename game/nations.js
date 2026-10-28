@@ -1,0 +1,116 @@
+// Oyuncu uyruğu: veri kaynağındaki İngilizce ülke adı → Türkçe ad ve ISO kodu (bayrak). Listede olmayan ülke adı
+// olduğu gibi kalır, bayraksız gösterilir.
+
+const N = [
+  ['Turkey', 'Türkiye', 'TR'],
+  ['Türkiye', 'Türkiye', 'TR'],
+  ['England', 'İngiltere', 'GB'],
+  ['Scotland', 'İskoçya', 'GB'],
+  ['Wales', 'Galler', 'GB'],
+  ['Northern Ireland', 'Kuzey İrlanda', 'GB'],
+  ['Republic of Ireland', 'İrlanda', 'IE'],
+  ['Ireland', 'İrlanda', 'IE'],
+  ['Spain', 'İspanya', 'ES'],
+  ['Germany', 'Almanya', 'DE'],
+  ['Italy', 'İtalya', 'IT'],
+  ['France', 'Fransa', 'FR'],
+  ['Portugal', 'Portekiz', 'PT'],
+  ['Netherlands', 'Hollanda', 'NL'],
+  ['Belgium', 'Belçika', 'BE'],
+  ['Brazil', 'Brezilya', 'BR'],
+  ['Argentina', 'Arjantin', 'AR'],
+  ['Uruguay', 'Uruguay', 'UY'],
+  ['Colombia', 'Kolombiya', 'CO'],
+  ['Chile', 'Şili', 'CL'],
+  ['Paraguay', 'Paraguay', 'PY'],
+  ['Peru', 'Peru', 'PE'],
+  ['Ecuador', 'Ekvador', 'EC'],
+  ['Venezuela', 'Venezuela', 'VE'],
+  ['Mexico', 'Meksika', 'MX'],
+  ['United States', 'ABD', 'US'],
+  ['USA', 'ABD', 'US'],
+  ['Canada', 'Kanada', 'CA'],
+  ['Croatia', 'Hırvatistan', 'HR'],
+  ['Serbia', 'Sırbistan', 'RS'],
+  ['Bosnia and Herzegovina', 'Bosna-Hersek', 'BA'],
+  ['Bosnia-Herzegovina', 'Bosna-Hersek', 'BA'],
+  ['Montenegro', 'Karadağ', 'ME'],
+  ['Slovenia', 'Slovenya', 'SI'],
+  ['Albania', 'Arnavutluk', 'AL'],
+  ['Kosovo', 'Kosova', 'XK'],
+  ['North Macedonia', 'Kuzey Makedonya', 'MK'],
+  ['Greece', 'Yunanistan', 'GR'],
+  ['Bulgaria', 'Bulgaristan', 'BG'],
+  ['Romania', 'Romanya', 'RO'],
+  ['Hungary', 'Macaristan', 'HU'],
+  ['Austria', 'Avusturya', 'AT'],
+  ['Switzerland', 'İsviçre', 'CH'],
+  ['Poland', 'Polonya', 'PL'],
+  ['Czech Republic', 'Çekya', 'CZ'],
+  ['Czechia', 'Çekya', 'CZ'],
+  ['Slovakia', 'Slovakya', 'SK'],
+  ['Ukraine', 'Ukrayna', 'UA'],
+  ['Russia', 'Rusya', 'RU'],
+  ['Georgia', 'Gürcistan', 'GE'],
+  ['Azerbaijan', 'Azerbaycan', 'AZ'],
+  ['Armenia', 'Ermenistan', 'AM'],
+  ['Denmark', 'Danimarka', 'DK'],
+  ['Sweden', 'İsveç', 'SE'],
+  ['Norway', 'Norveç', 'NO'],
+  ['Finland', 'Finlandiya', 'FI'],
+  ['Iceland', 'İzlanda', 'IS'],
+  ['Senegal', 'Senegal', 'SN'],
+  ['Nigeria', 'Nijerya', 'NG'],
+  ['Ghana', 'Gana', 'GH'],
+  ["Ivory Coast", 'Fildişi Sahili', 'CI'],
+  ["Côte d'Ivoire", 'Fildişi Sahili', 'CI'],
+  ['Cameroon', 'Kamerun', 'CM'],
+  ['Mali', 'Mali', 'ML'],
+  ['Morocco', 'Fas', 'MA'],
+  ['Algeria', 'Cezayir', 'DZ'],
+  ['Tunisia', 'Tunus', 'TN'],
+  ['Egypt', 'Mısır', 'EG'],
+  ['Guinea', 'Gine', 'GN'],
+  ['Gabon', 'Gabon', 'GA'],
+  ['DR Congo', 'Demokratik Kongo', 'CD'],
+  ['Congo DR', 'Demokratik Kongo', 'CD'],
+  ['Burkina Faso', 'Burkina Faso', 'BF'],
+  ['South Africa', 'Güney Afrika', 'ZA'],
+  ['Cape Verde', 'Yeşil Burun Adaları', 'CV'],
+  ['Japan', 'Japonya', 'JP'],
+  ['South Korea', 'Güney Kore', 'KR'],
+  ['Korea Republic', 'Güney Kore', 'KR'],
+  ['Australia', 'Avustralya', 'AU'],
+  ['Iran', 'İran', 'IR'],
+  ['Saudi Arabia', 'Suudi Arabistan', 'SA'],
+  ['Israel', 'İsrail', 'IL'],
+  ['Jamaica', 'Jamaika', 'JM'],
+  ['Costa Rica', 'Kosta Rika', 'CR'],
+  ['Luxembourg', 'Lüksemburg', 'LU'],
+  ['Cyprus', 'Kıbrıs', 'CY'],
+];
+
+const BY = new Map(N.map(([en, tr, iso]) => [en.toLowerCase(), { tr, iso }]));
+
+/** "Brazil" → { name: "Brezilya", iso: "BR" }. Bilinmeyen ülke: { name: girdi, iso: null }. */
+export function nation(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return { name: null, iso: null };
+  const hit = BY.get(s.toLowerCase());
+  return hit ? { name: hit.tr, iso: hit.iso } : { name: s, iso: null };
+}
+
+/** Bölge (hoşgeldin paketi) → lig kodu ve uyruk. */
+export const REGIONS = {
+  tur: { league: 'tur.1', nation: 'Türkiye', name: 'Türkiye', leagueName: 'Süper Lig', iso: 'TR' },
+  eng: { league: 'eng.1', nation: 'İngiltere', name: 'İngiltere', leagueName: 'Premier Lig', iso: 'GB' },
+  esp: { league: 'esp.1', nation: 'İspanya', name: 'İspanya', leagueName: 'La Liga', iso: 'ES' },
+  ger: { league: 'ger.1', nation: 'Almanya', name: 'Almanya', leagueName: 'Bundesliga', iso: 'DE' },
+  ita: { league: 'ita.1', nation: 'İtalya', name: 'İtalya', leagueName: 'Serie A', iso: 'IT' },
+  fra: { league: 'fra.1', nation: 'Fransa', name: 'Fransa', leagueName: 'Ligue 1', iso: 'FR' },
+  por: { league: 'por.1', nation: 'Portekiz', name: 'Portekiz', leagueName: 'Liga Portugal', iso: 'PT' },
+  ned: { league: 'ned.1', nation: 'Hollanda', name: 'Hollanda', leagueName: 'Eredivisie', iso: 'NL' },
+};
+
+/** Oyuncu havuzunun ligleri (bölgelerle aynı). */
+export const POOL_LEAGUES = Object.values(REGIONS).map((r) => r.league);

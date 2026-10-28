@@ -348,6 +348,11 @@ export class EspnClient {
     return { items: out };
   }
 
+  /** Takım kadrosu (oyun oyuncu havuzu için; büyük yanıt, önbelleğe yazılmaz). */
+  async getRoster(league, teamId) {
+    return this._getJson(`${ESPN.siteApi}/${league}/teams/${encodeURIComponent(teamId)}/roster`, { store: false, maxAgeMs: 0 });
+  }
+
   /** Maç özetindeki tahmin kaynağı blokları (pickcenter / odds). Özet zaten önbellekteyse yeniden indirilmez. */
   async getSummaryOdds(league, eventId) {
     let json;

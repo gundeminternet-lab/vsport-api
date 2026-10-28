@@ -49,6 +49,10 @@ import { createFeaturedService } from './featured.js';
 import { WheelService, WHEEL_WEIGHTS, WHEEL_SLICES, CREDIT_DAYS, ASSISTANT_PRIZE_HOURS } from './wheel.js';
 import { DailyPredictionService, createDailyStore } from './daily.js';
 import { MarketCollector, createMarketStore, espnSources } from './market.js';
+import { GameService } from './game/service.js';
+import { createGameStore } from './game/store.js';
+import { PlayerPool } from './game/pool.js';
+import { SocialService, createSocialStore } from './social.js';
 
 function serviceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -89,7 +93,7 @@ const store = {
 };
 
 /** /version ve Tahminler tanılamasında görünen sürüm. */
-const SERVER_VERSION = '2026-10-28-pred-detail-1';
+const SERVER_VERSION = '2026-10-28-games-1';
 const espn = new EspnClient();
 const trackService = new TrackService({ store: createTrackStore(db), espn });
 // Abonelik: Google Play doğrulaması + erişim denetimi (bitmiş görünen Play aboneliği mağazadan yeniden okunur)
@@ -122,6 +126,14 @@ const market =
         // Görüntü değişince tahminler hareket eder (maç başlamadan bir dakika önce kilitlenir)
         onUpdate: (key, snap) => daily.applyMarket(key, snap),
       });
+// Oyunlar ve sosyal akış
+const gameStore = createGameStore(db, FieldValue);
+const playerPool = new PlayerPool({ store: gameStore, espn });
+const game = new GameService({ store: gameStore, pool: playerPool, access });
+const social = new SocialService({
+  store: createSocialStore(db, FieldValue),
+  isAdmin: async (uid) => (await db.doc(`users/${uid}`).get()).get('role') === 'admin',
+});
 const narrator = narratorFromEnv();
 const couponReader = readerFromEnv();
 const api = createApi({
@@ -153,6 +165,8 @@ const api = createApi({
   wheel: new WheelService({ store: baseStore, progress }),
   daily,
   market,
+  game,
+  social,
   progress,
   track: trackService,
   lineup: new LineupService({ paid: paidService, espn }),
@@ -172,6 +186,10 @@ const api = createApi({
     // Günlük tahmin hattının durumu (her açılışta güncel): kaç tur döndü, kaç maç hazırlandı, son hata
     get daily() {
       return daily.status();
+    },
+    // Oyun oyuncu havuzu: kaç kart hazır
+    get gamePool() {
+      return { players: playerPool.size, building: Boolean(playerPool.building) };
     },
     // Dış tahmin verisi toplayıcısı: okuma, bulunan, kapanan maç sayıları (kaynak adı içermez)
     get market() {
@@ -236,6 +254,13 @@ setTimeout(() => {
   setInterval(run, 60e3);
   setInterval(resolve, 10 * 60e3);
 }, 15e3);
+
+// Oyun oyuncu havuzu: Firestore'dan yüklenir; eksik ya da bir haftadan eski ligler arka planda yeniden kurulur
+setTimeout(() => {
+  const ensurePool = () => playerPool.ensure().catch((e) => console.error('[pool]', e?.message ?? e));
+  ensurePool();
+  setInterval(ensurePool, 6 * 3600e3);
+}, 30e3);
 
 // Dış tahmin verisi: günlük tahmin hattıyla aynı fikstür planını kullanır, dakikada en fazla 8 maç okur
 if (market) {
