@@ -85,6 +85,54 @@ export function marketsFromContent(content) {
 }
 
 /**
+ * Türlerin olağan yüzdeleri: seçilen tarafın yüzdesi → maçların ne kadarında bundan düşük çıkıyor (geriye dönük test,
+ * ~36 bin maç). "İY 0.5 Üst" neredeyse her maçta %65-75 çıkar; en yüksek yüzdeyi seçmek kartlarda hep aynı tahmini
+ * gösteriyordu. Öne çıkan tahmin: kendi türünde en sıra dışı olan (yüksek yüzdelik), yeterince güçlü ([BEST_FLOOR]).
+ */
+export const PCT_TABLE = {
+  ms: [[35, 0.011], [38, 0.114], [40, 0.218], [42, 0.315], [44, 0.408], [46, 0.494], [48, 0.573], [50, 0.644], [52, 0.705], [55, 0.782], [58, 0.84], [60, 0.873], [63, 0.91], [66, 0.938], [70, 0.964], [75, 0.984], [80, 0.995], [85, 0.999]],
+  iy: [[38, 0.042], [40, 0.159], [42, 0.353], [44, 0.566], [46, 0.739], [48, 0.854], [50, 0.921], [52, 0.955], [55, 0.978], [60, 0.994], [65, 0.998]],
+  au: [[50, 0.018], [52, 0.145], [54, 0.285], [56, 0.421], [58, 0.544], [60, 0.654], [62, 0.748], [64, 0.823], [66, 0.88], [68, 0.923], [70, 0.953], [73, 0.98], [76, 0.992], [80, 0.998]],
+  kg: [[50, 0.024], [52, 0.19], [54, 0.369], [56, 0.528], [58, 0.666], [60, 0.778], [62, 0.862], [64, 0.921], [66, 0.958], [68, 0.979], [70, 0.991], [74, 0.999]],
+  iyg: [[56, 0.012], [58, 0.026], [60, 0.054], [62, 0.1], [64, 0.17], [66, 0.266], [68, 0.382], [70, 0.512], [72, 0.644], [74, 0.769], [76, 0.869], [78, 0.935], [80, 0.973], [82, 0.991], [85, 0.999]],
+};
+
+/** Öne çıkan tahmin en az bu kadar güçlü olmalı (yoksa en yüksek yüzdeli tahmin). */
+export const BEST_FLOOR = 57;
+
+/** Öne çıkan tahmin kuralının sürümü (kayıtta saklanır; eski kayıtlar maç kilitlenmeden önce yeni kurala geçer). */
+export const BEST_RULE = 2;
+
+/** Tahminin kendi türünde ne kadar sıra dışı olduğu: 0 (sıradan) - 1 (çok nadir). */
+export function standout(id, pct, pick = '') {
+  const t = PCT_TABLE[id];
+  if (!t || !Number.isFinite(pct)) return 0;
+  // "İY 0.5 Alt" çok nadirdir: Üst yüzdesi ne kadar düşükse o kadar sıra dışı
+  if (id === 'iyg' && /Alt$/.test(pick)) return 1 - standout('iyg', 100 - pct);
+  if (pct < t[0][0]) return 0;
+  for (let i = 1; i < t.length; i++) {
+    const [x1, y1] = t[i];
+    if (pct <= x1) {
+      const [x0, y0] = t[i - 1];
+      return y0 + ((pct - x0) / (x1 - x0)) * (y1 - y0);
+    }
+  }
+  return 1;
+}
+
+/** Öne çıkan tahmin (saf): [BEST_FLOOR] ve üstündekiler arasında kendi türünde en sıra dışı olan; eşitlikte yüzdesi yüksek. */
+export function pickBest(list) {
+  const top = list.reduce((a, b) => (b.pct > a.pct ? b : a));
+  const pool = list.filter((m) => Number.isFinite(m.pct) && m.pct >= BEST_FLOOR && PCT_TABLE[m.id]);
+  if (!pool.length) return top;
+  const sc = (m) => standout(m.id, m.pct, m.pick);
+  return pool.reduce((a, b) => {
+    const d = sc(b) - sc(a);
+    return d > 1e-9 || (Math.abs(d) <= 1e-9 && b.pct > a.pct) ? b : a;
+  });
+}
+
+/**
  * Gol beklentilerinden beş tahmin, en güçlüsü ve 1X2 olasılıkları (saf). Canlı güncellemede kullanılır.
  * Döner: { markets, best, confidence, probs }
  */
@@ -92,7 +140,7 @@ export function marketsFromModel(lh, la, sigma = 0) {
   const { p } = marketProbs(lh, la, sigma);
   const pick = p.ms1 >= p.msX && p.ms1 >= p.ms2 ? '1' : p.ms2 >= p.msX && p.ms2 >= p.ms1 ? '2' : 'X';
   const list = restMarkets(p, { id: 'ms', pick: `MS ${pick}`, pct: pct({ '1': p.ms1, X: p.msX, '2': p.ms2 }[pick]) });
-  const best = list.reduce((a, b) => (b.pct > a.pct ? b : a));
+  const best = pickBest(list);
   return { markets: list, best: best.id, confidence: best.pct, probs: { home: pct(p.ms1), draw: pct(p.msX), away: pct(p.ms2) } };
 }
 
@@ -132,6 +180,25 @@ export function liveUpdate(entry, snap, now) {
   };
 }
 
+/**
+ * Eski kuralla (en yüksek yüzde) seçilmiş, henüz kilitlenmemiş kaydın öne çıkan tahminini yeni kurala göre yeniden
+ * seçer (saf). Değişiklik yoksa null; varsa kayda yazılacak alanlar. Kilitlenen/sonuçlanan kayıtlara dokunulmaz:
+ * karne kullanıcının o an gördüğü tahminle tutulur.
+ */
+export function rebestPatch(entry, now) {
+  if (!entry || entry.result || entry.resolved || entry.bestRule === BEST_RULE) return null;
+  if (!(entry.kickoffMs - now >= LIVE_LOCK_MS) || !Array.isArray(entry.markets) || !entry.markets.length) return null;
+  const first = pickBest(entry.markets);
+  const patch = { best: first.id, confidence: first.pct, bestRule: BEST_RULE };
+  const l = entry.live;
+  if (l && Array.isArray(l.markets) && l.markets.length) {
+    const lb = pickBest(l.markets);
+    patch['live.best'] = lb.id;
+    patch['live.confidence'] = lb.pct;
+  }
+  return patch;
+}
+
 /** Kartta gösterilen kısa gerekçe: AI analizindeki "Maçın anahtarı" (yoksa "Genel bakış"), en fazla ~220 karakter. */
 export function reasonOf(content) {
   const sections = content?.ai?.sections ?? [];
@@ -147,7 +214,7 @@ export function reasonOf(content) {
 export function dailyEntry(match, content, now) {
   const list = marketsFromContent(content);
   if (!list) return null;
-  const best = list.reduce((a, b) => (b.pct > a.pct ? b : a));
+  const best = pickBest(list);
   return {
     day: trDay(match.timestamp),
     key: matchKey(match.league, match.id),
@@ -159,6 +226,7 @@ export function dailyEntry(match, content, now) {
     markets: list,
     best: best.id,
     confidence: best.pct,
+    bestRule: BEST_RULE,
     reason: reasonOf(content),
     // Canlı güncelleme için modelin kendi gol beklentileri (dış veriyle birleştirilecek taban)
     model: { lh: r4(content.model.lambdaHome), la: r4(content.model.lambdaAway), sigma: r4(content.model.sigma ?? 0) },
@@ -378,6 +446,30 @@ export class DailyPredictionService {
     return this._matches();
   }
 
+  /**
+   * Eski kuralla seçilmiş bugünün ve yarının kilitlenmemiş tahminlerini yeni öne çıkan kuralına geçirir (10 dakikada bir,
+   * tur başına en çok 60). Geçirilecek kayıt kalmayınca durur.
+   */
+  async _rebest(now) {
+    if (typeof this.store.updateDaily !== 'function' || this._rebestClean) return 0;
+    if (this._rebestAt && now - this._rebestAt < 10 * 60e3) return 0;
+    this._rebestAt = now;
+    let done = 0;
+    for (const day of [trDay(now), trDay(now + DAY)]) {
+      for (const r of await this._rows(day)) {
+        if (done >= 60) return done;
+        const patch = rebestPatch(r, now);
+        if (!patch) continue;
+        await this.store.updateDaily(r.key, patch);
+        done++;
+        this._lists.delete(day);
+      }
+    }
+    // Eski kayıt kalmadı: yeni kayıtlar zaten yeni kuralla üretiliyor, bir daha taranmaz
+    if (!done) this._rebestClean = true;
+    return done;
+  }
+
   async _loadKnown(day) {
     const now = this.now();
     const at = this._knownDays.get(day) ?? 0;
@@ -399,6 +491,7 @@ export class DailyPredictionService {
       this.stats.lastTickAt = new Date(now).toISOString();
       await this._loadKnown(trDay(now));
       await this._loadKnown(trDay(now + DAY));
+      await this._rebest(now).catch((e) => this._error('öne çıkan geçişi', e));
       const todo = (await this._matches()).filter((m) => {
         const key = matchKey(m.league, m.id);
         if (this._known.has(key)) return false;
@@ -537,7 +630,7 @@ export class DailyPredictionService {
         // Güncelleme bilgisi: kaçıncı sürüm, ne zaman; maç başlamadan bir dakika önce kilitlenir
         updatedAt: moved ? new Date(r.live.at).toISOString() : null,
         rev: r.live?.rev ?? 0,
-        ...(moved ? { confidenceFrom: r.confidence } : {}),
+        ...(moved && first.has(fin.best) ? { confidenceFrom: first.get(fin.best).pct } : {}),
         locked: settled || r.kickoffMs - now < LIVE_LOCK_MS,
         result: r.result ?? null,
       };
@@ -573,6 +666,10 @@ export function createDailyStore(db, FieldValue) {
     async listDailyDue(beforeMs, limit) {
       const q = await db.collection('daily_pending').where('kickoffMs', '<', beforeMs).orderBy('kickoffMs').limit(limit).get();
       return q.docs.map((d) => ({ key: d.id, ...d.data() }));
+    },
+    /** Alan güncellemesi (noktalı anahtarlar iç alanı değiştirir: "live.best"). */
+    async updateDaily(key, patch) {
+      await db.doc(`daily_preds/${key}`).update(patch);
     },
     /** Canlı tahmin alanı bütünüyle değişir (update: iç içe birleştirme yapılmaz). */
     async saveDailyLive(key, live) {

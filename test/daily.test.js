@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { marketsFromContent, dailyEntry, settleEntry, daySummary, DailyPredictionService, MARKET_IDS } from '../daily.js';
+import { marketsFromContent, dailyEntry, settleEntry, daySummary, DailyPredictionService, MARKET_IDS, pickBest, standout, rebestPatch, BEST_RULE, BEST_FLOOR } from '../daily.js';
 import { markets } from '../content.js';
 import { createApi, GUEST_ROUTES } from '../app.js';
 
@@ -114,13 +114,14 @@ test('gerekçe: "Maçın anahtarı" bölümü, uzunsa cümle sonunda kısaltıl�
   assert.equal(reasonOf({ ai: { sections: [] } }), null);
 });
 
-test('kayıt: Türkiye günü, en güçlü tahmin ve güven', () => {
+test('kayıt: Türkiye günü, öne çıkan tahmin ve güven', () => {
   const e = dailyEntry(match(5, Date.UTC(2026, 9, 26, 21, 30)), content, NOW); // 27 Ekim 00:30 TSİ
   assert.equal(e.day, '2026-10-27');
   assert.equal(e.key, 'demo_1_5');
-  const best = e.markets.reduce((a, b) => (b.pct > a.pct ? b : a));
+  const best = pickBest(e.markets);
   assert.equal(e.best, best.id);
   assert.equal(e.confidence, best.pct);
+  assert.equal(e.bestRule, BEST_RULE);
   assert.equal(e.home.logo, 'h.png');
 });
 
@@ -367,4 +368,66 @@ test('liste boşken yöneticiye hat durumu gider; diğerlerine gitmez', async ()
   assert.equal(admin.diag.planned, 0);
   assert.equal((await svc.list({ uid: 'u1', day })).diag, undefined);
   assert.equal((await svc.list({ uid: 'admin', day, guest: true })).diag, undefined);
+});
+
+test('öne çıkan tahmin: sıradan "İY 0.5 Üst" yerine kendi türünde sıra dışı olan seçilir', () => {
+  const list = [
+    { id: 'ms', pick: 'MS 1', pct: 62 },
+    { id: 'iy', pick: 'İY 1', pct: 45 },
+    { id: 'au', pick: '2.5 Üst', pct: 58 },
+    { id: 'kg', pick: 'KG Var', pct: 55 },
+    { id: 'iyg', pick: 'İY 0.5 Üst', pct: 72 },
+  ];
+  // %72 İY 0.5 Üst maçların yaklaşık %64'ünden yüksek (sıradan); %62 MS 1 maçların %90'ından yüksek
+  assert.equal(pickBest(list).id, 'ms');
+  assert.ok(standout('iyg', 72) < standout('ms', 62));
+  // Gerçekten yüksek İY gol beklentisi yine öne çıkar
+  assert.equal(pickBest([{ id: 'ms', pick: 'MS 1', pct: 50 }, { id: 'au', pick: '2.5 Üst', pct: 57 }, { id: 'iyg', pick: 'İY 0.5 Üst', pct: 82 }]).id, 'iyg');
+  // Eşiğin altındakiler öne çıkamaz; hiçbiri eşiği geçmezse en yüksek yüzde
+  assert.equal(pickBest([{ id: 'ms', pick: 'MS X', pct: 35 }, { id: 'kg', pick: 'KG Yok', pct: BEST_FLOOR - 1 }]).id, 'kg');
+  // "İY 0.5 Alt" çok nadir: eşiği geçtiyse öne çıkar
+  assert.ok(standout('iyg', 60, 'İY 0.5 Alt') > 0.95);
+  assert.equal(standout('ms', 20), 0);
+  assert.equal(standout('ms', 99), 1);
+});
+
+test('öne çıkan tahmin: gol beklentisi değiştikçe farklı türler öne çıkar (hep İY 0.5 Üst değil)', async () => {
+  const { marketsFromModel } = await import('../daily.js');
+  const seen = new Set();
+  for (const [lh, la] of [[2.4, 0.6], [1.9, 1.7], [1.0, 0.7], [1.3, 1.2], [0.8, 2.1], [1.6, 1.0], [2.0, 2.0]]) seen.add(marketsFromModel(lh, la, 0).best);
+  assert.ok(seen.size >= 3, [...seen].join(','));
+});
+
+test('eski kural geçişi: kilitlenmemiş kayıt yeni kurala geçer, kilitli/sonuçlanmış kayda dokunulmaz', async () => {
+  const markets = [
+    { id: 'ms', pick: 'MS 1', pct: 63 },
+    { id: 'iy', pick: 'İY 1', pct: 44 },
+    { id: 'au', pick: '2.5 Üst', pct: 56 },
+    { id: 'kg', pick: 'KG Var', pct: 54 },
+    { id: 'iyg', pick: 'İY 0.5 Üst', pct: 71 },
+  ];
+  const old = { key: 'demo_1_9', day: '2026-10-26', kickoffMs: NOW + 5 * H, markets, best: 'iyg', confidence: 71 };
+  const p = rebestPatch(old, NOW);
+  assert.deepEqual(p, { best: 'ms', confidence: 63, bestRule: BEST_RULE });
+  assert.equal(rebestPatch({ ...old, kickoffMs: NOW + 30e3 }, NOW), null, 'kilitli');
+  assert.equal(rebestPatch({ ...old, result: { status: 'done' } }, NOW), null, 'sonuçlanmış');
+  assert.equal(rebestPatch({ ...old, bestRule: BEST_RULE }, NOW), null, 'zaten yeni kural');
+  const live = rebestPatch({ ...old, live: { markets: markets.map((m) => (m.id === 'au' ? { ...m, pct: 70 } : m)), best: 'iyg', confidence: 71 } }, NOW);
+  assert.equal(live['live.best'], 'au');
+  assert.equal(live['live.confidence'], 70);
+
+  // Servis turunda yazılır
+  const store = dailyStore();
+  store.rows.set(old.key, JSON.parse(JSON.stringify(old)));
+  store.updates = [];
+  store.updateDaily = async (k, patch) => {
+    store.updates.push([k, patch]);
+    Object.assign(store.rows.get(k), { best: patch.best, confidence: patch.confidence, bestRule: patch.bestRule });
+  };
+  const { svc } = service({ store });
+  await svc.tick();
+  assert.equal(store.updates.length, 1);
+  assert.equal(store.rows.get(old.key).best, 'ms');
+  await svc.tick();
+  assert.equal(store.updates.length, 1, 'bir daha yazılmaz');
 });

@@ -89,12 +89,14 @@ test('birleşim: geometrik ortalama, belirsizlik piyasa payı kadar daralır', (
   assert.deepEqual(blendLambdas({ home: 1, away: 1, sigma: 0.1 }, null, 0.5), { home: 1, away: 1, sigma: 0.1, weight: 0 });
 });
 
-test('gol beklentilerinden beş tahmin, en güçlüsü ve 1X2', () => {
+test('gol beklentilerinden beş tahmin, öne çıkanı ve 1X2', () => {
   const r = marketsFromModel(2.1, 0.7, 0);
   assert.deepEqual(r.markets.map((m) => m.id), ['ms', 'iy', 'au', 'kg', 'iyg']);
   assert.equal(r.markets[0].pick, 'MS 1');
   assert.equal(r.probs.home + r.probs.draw + r.probs.away >= 99, true);
-  assert.equal(r.confidence, Math.max(...r.markets.map((m) => m.pct)));
+  // Güçlü ev sahibi: öne çıkan "İY 0.5 Üst" değil, maç sonucu
+  assert.equal(r.best, 'ms');
+  assert.equal(r.confidence, r.markets.find((m) => m.id === r.best).pct);
   assert.equal(marketsFromModel(0.7, 2.1).markets[0].pick, 'MS 2');
 });
 
