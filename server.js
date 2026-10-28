@@ -48,6 +48,7 @@ import { billingFromEnv } from './billing.js';
 import { createFeaturedService } from './featured.js';
 import { WheelService, WHEEL_WEIGHTS, WHEEL_SLICES, CREDIT_DAYS, ASSISTANT_PRIZE_HOURS } from './wheel.js';
 import { DailyPredictionService, createDailyStore } from './daily.js';
+import { MarketCollector, createMarketStore, espnSources } from './market.js';
 
 function serviceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -88,7 +89,7 @@ const store = {
 };
 
 /** /version ve Tahminler tanılamasında görünen sürüm. */
-const SERVER_VERSION = '2026-10-27-model-5';
+const SERVER_VERSION = '2026-10-28-market-1';
 const espn = new EspnClient();
 const trackService = new TrackService({ store: createTrackStore(db), espn });
 // Abonelik: Google Play doğrulaması + erişim denetimi (bitmiş görünen Play aboneliği mağazadan yeniden okunur)
@@ -106,6 +107,17 @@ const daily = new DailyPredictionService({
   isAdmin: async (uid) => (await db.doc(`users/${uid}`).get()).get('role') === 'admin',
   statusExtra: () => ({ version: SERVER_VERSION, memoryMb: Math.round(process.memoryUsage().rss / 1048576) }),
 });
+// Dış tahmin verisi (yalnızca sunucuda model girdisi; uygulamada gösterilmez). MARKET_DATA=off ile kapatılır.
+const market =
+  process.env.MARKET_DATA === 'off'
+    ? null
+    : new MarketCollector({
+        store: createMarketStore(db, FieldValue),
+        matches: () => daily.upcoming(),
+        sources: espnSources(espn),
+        perTick: Number(process.env.MARKET_PER_MINUTE) || 8,
+        isAdmin: async (uid) => (await db.doc(`users/${uid}`).get()).get('role') === 'admin',
+      });
 const narrator = narratorFromEnv();
 const couponReader = readerFromEnv();
 const api = createApi({
@@ -136,6 +148,7 @@ const api = createApi({
   // Günlük hediye çarkı (+10 XP ödülü seviyeye işlenir)
   wheel: new WheelService({ store: baseStore, progress }),
   daily,
+  market,
   progress,
   track: trackService,
   lineup: new LineupService({ paid: paidService, espn }),
@@ -155,6 +168,10 @@ const api = createApi({
     // Günlük tahmin hattının durumu (her açılışta güncel): kaç tur döndü, kaç maç hazırlandı, son hata
     get daily() {
       return daily.status();
+    },
+    // Dış tahmin verisi toplayıcısı: okuma, bulunan, kapanan maç sayıları (kaynak adı içermez)
+    get market() {
+      return market?.status() ?? null;
     },
     get memoryMb() {
       return Math.round(process.memoryUsage().rss / 1048576);
@@ -215,6 +232,16 @@ setTimeout(() => {
   setInterval(run, 60e3);
   setInterval(resolve, 10 * 60e3);
 }, 15e3);
+
+// Dış tahmin verisi: günlük tahmin hattıyla aynı fikstür planını kullanır, dakikada en fazla 8 maç okur
+if (market) {
+  setTimeout(() => {
+    const collect = () =>
+      market.tick().then((n) => n && console.log(`[market] ${n} maç okundu`)).catch((e) => console.error('[market]', e?.message ?? e));
+    collect();
+    setInterval(collect, 60e3);
+  }, 45e3);
+}
 
 // Ücretsiz Render servisi 15 dk istek gelmezse uyur ve maçları izleyemez. Sunucu 9 dakikada bir kendi adresini
 // çağırarak uyanık kalır (tek servis için aylık 750 ücretsiz saat buna yeter). RENDER_EXTERNAL_URL'i Render verir.

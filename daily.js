@@ -227,6 +227,11 @@ export class DailyPredictionService {
     return out;
   }
 
+  /** Bugün ve yarının başlamamış ya da sürmekte olan maçları (fikstür planı; dış veri toplayıcı da kullanır). */
+  async upcoming() {
+    return this._matches();
+  }
+
   async _loadKnown(day) {
     const now = this.now();
     const at = this._knownDays.get(day) ?? 0;

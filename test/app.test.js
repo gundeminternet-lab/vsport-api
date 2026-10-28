@@ -116,3 +116,16 @@ test('Asistan ve Günün Maçı servisleri verilmezse uçlar yoktur', async () =
   assert.equal((await s.post('/api/adminSetSubscription', { data: {} })).status, 404);
   await s.close();
 });
+
+test('yönetici dış veri durumu ucu: yalnızca toplayıcı verilince açılır, uid doğrulanmış belgeden gelir', async () => {
+  const none = await start();
+  assert.equal((await none.post('/api/adminMarketStatus', { data: {} })).status, 404);
+  await none.close();
+  const seen = [];
+  const s = await start({ market: { adminStatus: async (d) => (seen.push(d.uid), { closed: 2 }) } });
+  const r = await s.post('/api/adminMarketStatus', { data: { uid: 'admin' } });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.result, { closed: 2 });
+  assert.deepEqual(seen, ['u1']);
+  await s.close();
+});

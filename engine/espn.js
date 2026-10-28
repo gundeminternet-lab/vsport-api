@@ -166,15 +166,19 @@ export class EspnClient {
     this.cache = new Map();
   }
 
-  /** transform: önbelleğe yazmadan önce yanıtı küçültür (ör. skor tablosundan yalnızca gereken alanlar). */
-  async _getJson(url, { maxAgeMs = this.cacheTtlMs, transform = null } = {}) {
+  /**
+   * transform: önbelleğe yazmadan önce yanıtı küçültür (ör. skor tablosundan yalnızca gereken alanlar).
+   * store: false → yanıt önbelleğe yazılmaz (sık değişen, bir kez okunan veriler genel önbelleği doldurmasın);
+   * önbellekte taze bir kayıt varsa yine de o kullanılır.
+   */
+  async _getJson(url, { maxAgeMs = this.cacheTtlMs, transform = null, store = true } = {}) {
     const hit = this.cache.get(url);
     if (hit && Date.now() - hit.t < maxAgeMs) return hit.json;
     // Aynı adrese eşzamanlı istekler tek istekte birleşir (aynı adres hep aynı transform ile çağrılır)
     this.inflight ??= new Map();
     const pending = this.inflight.get(url);
     if (pending) return pending;
-    const p = this._fetchJson(url, transform);
+    const p = this._fetchJson(url, transform, store);
     this.inflight.set(url, p);
     try {
       return await p;
@@ -183,7 +187,7 @@ export class EspnClient {
     }
   }
 
-  async _fetchJson(url, transform) {
+  async _fetchJson(url, transform, store = true) {
     let lastError;
     for (let attempt = 0; attempt <= this.retries; attempt++) {
       const ctrl = new AbortController();
@@ -194,12 +198,13 @@ export class EspnClient {
           // Bazı sunucular tanımsız istemcileri reddeder; sıradan bir tarayıcı gibi tanıtılır.
           headers: { accept: 'application/json', 'user-agent': 'Mozilla/5.0 (vSport API)' },
         });
-        if (res.status === 404) throw Object.assign(new Error(`ESPN 404: ${url}`), { fatal: true });
+        if (res.status === 404) throw Object.assign(new Error(`ESPN 404: ${url}`), { fatal: true, status: 404 });
         if (!res.ok) throw new Error(`ESPN ${res.status}`);
         // Zaman aşımı gövde okunurken de geçerli (yarıda kalan bağlantı isteği sonsuza dek bekletmesin)
         const raw = await res.json();
         clearTimeout(timer);
         const json = transform ? transform(raw) : raw;
+        if (!store) return json;
         // Uzun süre çalışan sunucuda bellek şişmesin: en eski kayıtlar atılır.
         this.cache.delete(url);
         this.cache.set(url, { t: Date.now(), json });
@@ -212,7 +217,7 @@ export class EspnClient {
         await sleep(300 * (attempt + 1));
       }
     }
-    throw new Error(`ESPN isteği başarısız (${url}): ${lastError?.message}`);
+    throw Object.assign(new Error(`ESPN isteği başarısız (${url}): ${lastError?.message}`), lastError?.status ? { status: lastError.status } : {});
   }
 
   async getTeams(league, { maxAgeMs } = {}) {
@@ -312,6 +317,47 @@ export class EspnClient {
       this.leagueCache.delete(league);
       throw e;
     }
+  }
+
+  /**
+   * Maçın dış tahmin kaynaklarındaki fiyatları (core API). Liste öğeleri bazen yalnızca {$ref} içerir; en çok 4 tanesi
+   * ayrıca okunur. Sonuç önbelleğe yazılmaz. Döner: ham sağlayıcı kayıtları (engine/odds.js parseOddsResponse ile okunur).
+   */
+  async getOdds(league, eventId) {
+    const id = encodeURIComponent(eventId);
+    let json;
+    try {
+      json = await this._getJson(`${ESPN.coreApi}/${league}/events/${id}/competitions/${id}/odds?limit=25`, { store: false });
+    } catch (e) {
+      // Fiyatı olmayan maçta uç nokta 404 dönebilir: veri yok demektir, hata değil
+      if (e.status === 404) return { items: [] };
+      throw e;
+    }
+    const out = [];
+    let refs = 0;
+    for (const it of json?.items ?? []) {
+      if (it && typeof it.$ref === 'string' && Object.keys(it).length <= 2 && !it.provider) {
+        if (refs++ >= 4) continue;
+        try {
+          out.push(await this._getJson(it.$ref.replace(/^http:/, 'https:'), { store: false }));
+        } catch {
+          // bu sağlayıcı okunamadı
+        }
+      } else if (it) out.push(it);
+    }
+    return { items: out };
+  }
+
+  /** Maç özetindeki tahmin kaynağı blokları (pickcenter / odds). Özet zaten önbellekteyse yeniden indirilmez. */
+  async getSummaryOdds(league, eventId) {
+    let json;
+    try {
+      json = await this._getJson(`${ESPN.siteApi}/${league}/summary?event=${encodeURIComponent(eventId)}`, { maxAgeMs: 60e3, store: false });
+    } catch (e) {
+      if (e.status === 404) return { pickcenter: [], odds: [] };
+      throw e;
+    }
+    return { pickcenter: json?.pickcenter ?? [], odds: json?.odds ?? [] };
   }
 
   // Gün aralığındaki fikstür. from/to: Date nesnesi

@@ -4,7 +4,7 @@
 //   GET  /health                      → 200 "ok"  (uyku önleme / sağlık kontrolü)
 //   POST /api/{ad}  { data: {...} }   → 200 { result } | 4xx/5xx { error: { code, message } }
 //   POST /play/rtdn?secret=…            → Google Play abonelik bildirimi (Pub/Sub push)
-//        ad: unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze | getTrackRecord | getLineupUpdate | getLiveForecast | getWeeklyBulletin | readCouponImage | getStoryReview | deleteAccount | getVerdicts | verifyPlaySubscription | getEntitlement | spinWheel | getWheel | getDailyPredictions
+//        ad: unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze | getTrackRecord | getLineupUpdate | getLiveForecast | getWeeklyBulletin | readCouponImage | getStoryReview | deleteAccount | getVerdicts | verifyPlaySubscription | getEntitlement | spinWheel | getWheel | getDailyPredictions | adminMarketStatus
 //            setFeatured | clearFeatured | adminSetSubscription (ve diğer yönetim/ödül/ses uçları)
 //   Authorization: Bearer <Firebase ID token>   (uygulama her istekte gönderir)
 //   Misafir (Firebase anonim oturum) yalnızca GUEST_ROUTES'taki okuma uçlarını kullanabilir; deneme hakkı, çark,
@@ -39,7 +39,7 @@ const STATUS = {
   unavailable: 503,
 };
 
-export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, daily = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
+export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, daily = null, market = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
   const routes = {
     unlockContent: (d) => service.unlock(d),
     getContent: (d) => service.get(d),
@@ -59,6 +59,8 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
     ...(wheel ? { spinWheel: (d) => wheel.spin(d), getWheel: (d) => wheel.status(d) } : {}),
     // Günlük toplu tahminler (Tahminler sekmesi, Ana Sayfa, Canlı takip)
     ...(daily ? { getDailyPredictions: (d) => daily.list(d) } : {}),
+    // Yönetici: dış tahmin verisinin lig bazında kapsaması (yalnızca sayılar)
+    ...(market ? { adminMarketStatus: (d) => market.adminStatus(d) } : {}),
     ...(lineup ? { getLineupUpdate: (d) => lineup.update(d) } : {}),
     ...(liveForecast ? { getLiveForecast: (d) => liveForecast.forecast(d) } : {}),
     ...(assistant ? { assistantAnalyze: (d) => assistant.analyze(d) } : {}),

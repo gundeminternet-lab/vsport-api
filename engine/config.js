@@ -3,6 +3,7 @@
 export const ESPN = {
   siteApi: 'https://site.api.espn.com/apis/site/v2/sports/soccer',
   tableApi: 'https://site.api.espn.com/apis/v2/sports/soccer',
+  coreApi: 'https://sports.core.api.espn.com/v2/sports/soccer/leagues',
   timeoutMs: 10000,
   retries: 2,
   cacheTtlMs: 5 * 60 * 1000,
