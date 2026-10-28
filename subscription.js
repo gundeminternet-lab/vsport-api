@@ -1,9 +1,10 @@
 // Abonelik ve erişim. Jeton (token) sistemi kaldırıldı: ücretli içerikler aboneliğe bağlıdır.
 //
 // Planlar (fiyatlar Google Play Console'da aynı tutarla tanımlanır; uygulama mağazanın gösterdiği fiyatı kullanır):
-//   Haftalık 300 TL · Aylık 999 TL · Yıllık 1.999 TL
+//   Satışta yalnızca Haftalık PRO: 199 TL (normal fiyatı 300 TL). Aylık ve yıllık plan yeni satılmaz; eski aboneler
+//   için tanınmaya devam eder.
 // Kapsam: her plan AI paketini (her maç: AI analizi, AI videosu, simülasyon, Özel Yorumlar, kadro güncellemesi),
-// kupon kontrolünü ve editör kuponlarını açar. AI Asistan yalnızca aylık ve yıllık planda.
+// tahmin kontrol aracını, editör seçimlerini ve AI Asistan'ı açar.
 // Deneme: her kullanıcı abone olmadan TRIAL_MATCHES maçın AI paketini ücretsiz açabilir (maç başlamadan önce).
 // Günlük çark (wheel.js): maç/editör hakları ve 1 günlük AI Asistan ödülü de buradaki haklara eklenir.
 //
@@ -15,20 +16,24 @@ import { wheelStatus } from './wheel.js';
 
 const DAY = 86400000;
 export const PLANS = ['weekly', 'monthly', 'yearly'];
-export const PLAN_PRICES_TL = { weekly: 300, monthly: 999, yearly: 1999 };
+export const PLAN_PRICES_TL = { weekly: 199, monthly: 999, yearly: 1999 };
+/** İndirimden önceki fiyat (uygulamada üstü çizili). */
+export const PLAN_LIST_PRICES_TL = { weekly: 300 };
+/** Uygulamada satılan planlar. */
+export const OFFERED_PLANS = ['weekly'];
 export const PLAN_DAYS = { weekly: 7, monthly: 30, yearly: 365 };
 /** Google Play abonelik ürün kimlikleri (Play Console → Abonelikler'de aynı kimliklerle oluşturulmalı). */
 export const PLAN_PRODUCTS = { weekly: 'vsport_weekly', monthly: 'vsport_monthly', yearly: 'vsport_yearly' };
 export const planOfProduct = (productId) => PLANS.find((p) => PLAN_PRODUCTS[p] === productId) ?? null;
-/** AI Asistan yalnızca aylık ve yıllık abonelere açıktır. */
-export const ASSISTANT_PLANS = ['monthly', 'yearly'];
+/** AI Asistan bütün abonelere açıktır (haftalık PRO dahil). */
+export const ASSISTANT_PLANS = ['weekly', 'monthly', 'yearly'];
 /** Bir aboneden günde en fazla bu kadar Asistan analizi (sunucu maliyetini sınırlar). */
 export const ASSISTANT_DAILY_LIMIT = 15;
 /** Abone olmadan ücretsiz açılabilecek maç sayısı (AI paketinin tamamı). */
 export const TRIAL_MATCHES = 2;
 
 /** Abonelik gerektiren işlem için hata (uygulama bu kodla abonelik ekranını açar). */
-export const subscriptionRequired = (message = 'Bu içerik abonelere özel. Haftalık, aylık ya da yıllık plana geçerek açabilirsin.') =>
+export const subscriptionRequired = (message = "Bu içerik PRO abonelere özel. Haftalık PRO'ya geçerek açabilirsin.") =>
   new AppError('subscription-required', message);
 
 /** Süresi dolmamış abonelik; yoksa null. */
@@ -45,7 +50,7 @@ export const hasAssistantAccess = (sub, now = Date.now()) => {
 
 /**
  * Kullanıcının hakları (saf): { subscribed, plan, until, assistant, assistantVia, trialUsed, trialLeft, wheel }.
- * assistant: aylık/yıllık abonelik ya da çarktan kazanılan 1 günlük AI Asistan (assistantVia: 'plan' | 'wheel').
+ * assistant: abonelik ya da çarktan kazanılan 1 günlük AI Asistan (assistantVia: 'plan' | 'wheel').
  */
 export function entitlementOf({ subscription = null, trialUsed = 0, wheel = null } = {}, now = Date.now()) {
   const a = activeSubscription(subscription, now);

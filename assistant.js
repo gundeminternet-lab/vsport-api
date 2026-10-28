@@ -1,4 +1,4 @@
-// AI Asistan (aylık ve yıllık abonelere özel; haftalık planda yok): kullanıcı bir maç sorar; asistan istatistiğe ve maçın önemine göre
+// AI Asistan (PRO abonelere özel): kullanıcı bir maç sorar; asistan istatistiğe ve maçın önemine göre
 // analiz yapar ve bunu sahne sahne bir "video" (uygulamadaki sahne oynatıcısı) olarak sunar.
 //
 // Asistan yeni bir model kurmaz: maçın AI analizi (content.model), Özel Yorum başlıkları (special.js) ve maç önemi
@@ -393,7 +393,7 @@ export class AssistantService {
       if (!ent.assistant) {
         throw new AppError(
           'subscription-required',
-          ent.subscribed ? 'AI Asistan aylık ve yıllık planlarda. Planını yükselterek kullanabilirsin.' : 'AI Asistan aylık ve yıllık abonelere özel.',
+          "AI Asistan PRO abonelere özel. Haftalık PRO'ya geçerek kullanabilirsin.",
         );
       }
     }

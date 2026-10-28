@@ -43,7 +43,7 @@ import { createRewardStore } from './rewards.js';
 import { createAdminService } from './admin.js';
 import { createTts } from './tts.js';
 import { AssistantService } from './assistant.js';
-import { ASSISTANT_DAILY_LIMIT, AccessService, PLAN_PRICES_TL, PLAN_PRODUCTS, TRIAL_MATCHES } from './subscription.js';
+import { ASSISTANT_DAILY_LIMIT, AccessService, OFFERED_PLANS, PLAN_LIST_PRICES_TL, PLAN_PRICES_TL, PLAN_PRODUCTS, TRIAL_MATCHES } from './subscription.js';
 import { billingFromEnv } from './billing.js';
 import { createFeaturedService } from './featured.js';
 import { WheelService, WHEEL_WEIGHTS, WHEEL_SLICES, CREDIT_DAYS, ASSISTANT_PRIZE_HOURS } from './wheel.js';
@@ -147,7 +147,7 @@ const api = createApi({
   rewards,
   admin: createAdminService({ db, FieldValue, auth }),
   tts: createTts({ db, FieldValue }),
-  // AI Asistan aylık ve yıllık abonelere açık. Yalnızca test için ASSISTANT_OPEN=true herkese açar.
+  // AI Asistan bütün abonelere açık. Yalnızca test için ASSISTANT_OPEN=true herkese açar.
   // ASSISTANT_DAILY_LIMIT ile günlük sınır değiştirilebilir (varsayılan 15).
   assistant: new AssistantService({
     paid: paidService,
@@ -180,7 +180,7 @@ const api = createApi({
     version: SERVER_VERSION,
     assistantRequiresSubscription: process.env.ASSISTANT_OPEN !== 'true',
     billingEnabled: billing.enabled,
-    plans: { prices: PLAN_PRICES_TL, products: PLAN_PRODUCTS, trialMatches: TRIAL_MATCHES },
+    plans: { prices: PLAN_PRICES_TL, listPrices: PLAN_LIST_PRICES_TL, offered: OFFERED_PLANS, products: PLAN_PRODUCTS, trialMatches: TRIAL_MATCHES },
     wheel: { weights: WHEEL_WEIGHTS, slices: WHEEL_SLICES, creditDays: CREDIT_DAYS, assistantHours: ASSISTANT_PRIZE_HOURS },
     assistantDailyLimit: Number(process.env.ASSISTANT_DAILY_LIMIT) || ASSISTANT_DAILY_LIMIT,
     // Günlük tahmin hattının durumu (her açılışta güncel): kaç tur döndü, kaç maç hazırlandı, son hata

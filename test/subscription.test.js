@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { activeSubscription, hasAssistantAccess, grantSubscription, dayKeyTr, PLAN_DAYS, PLAN_PRICES_TL, PLAN_PRODUCTS, planOfProduct, entitlementOf, TRIAL_MATCHES, AccessService } from '../subscription.js';
+import { activeSubscription, hasAssistantAccess, grantSubscription, dayKeyTr, PLAN_DAYS, PLAN_PRICES_TL, PLAN_PRODUCTS, planOfProduct, entitlementOf, TRIAL_MATCHES, AccessService, OFFERED_PLANS, PLAN_LIST_PRICES_TL } from '../subscription.js';
 
 const NOW = Date.UTC(2026, 9, 24, 10, 0);
 const DAY = 86400000;
@@ -14,8 +14,8 @@ test('abonelik yalnızca süresi dolmamışsa geçerli', () => {
   assert.equal(activeSubscription({ plan: 'monthly', until: 'x' }, NOW), null);
 });
 
-test('Asistan yalnızca aylık ve yıllık abonelere açık', () => {
-  assert.equal(hasAssistantAccess({ plan: 'weekly', until: NOW + DAY }, NOW), false);
+test('Asistan bütün abonelere açık (haftalık PRO dahil)', () => {
+  assert.equal(hasAssistantAccess({ plan: 'weekly', until: NOW + DAY }, NOW), true);
   assert.equal(hasAssistantAccess({ plan: 'monthly', until: NOW + DAY }, NOW), true);
   assert.equal(hasAssistantAccess({ plan: 'yearly', until: NOW + DAY }, NOW), true);
   assert.equal(hasAssistantAccess({ plan: 'yearly', until: NOW - DAY }, NOW), false);
@@ -40,20 +40,22 @@ test('gün anahtarı Türkiye saatine göre', () => {
   assert.equal(dayKeyTr(Date.UTC(2026, 9, 24, 21, 0)), '2026-10-25', '00:00 TSİ');
 });
 
-test('planlar ve fiyatlar: haftalık 300, aylık 999, yıllık 1999 TL; Play ürün kimlikleri', () => {
-  assert.deepEqual(PLAN_PRICES_TL, { weekly: 300, monthly: 999, yearly: 1999 });
+test('planlar ve fiyatlar: satışta yalnızca haftalık 199 TL (normali 300); eski planlar tanınır; Play ürün kimlikleri', () => {
+  assert.deepEqual(PLAN_PRICES_TL, { weekly: 199, monthly: 999, yearly: 1999 });
+  assert.deepEqual(OFFERED_PLANS, ['weekly']);
+  assert.equal(PLAN_LIST_PRICES_TL.weekly, 300);
   for (const [plan, product] of Object.entries(PLAN_PRODUCTS)) assert.equal(planOfProduct(product), plan);
   assert.equal(planOfProduct('tokens_100'), null);
 });
 
-test('haklar: abone her şeyi açar (Asistan yalnızca aylık/yıllık); abone olmayana 2 maç deneme', () => {
+test('haklar: abone her şeyi açar (Asistan dahil); abone olmayana 2 maç deneme', () => {
   const none = entitlementOf({}, NOW);
   assert.deepEqual({ s: none.subscribed, a: none.assistant, left: none.trialLeft }, { s: false, a: false, left: TRIAL_MATCHES });
   assert.equal(TRIAL_MATCHES, 2);
   assert.equal(entitlementOf({ trialUsed: 1 }, NOW).trialLeft, 1);
   assert.equal(entitlementOf({ trialUsed: 5 }, NOW).trialLeft, 0);
   const weekly = entitlementOf({ subscription: { plan: 'weekly', until: NOW + DAY } }, NOW);
-  assert.deepEqual({ s: weekly.subscribed, a: weekly.assistant, p: weekly.plan }, { s: true, a: false, p: 'weekly' });
+  assert.deepEqual({ s: weekly.subscribed, a: weekly.assistant, p: weekly.plan }, { s: true, a: true, p: 'weekly' });
   assert.equal(entitlementOf({ subscription: { plan: 'yearly', until: NOW + DAY } }, NOW).assistant, true);
   assert.equal(entitlementOf({ subscription: { plan: 'monthly', until: NOW - 1 }, trialUsed: 2 }, NOW).subscribed, false);
 });

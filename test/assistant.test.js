@@ -30,15 +30,16 @@ const liveSummary = (minute, home, away, state = 'in', name = 'STATUS_FIRST_HALF
   },
 });
 
-test('abonelik yoksa, haftalıksa ya da süresi dolmuşsa reddedilir; hak harcanmaz', async () => {
-  for (const subscription of [null, { plan: 'weekly', until: NOW + DAY }, { plan: 'monthly', until: NOW - 1 }]) {
+test('abonelik yoksa ya da süresi dolmuşsa reddedilir; hak harcanmaz; haftalık PRO kullanabilir', async () => {
+  for (const subscription of [null, { plan: 'monthly', until: NOW - 1 }]) {
     const { assistant, store } = make({ subscription });
-    await assert.rejects(assistant.analyze({ uid: 'u1', ...fixture }), (e) => e.code === 'subscription-required');
+    await assert.rejects(assistant.analyze({ uid: 'u1', ...fixture }), (e) => e.code === 'subscription-required' && /Haftalık PRO/.test(e.message));
     assert.equal(store.usage.size, 0);
   }
-  // Haftalık abone: planı yükseltmesi söylenir
+  // Haftalık PRO abonesi Asistan'ı kullanır
   const weekly = make({ subscription: { plan: 'weekly', until: NOW + DAY } });
-  await assert.rejects(weekly.assistant.analyze({ uid: 'u1', ...fixture }), (e) => /aylık ve yıllık planlarda/.test(e.message));
+  const r = await weekly.assistant.analyze({ uid: 'u1', ...fixture });
+  assert.equal(r.state, 'pre');
   const { assistant } = make();
   await assert.rejects(assistant.analyze({ uid: null, ...fixture }), (e) => e.code === 'permission-denied');
 });
