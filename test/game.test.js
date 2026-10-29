@@ -323,6 +323,24 @@ test('kadro: kaydet (kimya ve güç sunucuda), en çok 3, satışta kadrodaki ka
   await s.deleteSquad({ uid: 'u1', id: sq.id });
 });
 
+test('kadro listesi: sunucudan kartlar ve kadrolar (Firestore okuması reddedilirse istemci bunu kullanır)', async () => {
+  const { s } = svc();
+  const { w, slots } = await squadReady(s, 'u1');
+  const sq = await s.saveSquad({ uid: 'u1', name: 'Towtspor', formation: '4-3-3', slots });
+  const col = await s.collection({ uid: 'u1' });
+  assert.equal(col.cards.length, w.cards.length);
+  assert.deepEqual(new Set(col.cards.map((c) => c.id)), new Set(w.cards.map((c) => c.id)));
+  assert.ok(col.cards.every((c, i, a) => i === 0 || a[i - 1].r >= c.r), 'güce göre sıralı');
+  assert.ok(col.cards.every((c) => !('at' in c)), 'zaman damgası gönderilmez');
+  assert.equal(col.squads.length, 1);
+  assert.equal(col.squads[0].id, sq.id);
+  assert.deepEqual(col.squads[0].slots, sq.slots);
+  assert.ok(!('updatedAt' in col.squads[0]));
+  assert.equal((await s.collection({ uid: 'u2' })).cards.length, 0, 'başkasının kartı görünmez');
+  await assert.rejects(s.collection({ uid: 'u1', guest: true }), /Google/);
+  await assert.rejects(s.collection({ uid: null }), /Giriş/);
+});
+
 test('liderler: dönem, arama, sıram', async () => {
   const { s } = svc();
   await s.state({ uid: 'u1' });

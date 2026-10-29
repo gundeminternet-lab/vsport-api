@@ -68,7 +68,7 @@ export function memoryGameStore({ users = {} } = {}) {
       const m = s.cards.get(uid) ?? new Map();
       const ids = cards.map((c) => {
         const id = `c${++s.seq}`;
-        m.set(id, clone(c));
+        m.set(id, { ...clone(c), at: { _seconds: 1 } }); // Firestore zaman damgası gibi
         return id;
       });
       s.cards.set(uid, m);
@@ -105,7 +105,7 @@ export function memoryGameStore({ users = {} } = {}) {
     async saveSquad(uid, id, data) {
       const m = s.squads.get(uid) ?? new Map();
       const sid = id ?? `q${++s.seq}`;
-      m.set(sid, clone(data));
+      m.set(sid, { ...clone(data), updatedAt: { _seconds: 1 } });
       s.squads.set(uid, m);
       return sid;
     },

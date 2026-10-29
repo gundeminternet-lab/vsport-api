@@ -99,6 +99,7 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
           packOpen: (d) => game.openPack(d),
           welcomePack: (d) => game.welcomePack(d),
           cardsSell: (d) => game.sellCards(d),
+          gameCollection: (d) => game.collection(d),
           squadSave: (d) => game.saveSquad(d),
           squadDelete: (d) => game.deleteSquad(d),
           duelPlay: (d) => game.duel(d),

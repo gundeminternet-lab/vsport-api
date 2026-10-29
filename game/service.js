@@ -462,6 +462,21 @@ export class GameService {
     return { id: sid, ...data };
   }
 
+  /**
+   * Kartlar ve kadrolar (Benim 11'im). İstemci normalde Firestore'dan canlı okur; Firestore kuralları yayında
+   * değilse ya da okuma reddedilirse liste buradan alınır. Zaman damgaları gönderilmez.
+   */
+  async collection({ uid, guest = false }) {
+    this._member(uid, guest);
+    const [cards, squads] = await Promise.all([this.store.listCards(uid), this.store.listSquads(uid), this._profile(uid)]);
+    const plain = ({ at, updatedAt, ...rest }) => rest;
+    return {
+      cards: cards.map(plain).sort((a, b) => Number(b.r ?? 0) - Number(a.r ?? 0)),
+      squads: squads.map(plain),
+      maxSquads: MAX_SQUADS,
+    };
+  }
+
   async deleteSquad({ uid, guest = false, id }) {
     this._member(uid, guest);
     const [cards, squads, p] = await Promise.all([this.store.listCards(uid), this.store.listSquads(uid), this._profile(uid)]);
