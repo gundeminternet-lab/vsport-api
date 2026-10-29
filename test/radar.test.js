@@ -513,3 +513,30 @@ test('takım yeni gol attıysa (son 4 dk) ona sinyal verilmez', () => {
   // 6 dk sonra baskı sürüyorsa yeniden çıkabilir (pencere hâlâ doluysa)
   assert.ok(Array.isArray(detectSignals(later, buildView(later, []))));
 });
+
+test('servis: Canlı Baskı Tablosu (abonede değerler, abone olmayanda kilitli)', async () => {
+  const t = setup();
+  await t.radar.tick();
+  const pro = await t.radar.feed({ uid: 'pro' });
+  assert.equal(pro.board.length, 1);
+  assert.equal(pro.board[0].home.name, H);
+  assert.ok(pro.board[0].pressure.home > pro.board[0].pressure.away);
+  assert.equal(pro.board[0].poss.home, 63);
+  const free = await t.radar.feed({ uid: 'free' });
+  assert.equal(free.board[0].locked, true);
+  assert.equal(free.board[0].pressure, undefined);
+  assert.equal(free.board[0].home.name, H); // maç ve skor herkese açık
+});
+
+test('servis: deneme bildirimi kayıtlı cihaza gider, günde en çok 3', async () => {
+  const t = setup();
+  const r = await t.radar.testPush({ uid: 'free' });
+  assert.equal(r.sent, 1);
+  assert.equal(t.pushes.at(-1).data.kind, 'test');
+  assert.deepEqual(t.pushes.at(-1).tokens, [TOKEN(2)]);
+  await t.radar.testPush({ uid: 'free' });
+  await t.radar.testPush({ uid: 'free' });
+  await assert.rejects(() => t.radar.testPush({ uid: 'free' }), (e) => e.code === 'resource-exhausted');
+  await assert.rejects(() => t.radar.testPush({ uid: 'yok' }), (e) => e.code === 'failed-precondition');
+  await assert.rejects(() => t.radar.testPush({ uid: 'm', guest: true }), (e) => e.code === 'unauthenticated');
+});

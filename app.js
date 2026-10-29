@@ -4,7 +4,7 @@
 //   GET  /health                      → 200 "ok"  (uyku önleme / sağlık kontrolü)
 //   POST /api/{ad}  { data: {...} }   → 200 { result } | 4xx/5xx { error: { code, message } }
 //   POST /play/rtdn?secret=…            → Google Play abonelik bildirimi (Pub/Sub push)
-//        ad: getRadar | getRadarSignal | revealRadarSignal | getRadarAlarms | saveRadarAlarms | registerPushToken | unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze | getTrackRecord | getLineupUpdate | getLiveForecast | getWeeklyBulletin | readCouponImage | getStoryReview | deleteAccount | getVerdicts | verifyPlaySubscription | getEntitlement | spinWheel | getWheel | getDailyPredictions | getPredictionDetail | adminMarketStatus
+//        ad: getRadar | getRadarSignal | revealRadarSignal | getRadarAlarms | saveRadarAlarms | registerPushToken | sendTestPush | unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze | getTrackRecord | getLineupUpdate | getLiveForecast | getWeeklyBulletin | readCouponImage | getStoryReview | deleteAccount | getVerdicts | verifyPlaySubscription | getEntitlement | spinWheel | getWheel | getDailyPredictions | getPredictionDetail | adminMarketStatus
 //            setFeatured | clearFeatured | adminSetSubscription (ve diğer yönetim/ödül/ses uçları)
 //   Authorization: Bearer <Firebase ID token>   (uygulama her istekte gönderir)
 //   Misafir (Firebase anonim oturum) yalnızca GUEST_ROUTES'taki okuma uçlarını kullanabilir; deneme hakkı, çark,
@@ -79,6 +79,7 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
           getRadarAlarms: (d) => radar.getAlarms(d),
           saveRadarAlarms: (d) => radar.saveAlarms(d),
           registerPushToken: (d) => radar.registerToken(d),
+          sendTestPush: (d) => radar.testPush(d),
         }
       : {}),
     // Oyunlar: kredi, günlük bonus, görevler, Fotoğraftan Bil, bilgi yarışması, Benim 11'im, kredi liderleri

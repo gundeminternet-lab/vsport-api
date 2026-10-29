@@ -21,6 +21,7 @@ import {
   TYPE_INFO,
   buildView,
   describe,
+  pressureOf,
   detectSignals,
   notificationText,
   readMatch,
@@ -257,6 +258,21 @@ export class RadarService {
 
     const view = live ? buildView(m, st.snaps) : null;
     const data = Boolean(view?.w10);
+    // Canlı Baskı Tablosu: her maçın o anki baskı endeksleri (son 10 dk)
+    if (data && !m.halftime) {
+      const ph = pressureOf(view, 'home');
+      const pa = pressureOf(view, 'away');
+      st.board = {
+        at: now,
+        home: ph?.index ?? 0,
+        away: pa?.index ?? 0,
+        poss: { home: view.total.home.poss, away: view.total.away.poss },
+        xg: { home: view.w10.home.xg, away: view.w10.away.xg },
+        shots: { home: view.w10.home.shots, away: view.w10.away.shots },
+      };
+    } else if (!live) {
+      st.board = null;
+    }
 
     // Sonuç takibi
     for (const sig of this._signals.values()) {
@@ -554,10 +570,25 @@ export class RadarService {
       score: st.info.score,
       clock: st.info.halftime ? 'İY' : minuteLabel(st.info.clock, st.info.e),
     }));
+    // Canlı Baskı Tablosu: en baskılı maçlar üstte. Abone olmayan maçları ve skoru görür, baskı değerleri kilitli.
+    const board = liveMatches
+      .filter((st) => st.board && now - st.board.at < 5 * 60e3)
+      .sort((a, b) => Math.max(b.board.home, b.board.away) - Math.max(a.board.home, a.board.away))
+      .slice(0, 15)
+      .map((st) => ({
+        key: st.key,
+        league: st.league,
+        home: st.info.teams.home,
+        away: st.info.teams.away,
+        score: st.info.score,
+        clock: st.info.halftime ? 'İY' : minuteLabel(st.info.clock, st.info.e),
+        ...(v.subscribed ? { pressure: { home: st.board.home, away: st.board.away }, poss: st.board.poss, xg: st.board.xg, shots: st.board.shots } : { locked: true }),
+      }));
     return {
       subscribed: v.subscribed,
       reveals: v.subscribed ? null : { left: v.left, total: this.freeReveals, resetsOn: 'Pazartesi' },
       scanning: { live: liveMatches.length, withData: this.stats.withData, sample },
+      board,
       active,
       recent,
       day,
@@ -631,6 +662,34 @@ export class RadarService {
     await this.store.saveAlarm(uid, { ...patch, ...(prev.enabled === undefined && patch.enabled === undefined ? { enabled: true } : {}) });
     this._cacheAlarm(uid, next);
     return this.getAlarms({ uid });
+  }
+
+  /**
+   * Deneme bildirimi (Alarmlarım → "Deneme bildirimi gönder"): kullanıcının kayıtlı cihazlarına siren sesli örnek
+   * bildirim. Günde en çok 3. Gerçek sinyal değildir; abonelik gerekmez (bildirim izni ve ses denetimi için).
+   */
+  async testPush({ uid, guest = false } = {}) {
+    if (!uid || guest) throw new AppError('unauthenticated', 'Deneme bildirimi için Google ile giriş yapmalısın.');
+    if (!this.push) throw new AppError('unavailable', 'Bildirim servisi şu an kapalı.');
+    const a = (await this.store.getAlarm(uid)) ?? null;
+    const tokens = (a?.tokens ?? []).slice(0, MAX_TOKENS);
+    if (!tokens.length) throw new AppError('failed-precondition', 'Bu cihaz henüz kayıtlı değil. Uygulamayı kapatıp açtıktan sonra tekrar dene.');
+    const { day } = localTime(this.now(), a?.tz ?? 180);
+    this._tests ??= new Map();
+    const used = this._tests.get(uid);
+    const n = used && used.day === day ? used.n : 0;
+    if (n >= 3) throw new AppError('resource-exhausted', 'Bugün 3 deneme bildirimi gönderildi; yarın tekrar deneyebilirsin.');
+    this._tests.set(uid, { day, n: n + 1 });
+    if (this._tests.size > 20000) this._tests.clear();
+    const r = await this.push({
+      tokens,
+      title: '🚨 Gol Sireni (deneme)',
+      body: 'Bildirimler çalışıyor. Gerçek sinyalde dakika, skor, son 10 dakikanın şut, xG ve topa sahip olma verisi burada yazar.',
+      data: { type: 'radar', kind: 'test', signalId: '' },
+    });
+    const invalid = r?.invalid ?? [];
+    if (invalid.length) await this.store.removeTokens(uid, invalid).catch(() => {});
+    return { sent: tokens.length - invalid.length, left: 2 - n };
   }
 
   /** Cihazın bildirim jetonu (uygulama her açılışta gönderir). tz: UTC'ye göre dakika. */
