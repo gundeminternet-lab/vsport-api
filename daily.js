@@ -329,6 +329,7 @@ export class DailyPredictionService {
     const from = new Date(now - DAY);
     const to = new Date(now + 2 * DAY);
     const out = [];
+    const recent = [];
     let next = 0;
     const worker = async () => {
       while (next < this.leagues.length) {
@@ -348,7 +349,10 @@ export class DailyPredictionService {
           }
         }
         for (const m of list) {
-          if (!m.completed && Number.isFinite(m.timestamp) && days.has(trDay(m.timestamp))) out.push({ ...m, league: m.league ?? league });
+          if (m.completed || !Number.isFinite(m.timestamp)) continue;
+          if (days.has(trDay(m.timestamp))) out.push({ ...m, league: m.league ?? league });
+          // Gece yarısından önce başlayıp süren maçlar da Canlı Radar'a girsin (gün listesinde olmasalar da)
+          else if (m.timestamp >= now - 4 * 3600e3 && m.timestamp <= now) recent.push({ ...m, league: m.league ?? league });
         }
       }
     };
@@ -361,8 +365,19 @@ export class DailyPredictionService {
     }
     out.sort((a, b) => a.timestamp - b.timestamp);
     // Hiç maç alınamadıysa (ESPN erişilemedi) plan 30 dakika beklemeden 5 dakika sonra yeniden kurulur
-    this._plan = { at: out.length ? now : now - this.planMs + 5 * 60e3, matches: out };
+    this._plan = { at: out.length ? now : now - this.planMs + 5 * 60e3, matches: out, recent };
     return out;
+  }
+
+  /**
+   * Canlı Radar'ın tarayacağı maçlar: başlamış (en çok [maxAgeMin] dakika önce) ya da 2 dakika içinde başlayacak maçlar.
+   * Fikstür planından gelir (ek istek yok).
+   */
+  async liveCandidates({ maxAgeMin = 150 } = {}) {
+    const list = await this._matches();
+    const now = this.now();
+    const all = [...list, ...(this._plan?.recent ?? [])];
+    return all.filter((m) => m.timestamp <= now + 2 * 60e3 && now - m.timestamp <= maxAgeMin * 60e3);
   }
 
   /**

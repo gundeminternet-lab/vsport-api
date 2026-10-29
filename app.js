@@ -4,7 +4,7 @@
 //   GET  /health                      → 200 "ok"  (uyku önleme / sağlık kontrolü)
 //   POST /api/{ad}  { data: {...} }   → 200 { result } | 4xx/5xx { error: { code, message } }
 //   POST /play/rtdn?secret=…            → Google Play abonelik bildirimi (Pub/Sub push)
-//        ad: unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze | getTrackRecord | getLineupUpdate | getLiveForecast | getWeeklyBulletin | readCouponImage | getStoryReview | deleteAccount | getVerdicts | verifyPlaySubscription | getEntitlement | spinWheel | getWheel | getDailyPredictions | getPredictionDetail | adminMarketStatus
+//        ad: getRadar | getRadarSignal | revealRadarSignal | getRadarAlarms | saveRadarAlarms | registerPushToken | unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze | getTrackRecord | getLineupUpdate | getLiveForecast | getWeeklyBulletin | readCouponImage | getStoryReview | deleteAccount | getVerdicts | verifyPlaySubscription | getEntitlement | spinWheel | getWheel | getDailyPredictions | getPredictionDetail | adminMarketStatus
 //            setFeatured | clearFeatured | adminSetSubscription (ve diğer yönetim/ödül/ses uçları)
 //   Authorization: Bearer <Firebase ID token>   (uygulama her istekte gönderir)
 //   Misafir (Firebase anonim oturum) yalnızca GUEST_ROUTES'taki okuma uçlarını kullanabilir; deneme hakkı, çark,
@@ -26,6 +26,9 @@ export const GUEST_ROUTES = new Set([
   'getLiveForecast',
   'getStoryReview',
   'getWeeklyBulletin',
+  // Canlı Radar: misafir taramayı ve sonuçlanan sinyalleri görür (süren sinyaller kilitli)
+  'getRadar',
+  'getRadarSignal',
   // Oyun ve topluluk: misafir yalnızca tabloları görür ve arar (oynamak için giriş gerekir)
   'photoBoard',
   'quizBoard',
@@ -47,7 +50,7 @@ const STATUS = {
   unavailable: 503,
 };
 
-export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, daily = null, market = null, game = null, social = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
+export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, daily = null, market = null, game = null, social = null, radar = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
   const routes = {
     unlockContent: (d) => service.unlock(d),
     getContent: (d) => service.get(d),
@@ -67,6 +70,17 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
     ...(wheel ? { spinWheel: (d) => wheel.spin(d), getWheel: (d) => wheel.status(d) } : {}),
     // Günlük toplu tahminler (Tahminler sekmesi, Ana Sayfa, Canlı takip)
     ...(daily ? { getDailyPredictions: (d) => daily.list(d), getPredictionDetail: (d) => daily.detail(d) } : {}),
+    // Canlı Radar: sinyaller, abone olmayanın haftalık açma hakkı, alarm ayarları ve cihaz jetonu
+    ...(radar
+      ? {
+          getRadar: (d) => radar.feed(d),
+          getRadarSignal: (d) => radar.signal(d),
+          revealRadarSignal: (d) => radar.reveal(d),
+          getRadarAlarms: (d) => radar.getAlarms(d),
+          saveRadarAlarms: (d) => radar.saveAlarms(d),
+          registerPushToken: (d) => radar.registerToken(d),
+        }
+      : {}),
     // Oyunlar: kredi, günlük bonus, görevler, Fotoğraftan Bil, bilgi yarışması, Benim 11'im, kredi liderleri
     ...(game
       ? {

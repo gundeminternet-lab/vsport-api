@@ -26,10 +26,13 @@ export const SOUND_CHANNELS = {
   full_time: { channelId: 'ev_full_time_v1', sound: 'snd_full_time' },
 };
 
+/** Canlı Radar (Gol Sireni ve diğer baskı sinyalleri; yalnızca PRO abonelere): siren sesli ayrı kanal. */
+export const RADAR_CHANNEL = Object.freeze({ channelId: 'ev_radar_v1', sound: 'snd_radar' });
+
 /** Özel sesi olmayan türler (VAR, gol iptali, uzatma) varsayılan bildirim sesini kullanır. */
 export const DEFAULT_CHANNEL = { channelId: 'match_events', sound: 'default' };
 
-export const channelFor = (type) => SOUND_CHANNELS[type] ?? DEFAULT_CHANNEL;
+export const channelFor = (type) => (type === 'radar' ? RADAR_CHANNEL : (SOUND_CHANNELS[type] ?? DEFAULT_CHANNEL));
 
 /** FCM mesajı: konuya giden bildirim + olay türüne uygun kanal ve ses. `data.type` bildirim türüdür. */
 export function fcmMessage({ topic, title, body, data }) {

@@ -25,7 +25,8 @@ import { CouponService } from './coupons.js';
 import { createStore } from './store.js';
 import { createApi } from './app.js';
 import { MatchWatcher } from './watcher.js';
-import { fcmMessage } from './notify.js';
+import { channelFor, fcmMessage } from './notify.js';
+import { RadarService, createRadarStore } from './radar_service.js';
 import { createLeagueStore, previousWeekId } from './league.js';
 import { createProgressStore, XP } from './progress.js';
 import { createPollStore } from './polls.js';
@@ -93,7 +94,7 @@ const store = {
 };
 
 /** /version ve Tahminler tanılamasında görünen sürüm. */
-const SERVER_VERSION = '2026-10-28-games-1';
+const SERVER_VERSION = '2026-10-29-radar-1';
 const espn = new EspnClient();
 const trackService = new TrackService({ store: createTrackStore(db), espn });
 // Abonelik: Google Play doğrulaması + erişim denetimi (bitmiş görünen Play aboneliği mağazadan yeniden okunur)
@@ -134,6 +135,26 @@ const social = new SocialService({
   store: createSocialStore(db, FieldValue),
   isAdmin: async (uid) => (await db.doc(`users/${uid}`).get()).get('role') === 'admin',
 });
+// Canlı Radar: başlamış maçlarda baskı sinyalleri; bildirim yalnızca PRO abonelerin cihazlarına (jetonla, konuyla değil)
+const radar = new RadarService({
+  store: createRadarStore(db, FieldValue),
+  espn,
+  access,
+  plan: () => daily.liveCandidates(),
+  lambdasFor: (key) => daily.finalLambdas(key),
+  freeReveals: Number.isFinite(Number(process.env.RADAR_FREE_REVEALS)) && process.env.RADAR_FREE_REVEALS !== '' ? Number(process.env.RADAR_FREE_REVEALS) : undefined,
+  push: async ({ tokens, title, body, data }) => {
+    const { channelId, sound } = channelFor('radar');
+    const res = await getMessaging().sendEachForMulticast({
+      tokens,
+      notification: { title, body },
+      data,
+      android: { priority: 'high', ttl: 10 * 60e3, notification: { channelId, sound, tag: data.signalId } },
+    });
+    const dead = /registration-token-not-registered|invalid-registration-token|invalid-argument/;
+    return { invalid: res.responses.map((r, i) => (!r.success && dead.test(r.error?.code ?? '') ? tokens[i] : null)).filter(Boolean) };
+  },
+});
 const narrator = narratorFromEnv();
 const couponReader = readerFromEnv();
 const api = createApi({
@@ -164,6 +185,7 @@ const api = createApi({
   // Günlük hediye çarkı (+10 XP ödülü seviyeye işlenir)
   wheel: new WheelService({ store: baseStore, progress }),
   daily,
+  radar,
   market,
   game,
   social,
@@ -186,6 +208,10 @@ const api = createApi({
     // Günlük tahmin hattının durumu (her açılışta güncel): kaç tur döndü, kaç maç hazırlandı, son hata
     get daily() {
       return daily.status();
+    },
+    // Canlı Radar: taranan canlı maç, açık sinyal, gönderilen bildirim
+    get radar() {
+      return radar.status();
     },
     // Oyun oyuncu havuzu: kaç kart hazır
     get gamePool() {
@@ -254,6 +280,13 @@ setTimeout(() => {
   setInterval(run, 60e3);
   setInterval(resolve, 10 * 60e3);
 }, 15e3);
+
+// Canlı Radar dakikada bir tarar (fikstür planı günlük tahmin hattından gelir)
+setTimeout(() => {
+  const scan = () => radar.tick().catch((e) => console.error('[radar]', e?.message ?? e));
+  scan();
+  setInterval(scan, 60e3);
+}, 50e3);
 
 // Oyun oyuncu havuzu: Firestore'dan yüklenir; eksik ya da bir haftadan eski ligler arka planda yeniden kurulur
 setTimeout(() => {
