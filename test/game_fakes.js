@@ -27,6 +27,7 @@ export function memoryGameStore({ users = {} } = {}) {
     photo: new Map(),
     quiz: new Map(),
     duelPool: new Map(),
+    duelBoards: new Map(), // hafta → Map(uid → entry)
     pools: new Map(),
     seq: 0,
     async getUser(uid) {
@@ -136,6 +137,33 @@ export function memoryGameStore({ users = {} } = {}) {
         .filter(([, e]) => e.usernameLower?.startsWith(prefix.toLowerCase()))
         .slice(0, limit)
         .map(([uid, e]) => ({ uid, ...e }));
+    },
+    async takePendingDuel(uid, id) {
+      const p = s.profiles.get(uid);
+      const pd = p?.pendingDuel ?? null;
+      if (!pd || (id != null && pd.id !== id)) return null;
+      s.profiles.set(uid, { ...p, pendingDuel: null });
+      return clone(pd);
+    },
+    async addDuelBoard(week, uid, delta, user = {}) {
+      const b = s.duelBoards.get(week) ?? new Map();
+      const e = { ...(b.get(uid) ?? {}) };
+      for (const [k, v] of Object.entries(delta)) e[k] = Number(e[k] ?? 0) + v;
+      b.set(uid, { ...e, username: user.username ?? null, photoURL: user.photoURL ?? null });
+      s.duelBoards.set(week, b);
+    },
+    async duelBoardTop(week, limit = 50) {
+      return [...(s.duelBoards.get(week) ?? new Map()).entries()]
+        .map(([uid, e]) => ({ uid, ...e }))
+        .sort((a, b) => b.points - a.points)
+        .slice(0, limit);
+    },
+    async duelBoardEntry(week, uid) {
+      const e = s.duelBoards.get(week)?.get(uid);
+      return e ? { uid, ...clone(e) } : null;
+    },
+    async duelBoardRank(week, points) {
+      return [...(s.duelBoards.get(week) ?? new Map()).values()].filter((e) => e.points > points).length + 1;
     },
     async upsertDuelPool(uid, summary) {
       s.duelPool.set(uid, clone(summary));

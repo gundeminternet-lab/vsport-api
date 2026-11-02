@@ -103,6 +103,10 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
           squadSave: (d) => game.saveSquad(d),
           squadDelete: (d) => game.deleteSquad(d),
           duelPlay: (d) => game.duel(d),
+          duelStart: (d) => game.duelStart(d),
+          duelFinish: (d) => game.duelFinish(d),
+          duelBoard: (d) => game.duelBoard(d),
+          gameClaimChest: (d) => game.claimChest(d),
           creditLeaders: (d) => game.leaders(d),
         }
       : {}),

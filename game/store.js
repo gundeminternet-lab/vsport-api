@@ -11,6 +11,8 @@
 //   photo_boards/{gün}/entries/{uid}         { ms, attempts, username, photoURL }
 //   quiz_boards/{gün}/entries/{uid}          { best, username, photoURL }
 //   duel_pool/{uid}                          { username, name, formation, rating, chemistry, power, lineup }
+//   duel_boards/{hafta}/entries/{uid}        { points, played, w, d, l, gf, ga, username, photoURL, updatedAt }
+//   game_profiles/{uid}.pendingDuel          devre arasındaki kapışma (ikinci yarı taktiği bekleniyor)
 //   game_pool/{lig}                          oyuncu havuzu (pool.js)
 
 import { AppError } from '../errors.js';
@@ -147,6 +149,36 @@ export function createGameStore(db, FieldValue) {
         .limit(limit)
         .get();
       return q.docs.map((d) => ({ uid: d.id, ...d.data() }));
+    },
+    /** Devre arasındaki kapışmayı tek seferde alır ve siler (aynı kapışma iki kez bitirilemez). */
+    async takePendingDuel(uid, id) {
+      return db.runTransaction(async (tx) => {
+        const s = await tx.get(prof(uid));
+        const pd = s.exists ? s.get('pendingDuel') : null;
+        if (!pd || (id != null && pd.id !== id)) return null;
+        tx.set(prof(uid), { pendingDuel: null }, { merge: true });
+        return pd;
+      });
+    },
+    async addDuelBoard(week, uid, delta, user = {}) {
+      const inc = {};
+      for (const [k, v] of Object.entries(delta)) inc[k] = FieldValue.increment(v);
+      await db.doc(`duel_boards/${week}/entries/${uid}`).set(
+        { ...inc, username: user.username ?? null, photoURL: user.photoURL ?? null, updatedAt: FieldValue.serverTimestamp() },
+        { merge: true },
+      );
+    },
+    async duelBoardTop(week, limit = 50) {
+      const q = await db.collection(`duel_boards/${week}/entries`).orderBy('points', 'desc').limit(limit).get();
+      return q.docs.map((d) => ({ uid: d.id, ...d.data() }));
+    },
+    async duelBoardEntry(week, uid) {
+      const s = await db.doc(`duel_boards/${week}/entries/${uid}`).get();
+      return s.exists ? { uid, ...s.data() } : null;
+    },
+    async duelBoardRank(week, points) {
+      const c = await db.collection(`duel_boards/${week}/entries`).where('points', '>', points).count().get();
+      return c.data().count + 1;
     },
     async upsertDuelPool(uid, summary) {
       await db.doc(`duel_pool/${uid}`).set({ ...summary, updatedAt: FieldValue.serverTimestamp() });

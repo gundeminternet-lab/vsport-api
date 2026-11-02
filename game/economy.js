@@ -34,6 +34,18 @@ export const PHOTO = { attempts: 10, firstReward: 1000, stepPenalty: 100, minRew
 export const QUIZ = { dailyPlays: 5, perCorrect: 50, proBonus: 10, seconds: 5, graceMs: 2500, maxQuestions: 15 };
 export const DUEL = { daily: 3, win: 300, draw: 120, loss: 40 };
 
+/** Günün Meydan Okuması: günde bir kez, gücünün biraz üstünde (edge) günün yıldızlar karmasıyla maç. */
+export const BOSS = { win: 1000, draw: 400, loss: 150, edge: 3 };
+
+/** Haftalık Kapışma Ligi puanı. */
+export const LEAGUE_POINTS = { W: 3, D: 1, L: 0 };
+
+/** Giriş serisi (günlük bonusu art arda toplanan gün) ödülleri: bu günlerde bonusa ek kredi. */
+export const STREAK_BONUS = { 3: 100, 7: 300, 14: 600, 21: 900, 30: 1500 };
+
+/** Bütün günlük görevler alınınca açılan sandık. */
+export const MISSION_CHEST = 300;
+
 /** Günlük görevler: koşul günlük kayıttan okunur. */
 export const MISSIONS = [
   { id: 'bonus', title: 'Günlük bonusunu topla', reward: 50, done: (d) => d?.bonus === true },
@@ -41,6 +53,8 @@ export const MISSIONS = [
   { id: 'quiz5', title: 'Bilgi yarışmasında 5 doğru yap', reward: 150, done: (d) => (d?.quiz?.correct ?? 0) >= 5 },
   { id: 'duel', title: 'Bir kapışma yap', reward: 100, done: (d) => (d?.duels ?? 0) >= 1 },
   { id: 'pack', title: 'Bir paket aç', reward: 100, done: (d) => (d?.packs ?? 0) >= 1 },
+  { id: 'duelwin', title: 'Bir kapışma kazan', reward: 150, done: (d) => (d?.duelWins ?? 0) >= 1 },
+  { id: 'boss', title: 'Günün Meydan Okuması\'na çık', reward: 100, done: (d) => d?.boss === true },
 ];
 
 /** Kart katmanı adı (arayüzde). */

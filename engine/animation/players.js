@@ -63,15 +63,23 @@ export const FORMATIONS = {
   },
 };
 
-for (const f of Object.values(FORMATIONS)) {
+/**
+ * Dizilişin rol dizinlerini (kaleci, savunma, orta saha, forvet, korner ve penaltı atıcısı) hazırlar. Oyunlar kendi
+ * dizilişini nesne olarak verebilir: { name, slots: [{ role: 'GK'|'DF'|'MF'|'FW', xa, ya, num }] } (ilk yuva kaleci).
+ */
+export function prepareFormation(f) {
   const ids = (role) => f.slots.map((s, i) => (s.role === role ? i : -1)).filter((i) => i >= 0);
   f.gk = 0;
   f.df = ids('DF');
   f.mf = ids('MF');
   f.fw = ids('FW');
-  f.cornerTaker = f.mf[f.mf.length - 1];
+  if (!f.fw.length) f.fw = f.mf.length ? [f.mf[f.mf.length - 1]] : [f.slots.length - 1];
+  f.cornerTaker = f.mf.length ? f.mf[f.mf.length - 1] : f.fw[0];
   f.penaltyTaker = f.fw[0];
+  return f;
 }
+
+for (const f of Object.values(FORMATIONS)) prepareFormation(f);
 
 // adv: takımın top yönündeki kayma payı, lat: yanlara kayma, pull: topa doğru çekilme gücü
 const ROLE = {
@@ -95,7 +103,8 @@ export function buildPlayers(choreo, { homeFormation = '4-4-2', awayFormation = 
   const { moments } = choreo;
   const segs = choreo.segs.map((s) => ({ ...s }));
   const D = choreo.duration;
-  const form = { home: FORMATIONS[homeFormation], away: FORMATIONS[awayFormation] };
+  const formOf = (f) => (typeof f === 'string' ? FORMATIONS[f] ?? FORMATIONS['4-4-2'] : prepareFormation({ ...f, slots: f.slots.map((x) => ({ ...x })) }));
+  const form = { home: formOf(homeFormation), away: formOf(awayFormation) };
   const ball = (t) => sampleBall(segs, t);
   const SIDES = ['home', 'away'];
 
@@ -547,7 +556,10 @@ export function buildPlayers(choreo, { homeFormation = '4-4-2', awayFormation = 
   const faceOf = (vx, vy, fallback) => (Math.hypot(vx, vy) > 1.2 ? Math.atan2(vy, vx) : fallback);
 
   return {
-    formations: { home: homeFormation, away: awayFormation },
+    formations: {
+      home: typeof homeFormation === 'string' ? homeFormation : homeFormation.name ?? 'custom',
+      away: typeof awayFormation === 'string' ? awayFormation : awayFormation.name ?? 'custom',
+    },
     slots: { home: form.home.slots, away: form.away.slots },
     // Oyuncularla uyumlu (kaydırılmış) top yolu. choreo.ball(t) yerine bunu kullan.
     ball: (t) => ball(clamp(t, 0, D)),

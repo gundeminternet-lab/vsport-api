@@ -156,7 +156,9 @@ test('durum: ilk açılışta başlangıç kredisi; bonus yolu günde bir adım,
   const st = await s.state({ uid: 'u1' });
   assert.equal(st.credits, START_CREDITS);
   assert.equal(st.bonus.nextStep, 1);
-  assert.equal(st.missions.length, 5);
+  assert.equal(st.missions.length, 7);
+  assert.equal(st.streak.count, 0);
+  assert.equal(st.chest.ready, false);
   await assert.rejects(s.state({ uid: 'g', guest: true }), /Google/);
 
   const r1 = await s.claimBonus({ uid: 'u1' });
@@ -177,6 +179,8 @@ test('durum: ilk açılışta başlangıç kredisi; bonus yolu günde bir adım,
   }
   assert.equal(last.step, 28);
   assert.equal(last.reward, 10000);
+  assert.equal(last.streak, 28, 'art arda 28 gün');
+  assert.equal((await s.state({ uid: 'u1' })).streak.best, 28);
   assert.equal(last.grandFinale, true);
   now += 86400e3;
   assert.equal((await s.state({ uid: 'u1' })).bonus.nextStep, 1, 'yol baştan');

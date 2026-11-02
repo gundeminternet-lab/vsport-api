@@ -7,14 +7,38 @@ import { AppError } from '../errors.js';
 import { periodIds } from '../league.js';
 import { trDay } from '../progress.js';
 import { createRng } from '../engine/rng.js';
-import { BONUS_PATH, DUEL, MAX_SQUADS, MISSIONS, PACKS, PHOTO, QUIZ, SELL_PRICE, START_CREDITS, TIER_RANGE } from './economy.js';
+import {
+  BONUS_PATH,
+  BOSS,
+  DUEL,
+  LEAGUE_POINTS,
+  MAX_SQUADS,
+  MISSION_CHEST,
+  MISSIONS,
+  PACKS,
+  PHOTO,
+  QUIZ,
+  SELL_PRICE,
+  START_CREDITS,
+  STREAK_BONUS,
+  TIER_RANGE,
+} from './economy.js';
 import { REGIONS } from './nations.js';
 import { fold, tierOf } from './pool.js';
 import { buildQuestions } from './quiz.js';
 import { autoBuild, evaluate, FORMATIONS, slotsOf, teamPower, validateSquad } from './squad.js';
 import { simulateDuel } from './duel.js';
+import { adaptTactic, animFormation, compactCard, DUEL_SECONDS, packOf, pickTactic, playDuel, TACTICS } from './match.js';
 
 const DAY = 86400e3;
+
+/** Devre arasında bırakılan kapışma bu süreden sonra (ilk yarı taktiğiyle) kendiliğinden biter ve ödülü verilir. */
+const PENDING_TTL = 30 * 60e3;
+
+/** Günün Meydan Okuması dizilişleri (güne göre). */
+const BOSS_FORMATIONS = ['4-3-3', '4-2-3-1', '4-4-2', '3-5-2', '4-1-4-1', '3-4-3', '5-3-2'];
+
+const hashOf = (str) => [...String(str)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7);
 
 /** Kart olarak saklanan alanlar (havuzdaki kompakt oyuncu + oyuncu kimliği + katman). */
 const asCard = (p) => ({ pid: p.id, n: p.n, s: p.s, pos: p.pos, g: p.g, r: p.r, st: p.st, c: p.c, ci: p.ci, cl: p.cl ?? null, l: p.l, na: p.na ?? null, ni: p.ni ?? null, ph: p.ph ?? null, tier: tierOf(p.r) });
@@ -97,7 +121,23 @@ export class GameService {
     this._member(uid, guest);
     this.pool.ensure?.().catch?.(() => {});
     const day = trDay(this.now());
-    const [p, daily, pro] = await Promise.all([this._profile(uid), this.store.getDaily(uid, day), this._pro(uid)]);
+    let [p, daily, pro] = await Promise.all([this._profile(uid), this.store.getDaily(uid, day), this._pro(uid)]);
+    // Devre arasında bırakılıp unutulan kapışma: ilk yarı taktiğiyle biter, ödülü verilir
+    if (p.pendingDuel && this.now() - Number(p.pendingDuel.at ?? 0) > PENDING_TTL) {
+      try {
+        await this._finishDuel(uid, p, p.pendingDuel.id, null);
+        [p, daily] = await Promise.all([this._profile(uid), this.store.getDaily(uid, day)]);
+      } catch (e) {
+        this.log.warn?.('[game] yarım kapışma bitirilemedi', e?.message ?? e);
+      }
+    }
+    const week = this._week(this.now());
+    const board = await this.store.duelBoardEntry(week, uid).catch(() => null);
+    const yesterday = trDay(this.now() - DAY);
+    const streakAlive = p.streak?.lastDay === day || p.streak?.lastDay === yesterday;
+    const allClaimed = MISSIONS.every((m) => daily?.claimed?.[m.id] === true);
+    const pd = p.pendingDuel ?? null;
+    const bossOf = this._bossInfo(day);
     // Yol: tamamlanan adım sayısı (bu turda). 28. adım alındıktan sonraki gün yol baştan başlar.
     const stepNow = Number(p.bonus?.step ?? 0);
     const claimedToday = p.bonus?.lastDay === day;
@@ -120,7 +160,33 @@ export class GameService {
       formations: FORMATIONS,
       maxSquads: MAX_SQUADS,
       poolReady: this.pool.ready,
+      streak: { count: streakAlive ? Number(p.streak?.count ?? 0) : 0, best: Number(p.streak?.best ?? 0), today: p.streak?.lastDay === day, bonuses: STREAK_BONUS },
+      chest: { reward: MISSION_CHEST, ready: allClaimed && daily?.chest !== true, claimed: daily?.chest === true },
+      duel: {
+        pending: pd ? { duelId: pd.id, mode: pd.mode, at: pd.at, opponent: pd.opp?.name ?? '' } : null,
+        boss: { ...bossOf, done: daily?.boss === true, rewards: { win: BOSS.win, draw: BOSS.draw, loss: BOSS.loss } },
+        week: { id: week, points: Number(board?.points ?? 0), played: Number(board?.played ?? 0), w: Number(board?.w ?? 0), d: Number(board?.d ?? 0), l: Number(board?.l ?? 0) },
+        career: { w: Number(p.duelTotals?.w ?? 0), d: Number(p.duelTotals?.d ?? 0), l: Number(p.duelTotals?.l ?? 0) },
+        tactics: Object.values(TACTICS).map((t) => ({ id: t.id, name: t.name })),
+        seconds: DUEL_SECONDS,
+      },
     };
+  }
+
+  _week(ms) {
+    return periodIds(ms).week;
+  }
+
+  /** Mevcut bütün günlük görevler alındıysa sandık. */
+  async claimChest({ uid, guest = false }) {
+    this._member(uid, guest);
+    const day = trDay(this.now());
+    const [p, daily] = await Promise.all([this._profile(uid), this.store.getDaily(uid, day)]);
+    if (daily?.chest === true) throw new AppError('failed-precondition', 'Bugünün sandığını açtın; yarın yeni görevler!');
+    if (!MISSIONS.every((m) => daily?.claimed?.[m.id] === true)) throw new AppError('failed-precondition', 'Sandık için bugünün bütün görevlerini tamamla.');
+    await this.store.updateDaily(uid, day, { chest: true });
+    const balance = await this._earn(uid, p, MISSION_CHEST, await this._pro(uid));
+    return { reward: MISSION_CHEST, balance };
   }
 
   async claimBonus({ uid, guest = false }) {
@@ -129,11 +195,14 @@ export class GameService {
     const p = await this._profile(uid);
     if (p.bonus?.lastDay === day) throw new AppError('failed-precondition', 'Bugünün ödülünü zaten topladın; yarın yeni adım seni bekliyor.');
     const step = (Number(p.bonus?.step ?? 0) % BONUS_PATH.length) + 1;
-    const reward = BONUS_PATH[step - 1];
-    await this.store.updateProfile(uid, { bonus: { step, lastDay: day } });
+    // Giriş serisi: dün de toplandıysa artar, yoksa 1'den başlar; belirli günlerde ek ödül
+    const streak = p.streak?.lastDay === trDay(this.now() - DAY) ? Number(p.streak?.count ?? 0) + 1 : 1;
+    const streakBonus = STREAK_BONUS[streak] ?? 0;
+    const reward = BONUS_PATH[step - 1] + streakBonus;
+    await this.store.updateProfile(uid, { bonus: { step, lastDay: day }, streak: { count: streak, lastDay: day, best: Math.max(streak, Number(p.streak?.best ?? 0)) } });
     await this.store.updateDaily(uid, day, { bonus: true });
     const balance = await this._earn(uid, p, reward, await this._pro(uid));
-    return { step, reward, balance, grandFinale: step === BONUS_PATH.length };
+    return { step, reward, balance, grandFinale: step === BONUS_PATH.length, streak, streakBonus };
   }
 
   async claimMission({ uid, guest = false, id }) {
@@ -533,6 +602,231 @@ export class GameService {
       opponent: { name: opp.name, username: opp.username, bot: opp.bot, rating: oe.rating, chemistry: oe.chemistry },
       left: DUEL.daily - Number(daily?.duels ?? 0) - 1,
     };
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Kapışma (stadyumda maç): taktik seç → ilk yarı → devre arasında taktik → ikinci yarı → ödül
+  // ---------------------------------------------------------------------------------------------------------------
+
+  /** Günün Meydan Okuması rakibinin kimliği (herkes için aynı gün aynı lig). */
+  _bossInfo(day) {
+    const keys = Object.keys(REGIONS);
+    const reg = REGIONS[keys[hashOf(`boss:${day}`) % keys.length]];
+    return { name: `${reg.leagueName} Yıldızları`, league: reg.leagueName, iso: reg.iso, formation: BOSS_FORMATIONS[hashOf(`bossf:${day}`) % BOSS_FORMATIONS.length] };
+  }
+
+  /** Günün Meydan Okuması kadrosu: günün liginden, kullanıcının gücünün biraz üstünde. */
+  _boss(day, power) {
+    const info = this._bossInfo(day);
+    const reg = Object.values(REGIONS).find((r) => r.leagueName === info.league);
+    const target = Math.max(62, Math.min(90, Math.round(power + BOSS.edge)));
+    const rng = createRng(`boss:${day}:${target}`);
+    const near = (x) => Math.abs(x.r - target) <= 4;
+    let cands = this.pool.pick((x) => x.l === reg.league && near(x), rng, 70);
+    if (cands.length < 40) cands = cands.concat(this.pool.pick(near, rng, 70, new Set(cands.map((c) => c.id))));
+    const lineup = autoBuild(cands.map(asCard), info.formation, 'chem');
+    return { name: info.name, username: null, formation: info.formation, lineup, bot: true, boss: true, league: info.league, iso: info.iso, tactic: pickTactic(createRng(`bosst:${day}`)) };
+  }
+
+  /** Kadronun maç ekranındaki görünümü (yuva sırasıyla 11 oyuncu). */
+  _teamView(t, tactic) {
+    const form = animFormation(t.formation);
+    const slots = slotsOf(form.name);
+    return {
+      name: t.name,
+      username: t.username ?? null,
+      bot: t.bot === true,
+      boss: t.boss === true,
+      league: t.league ?? null,
+      iso: t.iso ?? null,
+      rating: t.rating,
+      chemistry: t.chemistry,
+      power: t.power,
+      formation: form.name,
+      tactic,
+      kit: t.kit ?? null,
+      lineup: slots.map((s, i) => {
+        const c = t.lineup?.[s.key];
+        return { slot: s.key, pos: s.pos, num: form.slots[i].num, name: c?.s ?? '', r: Number(c?.r ?? 0), ph: c?.ph ?? null };
+      }),
+    };
+  }
+
+  /**
+   * Kapışmayı başlatır: rakip bulunur, ilk yarı oynanır. Döner: ilk yarının paketi (devre arasında biter), iki takım ve
+   * rakibin ikinci yarı planı. Hak maç başlarken düşer. Yarım kalmış kapışma varsa önce o biter (ödülü verilir).
+   */
+  async duelStart({ uid, guest = false, squadId, tactic = 'dengeli', mode = 'normal', kit = null }) {
+    this._member(uid, guest);
+    if (!TACTICS[tactic]) throw new AppError('invalid-argument', 'Geçersiz taktik.');
+    if (mode !== 'normal' && mode !== 'boss') throw new AppError('invalid-argument', 'Geçersiz kapışma türü.');
+    const day = trDay(this.now());
+    let p = await this._profile(uid);
+    let resolved = null;
+    if (p.pendingDuel) {
+      resolved = await this._finishDuel(uid, p, p.pendingDuel.id, null).catch(() => null);
+      p = await this._profile(uid);
+    }
+    const [daily, cards, squads] = await Promise.all([this.store.getDaily(uid, day), this.store.listCards(uid), this.store.listSquads(uid)]);
+    if (mode === 'normal' && Number(daily?.duels ?? 0) >= DUEL.daily) throw new AppError('resource-exhausted', `Bugünkü kapışma hakların bitti; yarın ${DUEL.daily} yeni hak.`);
+    if (mode === 'boss' && daily?.boss === true) throw new AppError('resource-exhausted', 'Günün Meydan Okuması bugün oynandı; yarın yeni rakip seni bekliyor.');
+    const squad = squads.find((x) => x.id === squadId);
+    if (!squad) throw new AppError('not-found', 'Kadro bulunamadı.');
+    const v = validateSquad(squad, new Map(cards.map((c) => [c.id, c])));
+    if (!v.ok) throw new AppError('failed-precondition', v.error);
+    await this.pool.ensure?.();
+    const rng = this.random('duel');
+    const power = teamPower(v.ev);
+    const opp = mode === 'boss' ? this._boss(day, power) : await this._opponent(uid, power, rng);
+    const oe = evaluate(opp.formation, opp.lineup);
+    const kitOk = (k) => (Number.isInteger(k) && k >= 0 && k < 32 ? k : null);
+    const me = {
+      name: v.name,
+      formation: squad.formation,
+      power: Math.round(power * 10) / 10,
+      rating: v.ev.rating,
+      chemistry: v.ev.chemistry,
+      kit: kitOk(kit),
+      lineup: Object.fromEntries(Object.entries(v.lineup).map(([k, c]) => [k, compactCard(c)])),
+    };
+    const oppT1 = opp.tactic ?? pickTactic(rng);
+    const them = {
+      name: opp.name,
+      username: opp.username ?? null,
+      bot: opp.bot === true,
+      boss: opp.boss === true,
+      league: opp.league ?? null,
+      iso: opp.iso ?? null,
+      formation: opp.formation,
+      power: Math.round(teamPower(oe) * 10) / 10,
+      rating: oe.rating,
+      chemistry: oe.chemistry,
+      kit: rng.int(0, 11),
+      lineup: Object.fromEntries(Object.entries(opp.lineup).filter(([, c]) => c).map(([k, c]) => [k, compactCard(c)])),
+    };
+    const seed = `duel-${this.now()}-${rng.int(0, 1e9)}`;
+    const first = playDuel({ me, opp: them, seed, tactics: { me1: tactic, opp1: oppT1 } });
+    const ht = first.timeline.halftimeScore;
+    const oppT2 = adaptTactic(oppT1, ht.away, ht.home);
+    const pending = {
+      id: seed.slice(5),
+      day,
+      mode,
+      at: this.now(),
+      seed,
+      squadId,
+      me: { ...me, tactic },
+      opp: { ...them, tactic: oppT1, tacticHT: oppT2 },
+    };
+    if (mode === 'normal') await this.store.incrementDaily(uid, day, 'duels', 1);
+    else await this.store.updateDaily(uid, day, { boss: true });
+    await this.store.updateProfile(uid, { pendingDuel: pending });
+    const name2 = TACTICS[oppT2].name;
+    return {
+      duelId: pending.id,
+      mode,
+      seconds: DUEL_SECONDS,
+      pack: packOf(first, { firstHalf: true }),
+      me: this._teamView(me, tactic),
+      opponent: this._teamView(them, oppT1),
+      halftime: {
+        score: [ht.home, ht.away],
+        opponentTactic: oppT2,
+        hint: oppT2 === oppT1 ? `Rakip planını değiştirmeyecek gibi: ikinci yarı da ${name2}.` : `Rakip ikinci yarı ${name2} oynayacak gibi görünüyor.`,
+      },
+      left: mode === 'normal' ? Math.max(0, DUEL.daily - Number(daily?.duels ?? 0) - 1) : null,
+      resolved: resolved ? { result: resolved.result, score: resolved.score, reward: resolved.reward, opponent: resolved.opponent.name } : null,
+    };
+  }
+
+  /** Devre arasında seçilen taktikle ikinci yarıyı oynar; ödülü verir. tactic yoksa ilk yarının taktiği sürer. */
+  async duelFinish({ uid, guest = false, duelId, tactic = null }) {
+    this._member(uid, guest);
+    if (tactic != null && !TACTICS[tactic]) throw new AppError('invalid-argument', 'Geçersiz taktik.');
+    const p = await this._profile(uid);
+    if (!p.pendingDuel || p.pendingDuel.id !== duelId) throw new AppError('not-found', 'Bu kapışma bitmiş ya da bulunamadı.');
+    return this._finishDuel(uid, p, duelId, tactic);
+  }
+
+  async _finishDuel(uid, p, duelId, tactic) {
+    const pd = await this.store.takePendingDuel(uid, duelId);
+    if (!pd) throw new AppError('not-found', 'Bu kapışma bitmiş ya da bulunamadı.');
+    const me2 = tactic && TACTICS[tactic] ? tactic : pd.me.tactic;
+    const match = playDuel({ me: pd.me, opp: pd.opp, seed: pd.seed, tactics: { me1: pd.me.tactic, opp1: pd.opp.tactic, me2, opp2: pd.opp.tacticHT } });
+    const sc = match.timeline.score;
+    const result = sc.home > sc.away ? 'W' : sc.home === sc.away ? 'D' : 'L';
+    const R = pd.mode === 'boss' ? BOSS : DUEL;
+    const reward = result === 'W' ? R.win : result === 'D' ? R.draw : R.loss;
+    const totals = { w: Number(p.duelTotals?.w ?? 0), d: Number(p.duelTotals?.d ?? 0), l: Number(p.duelTotals?.l ?? 0) };
+    totals[result === 'W' ? 'w' : result === 'D' ? 'd' : 'l']++;
+    const record = { at: this.now(), squad: pd.me.name, opponent: pd.opp.name, opponentUser: pd.opp.username ?? null, score: [sc.home, sc.away], result, reward, mode: pd.mode };
+    await this.store.updateProfile(uid, { duels: [record, ...(p.duels ?? [])].slice(0, 10), duelTotals: totals });
+    if (result === 'W') await this.store.incrementDaily(uid, pd.day, 'duelWins', 1);
+    const week = this._week(Number(pd.at ?? this.now()));
+    const pts = LEAGUE_POINTS[result];
+    await this.store
+      .addDuelBoard(week, uid, { points: pts, played: 1, w: result === 'W' ? 1 : 0, d: result === 'D' ? 1 : 0, l: result === 'L' ? 1 : 0, gf: sc.home, ga: sc.away }, { username: p.username, photoURL: p.photoURL })
+      .catch((e) => this.log.warn?.('[game] lig tablosu yazılamadı', e?.message ?? e));
+    const balance = await this._earn(uid, p, reward, await this._pro(uid));
+    const entry = await this.store.duelBoardEntry(week, uid).catch(() => null);
+    const rank = entry ? await this.store.duelBoardRank(week, Number(entry.points ?? 0)).catch(() => null) : null;
+    const daily = await this.store.getDaily(uid, trDay(this.now()));
+    return {
+      duelId,
+      mode: pd.mode,
+      pack: packOf(match),
+      score: [sc.home, sc.away],
+      halftimeScore: [match.timeline.halftimeScore.home, match.timeline.halftimeScore.away],
+      result,
+      reward,
+      balance,
+      goals: match.goals,
+      reds: match.reds,
+      stats: match.stats,
+      motm: match.motm,
+      ratings: { me: match.ratings.home, opponent: match.ratings.away },
+      me: this._teamView(pd.me, me2),
+      opponent: this._teamView(pd.opp, pd.opp.tacticHT),
+      tactics: { me: [pd.me.tactic, me2], opponent: [pd.opp.tactic, pd.opp.tacticHT] },
+      week: { id: week, points: Number(entry?.points ?? 0), played: Number(entry?.played ?? 0), w: Number(entry?.w ?? 0), d: Number(entry?.d ?? 0), l: Number(entry?.l ?? 0), rank, gained: pts },
+      career: totals,
+      left: Math.max(0, DUEL.daily - Number(daily?.duels ?? 0)),
+      bossDone: daily?.boss === true,
+    };
+  }
+
+  /** Haftalık Kapışma Ligi: ilk 50 ve kullanıcının sırası. */
+  async duelBoard({ uid, guest = false }) {
+    this._member(uid, guest);
+    const week = this._week(this.now());
+    const [top, mine] = await Promise.all([this.store.duelBoardTop(week, 50), this.store.duelBoardEntry(week, uid)]);
+    const row = (e, rank) => ({
+      rank,
+      uid: e.uid,
+      username: e.username ?? null,
+      photoURL: e.photoURL ?? null,
+      points: Number(e.points ?? 0),
+      played: Number(e.played ?? 0),
+      w: Number(e.w ?? 0),
+      d: Number(e.d ?? 0),
+      l: Number(e.l ?? 0),
+      gf: Number(e.gf ?? 0),
+      ga: Number(e.ga ?? 0),
+      me: e.uid === uid,
+    });
+    const me = mine ? row(mine, await this.store.duelBoardRank(week, Number(mine.points ?? 0))) : null;
+    // Saniyelik sıralama: eşit puanda averaj, sonra atılan gol
+    const sorted = [...top].sort((a, b) => Number(b.points ?? 0) - Number(a.points ?? 0) || Number(b.gf ?? 0) - Number(b.ga ?? 0) - (Number(a.gf ?? 0) - Number(a.ga ?? 0)) || Number(b.gf ?? 0) - Number(a.gf ?? 0));
+    return { week, top: sorted.map((e, i) => row(e, i + 1)), me, resetsAt: this._weekEnd() };
+  }
+
+  /** Bu haftanın bittiği an (Türkiye saatiyle pazartesi 00:00). */
+  _weekEnd() {
+    const local = this.now() + 3 * 3600e3;
+    const d = new Date(local);
+    const dow = (d.getUTCDay() + 6) % 7; // pazartesi 0
+    const startLocal = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - dow * DAY;
+    return startLocal + 7 * DAY - 3 * 3600e3;
   }
 
   // ---------------------------------------------------------------------------------------------------------------

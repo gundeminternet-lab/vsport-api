@@ -132,15 +132,26 @@ export function simulateMatch(analysis, { seed, rng: external } = {}) {
   const lam = { home: analysis.lambdaHome, away: analysis.lambdaAway };
 
   // Penaltılardan beklenen gol ayrılır ki toplam beklenen gol λ'da kalsın
-  const penRate = {};
-  const shotsPerMatch = {};
-  for (const s of SIDES) {
-    penRate[s] = SIM.penaltyPerTeam * Math.sqrt(lam[s] / 1.35);
-    const open = Math.max(0.05, lam[s] - penRate[s] * SIM.penaltyConversion);
-    shotsPerMatch[s] = open / MEAN_XG;
-  }
-
-  const scale = calibrateScales(lam);
+  const rates = (l) => {
+    const penRate = {};
+    const shotsPerMatch = {};
+    for (const s of SIDES) {
+      penRate[s] = SIM.penaltyPerTeam * Math.sqrt(l[s] / 1.35);
+      const open = Math.max(0.05, l[s] - penRate[s] * SIM.penaltyConversion);
+      shotsPerMatch[s] = open / MEAN_XG;
+    }
+    return {
+      penRate,
+      shotsPerMatch,
+      scale: calibrateScales(l),
+      pBase: clamp(0.5 + 0.17 * Math.tanh(0.9 * Math.log(l.home / l.away)), 0.34, 0.66),
+    };
+  };
+  // İkinci yarı farklı λ ile oynanabilir (oyunlardaki devre arası taktik değişikliği). Verilmezse iki yarı aynıdır;
+  // ilk yarının bütün çekilişleri ikinci yarıdan bağımsız olduğundan aynı tohumla ilk yarı birebir aynı kalır.
+  const half1 = rates(lam);
+  const sh = analysis.secondHalf;
+  const half2 = sh && Number.isFinite(sh.lambdaHome) && Number.isFinite(sh.lambdaAway) ? rates({ home: sh.lambdaHome, away: sh.lambdaAway }) : half1;
   const { slots, total, firstHalfClock } = buildClock(rng);
   const tempo = normalise(slots.map(tempoOf));
   const cardTempo = normalise(slots.map(cardTempoOf));
@@ -171,7 +182,6 @@ export function simulateMatch(analysis, { seed, rng: external } = {}) {
     });
   };
 
-  const pBase = clamp(0.5 + 0.17 * Math.tanh(0.9 * Math.log(lam.home / lam.away)), 0.34, 0.66);
   let drift = 0;
   let possSum = 0;
 
@@ -182,6 +192,7 @@ export function simulateMatch(analysis, { seed, rng: external } = {}) {
 
   for (let i = 0; i < total; i++) {
     const slot = slots[i];
+    const { penRate, shotsPerMatch, scale, pBase } = slot.half === 2 ? half2 : half1;
     const cands = [];
     const slotShots = { home: 0, away: 0 };
 
