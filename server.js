@@ -57,6 +57,7 @@ import { createGameStore } from './game/store.js';
 import { PlayerPool } from './game/pool.js';
 import { SocialService, createSocialStore } from './social.js';
 import { NewsService, createNewsStore, feedsFromEnv, DEFAULT_FEEDS } from './news.js';
+import { TransferService, createTransferStore } from './game/transfer.js';
 
 function serviceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -97,7 +98,7 @@ const store = {
 };
 
 /** /version ve Tahminler tanılamasında görünen sürüm. */
-const SERVER_VERSION = '2026-11-03-haber-1';
+const SERVER_VERSION = '2026-11-03-surum-2';
 const espn = new EspnClient();
 const trackService = new TrackService({ store: createTrackStore(db), espn });
 // Abonelik: Google Play doğrulaması + erişim denetimi (bitmiş görünen Play aboneliği mağazadan yeniden okunur)
@@ -105,7 +106,11 @@ const billing = billingFromEnv(baseStore);
 const access = new AccessService({ store: baseStore, billing });
 if (!billing.enabled) console.warn('[billing] Google Play doğrulaması kapalı: servis hesabı ya da paket adı eksik.');
 // Ekran görüntüsü kilidi: AI ekranında ekran görüntüsü alınmaya çalışılan maçın tahmini o kullanıcıya kapanır
-const capture = new CaptureLocks({ store: createCaptureStore(db, FieldValue) });
+// Ekran görüntüsü kilidi; yönetici hesapları muaf (uygulamayı denerken kilitlenmesin)
+const capture = new CaptureLocks({
+  store: createCaptureStore(db, FieldValue),
+  isExempt: async (uid) => (await db.doc(`users/${uid}`).get()).get('role') === 'admin',
+});
 const paidService = new PaidContentService({ store, espn, track: trackService, access, capture });
 // Günlük toplu tahminler: kendi liglerimizin bugünkü ve yarınki maçları, maç başlamadan hesaplanır
 const daily = new DailyPredictionService({
@@ -148,6 +153,8 @@ const aiCoupons = new AiCouponService({
 const gameStore = createGameStore(db, FieldValue);
 const playerPool = new PlayerPool({ store: gameStore, espn });
 const game = new GameService({ store: gameStore, pool: playerPool, access });
+// Benim 11'im Transfer Pazarı: kartlar kullanıcılar arasında kredi karşılığı el değiştirir
+const transfer = new TransferService({ store: createTransferStore(db, FieldValue), game });
 const social = new SocialService({
   store: createSocialStore(db, FieldValue),
   isAdmin: async (uid) => (await db.doc(`users/${uid}`).get()).get('role') === 'admin',
@@ -214,6 +221,7 @@ const api = createApi({
   radar,
   market,
   game,
+  transfer,
   social,
   news,
   progress,

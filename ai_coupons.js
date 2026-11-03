@@ -538,6 +538,29 @@ export class AiCouponService {
     };
   }
 
+  /** AI Karnesi için son günlerin kupon sonuçları: türe göre tutan / tutmayan. */
+  async record({ days = 7 } = {}) {
+    const now = this.now();
+    const byKind = Object.fromEntries(COUPON_KINDS.map((k) => [k.id, { id: k.id, title: k.title, won: 0, lost: 0 }]));
+    for (let i = 0; i < days; i++) {
+      const d = trDay(now - i * DAY);
+      const doc = await this._doc(d).catch(() => null);
+      if (!doc?.coupons?.length) continue;
+      const entries = new Map((await this.rows(d).catch(() => [])).map((e) => [e.key, e]));
+      for (const c of doc.coupons) {
+        const st = couponStatus(c.selections.map((x) => selectionStatus(x, entries.get(x.key), now)));
+        const k = byKind[c.kind];
+        if (!k) continue;
+        if (st === 'won') k.won++;
+        else if (st === 'lost') k.lost++;
+      }
+    }
+    const kinds = Object.values(byKind);
+    const won = kinds.reduce((a, k) => a + k.won, 0);
+    const lost = kinds.reduce((a, k) => a + k.lost, 0);
+    return { days, won, lost, rate: won + lost ? Math.round((won / (won + lost)) * 100) : null, kinds };
+  }
+
   status() {
     return { ...this.stats };
   }

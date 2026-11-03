@@ -596,6 +596,21 @@ export class DailyPredictionService {
     return rows;
   }
 
+  /** AI Karnesi: son [days] günün günlük tahminlerinden isabet (herkese açık; 10 dakika bellekte). */
+  async record({ uid, days = 14 } = {}) {
+    if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
+    const now = this.now();
+    const n = Math.max(3, Math.min(30, Number(days) || 14));
+    const hit = this._record?.get(n);
+    if (hit && now - hit.at < 10 * 60e3) return hit.value;
+    const list = Array.from({ length: n }, (_, i) => trDay(now - i * DAY));
+    const byDay = await Promise.all(list.map(async (day) => ({ day, rows: await this._rows(day).catch(() => []) })));
+    const value = recordOf(byDay, now);
+    this._record ??= new Map();
+    this._record.set(n, { at: now, value });
+    return value;
+  }
+
   /**
    * Bir günün tahminleri. day: "YYYY-MM-DD" (Türkiye saati; bugünden 7 gün öncesi ile 2 gün sonrası arası).
    * unlocked: istemcinin deneme/çark hakkıyla AI paketini açtığını bildirdiği maç anahtarları (sunucuda doğrulanır).
@@ -662,6 +677,110 @@ export class DailyPredictionService {
     if (!rows.length && !guest && this.isAdmin) diag = (await this.isAdmin(uid).catch(() => false)) ? this.status() : null;
     return { day: d, subscribed: ent.subscribed === true, items, summary: daySummary(rows), ...(diag ? { diag } : {}) };
   }
+}
+
+/** AI Karnesindeki tahmin türü adları. */
+export const RECORD_MARKETS = [
+  { id: 'ms', title: 'Maç sonucu' },
+  { id: 'iy', title: 'İlk yarı sonucu' },
+  { id: 'au', title: '2,5 Alt / Üst' },
+  { id: 'kg', title: 'Karşılıklı gol' },
+  { id: 'iyg', title: 'İlk yarı 0,5 Alt / Üst' },
+];
+const CONF_BUCKETS = [
+  { from: 0, to: 64, label: '%64 ve altı' },
+  { from: 65, to: 74, label: '%65 – %74' },
+  { from: 75, to: 100, label: '%75 ve üstü' },
+];
+const rateOf = (hit, n) => (n ? Math.round((hit / n) * 100) : null);
+
+/**
+ * AI Karnesi (saf): son günlerin günlük tahmin kayıtlarından isabet. byDay: [{ day, rows }] (yeniden eskiye).
+ * Karne her maçın en güçlü tahminine göredir; türlere göre isabet ise o türdeki bütün tahminleri sayar.
+ */
+export function recordOf(byDay, now) {
+  const days = [];
+  const markets = Object.fromEntries(RECORD_MARKETS.map((m) => [m.id, { ...m, hit: 0, n: 0 }]));
+  const buckets = CONF_BUCKETS.map((b) => ({ ...b, hit: 0, n: 0 }));
+  const done = [];
+  for (const { day, rows } of byDay) {
+    const s = daySummary(rows);
+    days.push({ day, total: s.total, settled: s.settled, hit: s.hit, rate: s.rate });
+    for (const r of rows) {
+      if (r.result?.status !== 'done') continue;
+      const fin = finalOf(r);
+      const bestHit = r.hits?.[fin.best];
+      if (typeof bestHit === 'boolean') {
+        done.push({ r, fin, hit: bestHit });
+        const b = buckets.find((x) => (fin.confidence ?? 0) >= x.from && (fin.confidence ?? 0) <= x.to);
+        if (b) {
+          b.n++;
+          if (bestHit) b.hit++;
+        }
+      }
+      for (const m of fin.markets ?? []) {
+        const h = r.hits?.[m.id];
+        const t = markets[m.id];
+        if (!t || typeof h !== 'boolean') continue;
+        t.n++;
+        if (h) t.hit++;
+      }
+    }
+  }
+  done.sort((a, b) => b.r.kickoffMs - a.r.kickoffMs);
+  let streak = 0;
+  for (const x of done) {
+    if (!x.hit) break;
+    streak++;
+  }
+  // En uzun seri (eskiden yeniye)
+  let best = 0;
+  let run = 0;
+  for (const x of [...done].reverse()) {
+    run = x.hit ? run + 1 : 0;
+    best = Math.max(best, run);
+  }
+  const hit = done.filter((x) => x.hit).length;
+  const week = byDay.slice(0, 7).reduce(
+    (a, { rows }) => {
+      const s = daySummary(rows);
+      return { hit: a.hit + s.hit, n: a.n + s.settled };
+    },
+    { hit: 0, n: 0 },
+  );
+  const yesterday = days[1] ?? null;
+  return {
+    updatedAt: new Date(now).toISOString(),
+    settled: done.length,
+    hit,
+    rate: rateOf(hit, done.length),
+    week: { hit: week.hit, settled: week.n, rate: rateOf(week.hit, week.n) },
+    yesterday: yesterday ? { day: yesterday.day, hit: yesterday.hit, settled: yesterday.settled, rate: yesterday.rate } : null,
+    streak,
+    bestStreak: best,
+    days: [...days].reverse(), // grafik için eskiden yeniye
+    markets: RECORD_MARKETS.map((m) => {
+      const t = markets[m.id];
+      return { id: m.id, title: m.title, hit: t.hit, settled: t.n, rate: rateOf(t.hit, t.n) };
+    }),
+    confidence: buckets.map((b) => ({ label: b.label, from: b.from, to: b.to, hit: b.hit, settled: b.n, rate: rateOf(b.hit, b.n) })),
+    recent: done.slice(0, 20).map(({ r, fin, hit: h }) => {
+      const m = (fin.markets ?? []).find((x) => x.id === fin.best);
+      return {
+        key: r.key,
+        league: r.league,
+        eventId: r.eventId,
+        kickoff: new Date(r.kickoffMs).toISOString(),
+        home: r.home,
+        away: r.away,
+        market: fin.best,
+        pick: m?.pick ?? null,
+        pct: m?.pct ?? fin.confidence ?? null,
+        score: `${r.result.home}-${r.result.away}`,
+        hit: h,
+      };
+    }),
+  };
 }
 
 /** Firestore veri katmanı. */

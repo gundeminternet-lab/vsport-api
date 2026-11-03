@@ -22,6 +22,7 @@ export const GUEST_ROUTES = new Set([
   'getDailyPredictions',
   'getPredictionDetail',
   'getAiCoupons',
+  'getAiRecord',
   // Sosyal → Haberler: misafir haberleri ve yorumları okur (yorum yazmak için giriş gerekir)
   'getNews',
   'getNewsComments',
@@ -58,7 +59,7 @@ const STATUS = {
   unavailable: 503,
 };
 
-export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, daily = null, aiCoupons = null, market = null, game = null, social = null, news = null, radar = null, capture = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
+export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, daily = null, aiCoupons = null, market = null, game = null, transfer = null, social = null, news = null, radar = null, capture = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
   const routes = {
     unlockContent: (d) => service.unlock(d),
     getContent: (d) => service.get(d),
@@ -81,11 +82,21 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
     ...(daily ? { getDailyPredictions: (d) => daily.list(d), getPredictionDetail: (d) => daily.detail(d) } : {}),
     // AI günlük kuponlar (Banko / İdeal / Sürpriz, İlk yarı KG Var, İY/MS dönüş)
     ...(aiCoupons ? { getAiCoupons: (d) => aiCoupons.list(d) } : {}),
+    // AI Karnesi: günlük tahminlerin ve AI kuponlarının son günlerdeki isabeti
+    ...(daily
+      ? {
+          getAiRecord: async (d) => ({
+            ...(await daily.record(d)),
+            coupons: aiCoupons ? await aiCoupons.record().catch(() => null) : null,
+          }),
+        }
+      : {}),
     // Canlı Radar: sinyaller, abone olmayanın haftalık açma hakkı, alarm ayarları ve cihaz jetonu
     ...(capture
       ? {
           reportCapture: (d) => capture.report(d),
           getCaptureLocks: (d) => capture.list(d),
+          adminClearCaptureLocks: (d) => capture.clear(d),
         }
       : {}),
     ...(radar
@@ -137,6 +148,16 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
           socialFollow: (d) => social.follow(d),
           presence: (d) => social.presence(d),
           communityStats: (d) => social.stats(d),
+        }
+      : {}),
+    // Benim 11'im → Transfer Pazarı
+    ...(transfer
+      ? {
+          transferList: (d) => transfer.list(d),
+          transferMine: (d) => transfer.mine(d),
+          transferSell: (d) => transfer.sell(d),
+          transferCancel: (d) => transfer.cancel(d),
+          transferBuy: (d) => transfer.buy(d),
         }
       : {}),
     // Günlük futbol haberleri ve haber yorumları

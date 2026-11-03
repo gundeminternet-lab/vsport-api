@@ -38,8 +38,10 @@ export class StoryReviewService {
       throw new AppError('failed-precondition', 'Maç henüz bitmedi; karne maç sonunda hazırlanır.');
     }
     // Maç öncesi içerik: sonradan üretilecekse yalnızca maç öncesi veriyle.
-    const content = await this.paid.contentFor(match, { asOf: match.timestamp - 60000 });
-    const m = content?.model;
+    const asOf = { asOf: match.timestamp - 60000 };
+    const content = await this.paid.contentFor(match, asOf);
+    // Eski içeriklerde model alanı yok: maç öncesi verilerle yeniden hesaplanır (eskiden karne hiç görünmüyordu)
+    const m = await this.paid.modelFor(match, content, asOf).catch(() => null);
     if (!m || !Number.isFinite(m.lambdaHome) || !Number.isFinite(m.lambdaAway)) {
       throw new AppError('failed-precondition', 'Bu maç için simülasyon verisi yok.');
     }

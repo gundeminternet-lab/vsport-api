@@ -22,6 +22,9 @@ export function createCaptureStore(db, FieldValue) {
       const s = await db.doc(`capture_locks/${uid}`).get();
       return s.exists ? s.data() : null;
     },
+    async clear(uid) {
+      await db.doc(`capture_locks/${uid}`).delete();
+    },
     async add(uid, keys, area, now) {
       await db.doc(`capture_locks/${uid}`).set(
         { keys: Object.fromEntries(keys.map((k) => [k, { at: now, area }])), count: FieldValue.increment(1), updatedAt: now },
@@ -32,16 +35,35 @@ export function createCaptureStore(db, FieldValue) {
 }
 
 export class CaptureLocks {
-  constructor({ store, now = () => Date.now(), cacheMs = 60e3, log = console }) {
+  /** isExempt: async (uid) → true ise (yönetici, test hesabı) kilit uygulanmaz. */
+  constructor({ store, now = () => Date.now(), cacheMs = 60e3, log = console, isExempt = null }) {
     this.store = store;
+    this.isExempt = isExempt;
+    this._exempt = new Map(); // uid → { at, value }
     this.now = now;
     this.cacheMs = cacheMs;
     this.log = log;
     this._cache = new Map(); // uid → { at, keys: Set }
   }
 
+  async _isExempt(uid) {
+    if (!this.isExempt || !uid) return false;
+    const hit = this._exempt.get(uid);
+    if (hit && this.now() - hit.at < 5 * 60e3) return hit.value;
+    let value = false;
+    try {
+      value = (await this.isExempt(uid)) === true;
+    } catch {
+      value = hit?.value ?? false;
+    }
+    if (this._exempt.size > 5000) this._exempt.clear();
+    this._exempt.set(uid, { at: this.now(), value });
+    return value;
+  }
+
   async keysOf(uid) {
     if (!uid) return new Set();
+    if (await this._isExempt(uid)) return new Set();
     const hit = this._cache.get(uid);
     if (hit && this.now() - hit.at < this.cacheMs) return hit.keys;
     let keys = new Set();
@@ -73,6 +95,8 @@ export class CaptureLocks {
     const list = [...new Set(Array.isArray(keys) ? keys : [])].filter((k) => typeof k === 'string' && KEY_RE.test(k)).slice(0, CAPTURE_MAX_KEYS);
     if (!list.length) throw new AppError('invalid-argument', 'Geçersiz maç.');
     const a = AREAS.has(area) ? area : 'other';
+    // Yönetici/test hesabı: kilit yazılmaz (uygulamayı denerken ekran görüntüsü alınabilir)
+    if (await this._isExempt(uid)) return { locked: [], exempt: true, message: CAPTURE_MESSAGE };
     await this.store.add(uid, list, a, this.now());
     const cur = new Set(await this.keysOf(uid));
     for (const k of list) cur.add(k);
@@ -84,5 +108,16 @@ export class CaptureLocks {
   async list({ uid }) {
     if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
     return { keys: [...(await this.keysOf(uid))] };
+  }
+
+  /** Yönetici: bir kullanıcının bütün ekran görüntüsü kilitlerini kaldırır (target boşsa kendi hesabı). */
+  async clear({ uid, target = null }) {
+    if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
+    if (!this.isExempt || !(await this.isExempt(uid))) throw new AppError('permission-denied', 'Bu işlem yöneticilere özel.');
+    const who = typeof target === 'string' && /^[A-Za-z0-9]{6,128}$/.test(target) ? target : uid;
+    await this.store.clear(who);
+    this._cache.delete(who);
+    this.log.info?.(`[capture] ${who} kilitleri kaldırıldı (${uid})`);
+    return { cleared: true, uid: who };
   }
 }

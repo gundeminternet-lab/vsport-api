@@ -409,8 +409,19 @@ export class PaidContentService {
     }
     const started = match.completed || match.timestamp <= this.now();
     const asOf = started ? { asOf: match.timestamp - 60000 } : {};
-    const content = await this.contentFor(match, asOf);
-    const model = await this.modelFor(match, content, asOf);
+    let content;
+    let model;
+    try {
+      content = await this.contentFor(match, asOf);
+      model = await this.modelFor(match, content, asOf);
+    } catch (e) {
+      if (e instanceof AppError) throw e;
+      console.error(`[askSpecial] ${key}:`, e?.stack ?? e);
+      throw new AppError('unavailable', 'Bu maçın AI verisi şu an hazırlanamadı. Biraz sonra tekrar dene.');
+    }
+    if (!model || !Number.isFinite(model.lambdaHome) || !Number.isFinite(model.lambdaAway)) {
+      throw new AppError('failed-precondition', 'Bu maç için yeterli veri yok; özel yorum hazırlanamadı.');
+    }
     let corners = null;
     if (market === 'corners') {
       const sp = await this.specialFor(match, ['corners'], asOf).catch(() => null);
@@ -428,17 +439,23 @@ export class PaidContentService {
         // devre skoru alınamazsa ilk yarı seçimlerinin sonucu boş kalır
       }
     }
-    const ask = buildAsk({
-      market,
-      choice,
-      homeName: match.homeName,
-      awayName: match.awayName,
-      model,
-      corners,
-      seed: `${uid}|${key}`,
-      facts,
-      aiScore: typeof content?.ai?.topScore === 'string' ? content.ai.topScore : null,
-    });
+    let ask;
+    try {
+      ask = buildAsk({
+        market,
+        choice,
+        homeName: match.homeName,
+        awayName: match.awayName,
+        model,
+        corners,
+        seed: `${uid}|${key}`,
+        facts,
+        aiScore: typeof content?.ai?.topScore === 'string' ? content.ai.topScore : null,
+      });
+    } catch (e) {
+      console.error(`[askSpecial] ${key} ${market}/${choice}:`, e?.stack ?? e);
+      throw new AppError('unavailable', 'Bu seçim için yorum hazırlanamadı. Başka bir seçim dene.');
+    }
     return { key, ask };
   }
 
