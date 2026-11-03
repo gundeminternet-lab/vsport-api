@@ -78,6 +78,11 @@ export function settleMarket(market, f) {
     const line = Number(x[1]);
     return x[2] === 'Üst' ? total > line : total < line;
   }
+  if ((x = /^İY KG (Var|Yok)$/.exec(m))) {
+    if (!ht) return null;
+    const both = ht[0] > 0 && ht[1] > 0;
+    return x[1] === 'Var' ? both : !both;
+  }
   if ((x = /^İY ([1X2])$/.exec(m))) return htRes === null ? null : htRes === x[1];
   if ((x = /^İY\/MS ([1X2])\/([1X2])$/.exec(m))) return htRes === null ? null : htRes === x[1] && res === x[2];
   return null;

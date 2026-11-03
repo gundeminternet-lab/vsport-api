@@ -51,6 +51,7 @@ import { createFeaturedService } from './featured.js';
 import { WheelService, WHEEL_WEIGHTS, WHEEL_SLICES, CREDIT_DAYS, ASSISTANT_PRIZE_HOURS } from './wheel.js';
 import { DailyPredictionService, createDailyStore } from './daily.js';
 import { MarketCollector, createMarketStore, espnSources } from './market.js';
+import { AiCouponService, createAiCouponStore } from './ai_coupons.js';
 import { GameService } from './game/service.js';
 import { createGameStore } from './game/store.js';
 import { PlayerPool } from './game/pool.js';
@@ -95,7 +96,7 @@ const store = {
 };
 
 /** /version ve Tahminler tanılamasında görünen sürüm. */
-const SERVER_VERSION = '2026-11-02-ai-2';
+const SERVER_VERSION = '2026-11-03-kupon-1';
 const espn = new EspnClient();
 const trackService = new TrackService({ store: createTrackStore(db), espn });
 // Abonelik: Google Play doğrulaması + erişim denetimi (bitmiş görünen Play aboneliği mağazadan yeniden okunur)
@@ -130,7 +131,18 @@ const market =
         isAdmin: async (uid) => (await db.doc(`users/${uid}`).get()).get('role') === 'admin',
         // Görüntü değişince tahminler hareket eder (maç başlamadan bir dakika önce kilitlenir)
         onUpdate: (key, snap) => daily.applyMarket(key, snap),
+        // AI kuponlarındaki maçların oranları daha sık okunur
+        focus: () => aiCoupons.focusKeys(),
       });
+// AI günlük kuponlar: Banko / İdeal / Sürpriz, İlk yarı KG Var, İY/MS dönüş (oranlar dış veriden, yoksa AI oranı)
+const marketStore = createMarketStore(db, FieldValue);
+const aiCoupons = new AiCouponService({
+  store: createAiCouponStore(db),
+  rows: (day) => daily._rows(day),
+  odds: async (key) => market?.doc(key) ?? (await marketStore.getOdds(key)),
+  access,
+  capture,
+});
 // Oyunlar ve sosyal akış
 const gameStore = createGameStore(db, FieldValue);
 const playerPool = new PlayerPool({ store: gameStore, espn });
@@ -190,6 +202,7 @@ const api = createApi({
   // Günlük hediye çarkı (+10 XP ödülü seviyeye işlenir)
   wheel: new WheelService({ store: baseStore, progress }),
   daily,
+  aiCoupons,
   radar,
   market,
   game,
@@ -299,6 +312,13 @@ setTimeout(() => {
   ensurePool();
   setInterval(ensurePool, 6 * 3600e3);
 }, 30e3);
+
+// AI günlük kuponlar: her gün 09:00'dan sonra (maç azsa 12:00'den sonra) bir kez kurulur; dakikada bir denenir
+setTimeout(() => {
+  const build = () => aiCoupons.tick().then((n) => n && console.log(`[ai-coupons] ${n} kupon hazırlandı`)).catch((e) => console.error('[ai-coupons]', e?.message ?? e));
+  build();
+  setInterval(build, 60e3);
+}, 70e3);
 
 // Dış tahmin verisi: günlük tahmin hattıyla aynı fikstür planını kullanır, dakikada en fazla 8 maç okur
 if (market) {
