@@ -272,7 +272,9 @@ const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
  *   saveDailyResult(key, { result, hits })   hasUnlock(uid, key, type) (users/{uid}/unlocks)
  */
 export class DailyPredictionService {
-  constructor({ paid, store, espn, access, leagues = LEAGUES, now = () => Date.now(), perTick = 4, planMs = 30 * 60e3, listCacheMs = 60e3, log = console, isAdmin = null, statusExtra = null, marketLatest = null }) {
+  constructor({ paid, store, espn, access, leagues = LEAGUES, now = () => Date.now(), perTick = 4, planMs = 30 * 60e3, listCacheMs = 60e3, log = console, isAdmin = null, statusExtra = null, marketLatest = null, capture = null }) {
+    /** Ekran görüntüsü kilidi (capture.js): kilitli maçın tahmini o kullanıcıya gösterilmez. */
+    this.capture = capture;
     /** Dış tahmin verisinin bellekteki son görüntüsü (market.js → latest): yeni tahmin hemen güncel veriyle başlasın. */
     this.marketLatest = marketLatest;
     /** Liste boşken yöneticiye hat durumu gösterilsin diye (uid → bool). */
@@ -408,8 +410,9 @@ export class DailyPredictionService {
     if (!entry) throw new AppError('not-found', 'Bu maç için tahmin bulunamadı.');
     const now = this.now();
     const settled = entry.result?.status === 'done' || entry.result?.status === 'void';
-    let open = settled;
-    if (!open && !guest) {
+    const captured = this.capture ? await this.capture.isLocked(uid, key) : false;
+    let open = settled && !captured;
+    if (!open && !guest && !captured) {
       const ent = await this.access.entitlement(uid);
       open = ent.subscribed === true || (unlocked === true && (await this.store.hasUnlock(uid, key, 'ai')));
     }
@@ -427,6 +430,7 @@ export class DailyPredictionService {
       locked: settled || entry.kickoffMs - now < LIVE_LOCK_MS,
       updatedAt: entry.live?.at ? new Date(entry.live.at).toISOString() : null,
       result: entry.result ?? null,
+      ...(captured ? { captureLocked: true } : {}),
     };
     if (!open) return { ...head, expected: null, markets: DETAIL_MARKETS.map((m) => ({ id: m.id, title: m.title, pick: null, pct: null, options: [], why: [], hit: null })) };
     const d = predictionDetail(entry, fin, await this._contentModel(key));
@@ -606,6 +610,7 @@ export class DailyPredictionService {
 
     const rows = await this._rows(d);
     const ent = guest ? { subscribed: false } : await this.access.entitlement(uid);
+    const banned = this.capture ? await this.capture.keysOf(uid) : new Set();
     const open = new Set();
     if (!ent.subscribed && !guest && Array.isArray(unlocked) && unlocked.length) {
       const keys = new Set(rows.map((r) => r.key));
@@ -615,7 +620,8 @@ export class DailyPredictionService {
     }
     const items = rows.map((r) => {
       const settled = r.result?.status === 'done' || r.result?.status === 'void';
-      const visible = ent.subscribed || settled || open.has(r.key);
+      const captured = banned.has(r.key);
+      const visible = !captured && (ent.subscribed || settled || open.has(r.key));
       const fin = finalOf(r);
       const moved = Boolean(r.live?.markets?.length);
       const first = new Map((r.markets ?? []).map((m) => [m.id, m]));
@@ -648,6 +654,7 @@ export class DailyPredictionService {
         ...(moved && first.has(fin.best) ? { confidenceFrom: first.get(fin.best).pct } : {}),
         locked: settled || r.kickoffMs - now < LIVE_LOCK_MS,
         result: r.result ?? null,
+        ...(captured ? { captureLocked: true } : {}),
       };
     });
     // Liste boşsa yöneticiye hattın durumu da gönderilir (Tahminler ekranında görünür; neden boş olduğu anlaşılsın)

@@ -18,7 +18,7 @@ import {
   snapWindow,
   starsOf,
 } from '../radar.js';
-import { RadarService, alarmMatches, cleanRules, clockOf, inQuiet, localTime } from '../radar_service.js';
+import { RadarService, alarmMatches, cleanRules, clockOf, inQuiet, learnedFactor, localTime } from '../radar_service.js';
 import { RADAR_CHANNEL, channelFor } from '../notify.js';
 
 // ---------------------------------------------------------------------------------------------------
@@ -539,4 +539,30 @@ test('servis: deneme bildirimi kayıtlı cihaza gider, günde en çok 3', async 
   await assert.rejects(() => t.radar.testPush({ uid: 'free' }), (e) => e.code === 'resource-exhausted');
   await assert.rejects(() => t.radar.testPush({ uid: 'yok' }), (e) => e.code === 'failed-precondition');
   await assert.rejects(() => t.radar.testPush({ uid: 'm', guest: true }), (e) => e.code === 'unauthenticated');
+});
+
+test('öğrenme: radar kendi sonuçlarından gösterilen gol ihtimalini düzeltir (az veride etkisi küçük, sınırlı)', async () => {
+  assert.equal(learnedFactor(null), 1);
+  assert.equal(learnedFactor({ n: 0, hit: 0, p: 0 }), 1);
+  // 200 sinyal: model 100 tutma bekledi, 140 tuttu → ihtimaller yukarı
+  const up = learnedFactor({ n: 200, hit: 140, p: 100 });
+  assert.ok(up > 1.3 && up <= 1.5);
+  // 10 sinyalde fark büyük olsa da etkisi küçük
+  const few = learnedFactor({ n: 10, hit: 9, p: 5 });
+  assert.ok(few > 1 && few < 1.25);
+  assert.equal(learnedFactor({ n: 1000, hit: 100, p: 600 }), 0.6, 'alt sınır');
+
+  const now = Date.UTC(2026, 10, 2, 18);
+  const day = new Date(now + 3 * 3600e3).toISOString().slice(0, 10);
+  const store = { getStats: async () => [{ day, calib: { siren_2: { n: 120, hit: 30, p: 60 }, siren_1: { n: 5, hit: 5, p: 2 } } }] };
+  const svc = new RadarService({ store, espn: null, access: null, plan: null, now: () => now, log: { warn() {}, error() {} } });
+  const c2 = await svc._learnedChance({ type: 'siren', stars: 2, chance: { p: 0.5, base: 0.3, minutes: 20 } });
+  assert.equal(c2.raw, 0.5);
+  assert.ok(c2.p < 0.5 && c2.p >= 0.3, `fazla iyimser model aşağı çekilir: ${c2.p}`);
+  // 1 yıldızda yeterli veri yok: türün bütünü kullanılır
+  const c1 = await svc._learnedChance({ type: 'siren', stars: 1, chance: { p: 0.4, base: 0.3, minutes: 20 } });
+  assert.ok(c1.p < 0.4);
+  // Veri olmayan tür değişmez
+  const c3 = await svc._learnedChance({ type: 'corner', stars: 1, chance: { p: 0.4, base: 0.3, minutes: 10 } });
+  assert.equal(c3.p, 0.4);
 });

@@ -19,6 +19,8 @@ import { TeamMemory } from './engine/memory.js';
 import { CONTENT_TYPES, RETIRED_TYPES, CONTENT_VERSION, buildAi, buildOdds, buildSim, buildReview, modelOf } from './content.js';
 import { storyForContent } from './story.js';
 import { SPECIAL_TOPICS, SPECIAL_VERSION, buildSpecial } from './special.js';
+import { buildAsk, validChoice } from './special_ask.js';
+import { matchFacts } from './settle.js';
 import { collectCornerSamples, expectedCorners } from './engine/corners.js';
 import { pendingEntry } from './track.js';
 import { AppError } from './errors.js';
@@ -48,7 +50,8 @@ const DAY = 86400000;
 const utcDay = (ms) => new Date(Math.floor(ms / DAY) * DAY);
 
 export class PaidContentService {
-  constructor({ store, espn, now = () => Date.now(), memoryFactory = () => new TeamMemory(), leagues = LEAGUES, track = null, access = null }) {
+  constructor({ store, espn, now = () => Date.now(), memoryFactory = () => new TeamMemory(), leagues = LEAGUES, track = null, access = null, capture = null }) {
+    this.capture = capture; // ekran görüntüsü kilidi (capture.js): kilitli maçın AI içeriği bu kullanıcıya gösterilmez
     this.track = track; // tahmin karnesi (TrackService): maç öncesi üretilen tahmin kaydedilir
     this.leagues = new Set(leagues);
     this.store = store;
@@ -228,6 +231,11 @@ export class PaidContentService {
     return this.access.isSubscriber(uid);
   }
 
+  /** Ekran görüntüsü kilidi: kullanıcı bu maçın AI ekranında ekran görüntüsü almaya çalıştıysa içerik verilmez. */
+  async _guard(uid, key) {
+    if (this.capture) await this.capture.check(uid, key);
+  }
+
   /** Kilit kaydı (açılan içerik geçmişi) için maç bilgisi. */
   _record(match, key, type, extra = {}) {
     return {
@@ -252,6 +260,7 @@ export class PaidContentService {
     this.validate({ league, eventId, kickoff, type });
     if (use !== null && !Object.hasOwn(CREDIT_TYPES, use)) throw new AppError('invalid-argument', 'Geçersiz hak.');
     const key = matchKey(league, eventId);
+    await this._guard(uid, key);
     if (RETIRED_TYPES.includes(type) && !(await this.store.hasUnlock(uid, key, type))) {
       throw new AppError('failed-precondition', 'Bu içerik artık sunulmuyor.');
     }
@@ -300,6 +309,7 @@ export class PaidContentService {
     if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
     this.validate({ league, eventId, kickoff, type });
     const key = matchKey(league, eventId);
+    await this._guard(uid, key);
     const unlocked = await this.covers(uid, key, type);
     if (unlocked) {
       const cached = await this.store.getContent(key);
@@ -335,6 +345,7 @@ export class PaidContentService {
     this.validate({ league, eventId, kickoff }, { needType: false });
     const want = this.specialTopics(topics);
     const key = matchKey(league, eventId);
+    await this._guard(uid, key);
     const flags = await Promise.all(want.map((t) => this.covers(uid, key, `sp_${t}`)));
     if (flags.some((f) => !f)) throw subscriptionRequired('Özel Yorumlar abonelere özel (ya da bu maçın AI paketini açanlara).');
     const match = await this.findMatch({ league, eventId, kickoff });
@@ -348,6 +359,7 @@ export class PaidContentService {
     if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
     this.validate({ league, eventId, kickoff }, { needType: false });
     const key = matchKey(league, eventId);
+    await this._guard(uid, key);
     const flags = await Promise.all(SPECIAL_TOPICS.map((t) => this.covers(uid, key, `sp_${t}`)));
     let open = SPECIAL_TOPICS.filter((_, i) => flags[i]);
     // Satın alınanlar zaten saklıysa ESPN'e hiç gitmeden döner.
@@ -365,10 +377,62 @@ export class PaidContentService {
     return { key, topics: open, data };
   }
 
+  /**
+   * Kişiye özel yorum: kullanıcı tahmin türünü ve kendi beklentisini seçer, AI o seçimi o maçın verileriyle tartar
+   * (special_ask.js). Erişim Özel Yorumlarla aynı: abonelik ya da bu maçın AI paketi; maç bittiyse herkese açık ve
+   * seçimin tutup tutmadığı da döner. Maç başladıysa yalnızca maç öncesi veriler kullanılır.
+   */
+  async askSpecial({ uid, league, eventId, kickoff, market, choice }) {
+    if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
+    this.validate({ league, eventId, kickoff }, { needType: false });
+    if (!validChoice(market, choice)) throw new AppError('invalid-argument', 'Geçersiz tahmin türü ya da seçim.');
+    const key = matchKey(league, eventId);
+    await this._guard(uid, key);
+    const match = await this.findMatch({ league, eventId, kickoff });
+    if (!match.completed) {
+      const flags = await Promise.all(SPECIAL_TOPICS.map((t) => this.covers(uid, key, `sp_${t}`)));
+      if (!flags.some(Boolean)) throw subscriptionRequired('Özel yorum abonelere özel (ya da bu maçın AI paketini açanlara).');
+    }
+    const started = match.completed || match.timestamp <= this.now();
+    const asOf = started ? { asOf: match.timestamp - 60000 } : {};
+    const content = await this.contentFor(match, asOf);
+    const model = await this.modelFor(match, content, asOf);
+    let corners = null;
+    if (market === 'corners') {
+      const sp = await this.specialFor(match, ['corners'], asOf).catch(() => null);
+      const meta = sp?.corners?.meta;
+      if (meta && Number.isFinite(meta.home)) corners = { home: meta.home, away: meta.away, source: meta.source };
+    }
+    let facts = null;
+    if (match.completed) {
+      facts = { home: match.homeGoals, away: match.awayGoals, ht: null };
+      try {
+        const f = matchFacts(await this.espn.getSummary(league, eventId, { maxAgeMs: 30 * 60e3 }));
+        if (Array.isArray(f.ht)) facts.ht = f.ht;
+        if (Number.isFinite(f.corners)) facts.corners = f.corners;
+      } catch {
+        // devre skoru alınamazsa ilk yarı seçimlerinin sonucu boş kalır
+      }
+    }
+    const ask = buildAsk({
+      market,
+      choice,
+      homeName: match.homeName,
+      awayName: match.awayName,
+      model,
+      corners,
+      seed: `${uid}|${key}`,
+      facts,
+      aiScore: typeof content?.ai?.topScore === 'string' ? content.ai.topScore : null,
+    });
+    return { key, ask };
+  }
+
   /** Biten maçta AI tahmini ve simülasyon sonucunun gerçek sonuçla karşılaştırması (ücretsiz). */
   async review({ uid, league, eventId, kickoff }) {
     if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
     this.validate({ league, eventId, kickoff }, { needType: false });
+    await this._guard(uid, matchKey(league, eventId));
     const match = await this.findMatch({ league, eventId, kickoff });
     if (!match.completed) throw new AppError('failed-precondition', 'Maç henüz bitmedi.');
     const content = await this.contentFor(match, { asOf: match.timestamp - 60000 });

@@ -431,3 +431,20 @@ test('eski kural geçişi: kilitlenmemiş kayıt yeni kurala geçer, kilitli/son
   await svc.tick();
   assert.equal(store.updates.length, 1, 'bir daha yazılmaz');
 });
+
+test('ekran görüntüsü kilidi: kilitlenen maçın tahmini abone olsa da bu kullanıcıya kapanır; diğer maçlar açık', async () => {
+  const { svc } = service({ fixtures: [match(1, NOW + H), match(2, NOW + 2 * H)] });
+  svc.capture = { keysOf: async (uid) => new Set(uid === 'sub' ? ['demo_1_1'] : []), isLocked: async (uid, key) => uid === 'sub' && key === 'demo_1_1' };
+  await svc.tick();
+  const list = await svc.list({ uid: 'sub' });
+  const locked = list.items.find((i) => i.key === 'demo_1_1');
+  const other = list.items.find((i) => i.key === 'demo_1_2');
+  assert.equal(locked.captureLocked, true);
+  assert.equal(locked.open, false);
+  assert.ok(locked.markets.every((m) => m.pick === null && m.pct === null));
+  assert.equal(other.open, true);
+  assert.equal(other.captureLocked, undefined);
+  const d = await svc.detail({ uid: 'sub', key: 'demo_1_1' });
+  assert.equal(d.captureLocked, true);
+  assert.equal(d.open, false);
+});

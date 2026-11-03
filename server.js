@@ -13,6 +13,7 @@
 //
 // Başlatma: node server.js
 
+import { CaptureLocks, createCaptureStore } from './capture.js';
 import http from 'node:http';
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
@@ -94,14 +95,16 @@ const store = {
 };
 
 /** /version ve Tahminler tanılamasında görünen sürüm. */
-const SERVER_VERSION = '2026-10-29-arena-1';
+const SERVER_VERSION = '2026-11-02-ai-2';
 const espn = new EspnClient();
 const trackService = new TrackService({ store: createTrackStore(db), espn });
 // Abonelik: Google Play doğrulaması + erişim denetimi (bitmiş görünen Play aboneliği mağazadan yeniden okunur)
 const billing = billingFromEnv(baseStore);
 const access = new AccessService({ store: baseStore, billing });
 if (!billing.enabled) console.warn('[billing] Google Play doğrulaması kapalı: servis hesabı ya da paket adı eksik.');
-const paidService = new PaidContentService({ store, espn, track: trackService, access });
+// Ekran görüntüsü kilidi: AI ekranında ekran görüntüsü alınmaya çalışılan maçın tahmini o kullanıcıya kapanır
+const capture = new CaptureLocks({ store: createCaptureStore(db, FieldValue) });
+const paidService = new PaidContentService({ store, espn, track: trackService, access, capture });
 // Günlük toplu tahminler: kendi liglerimizin bugünkü ve yarınki maçları, maç başlamadan hesaplanır
 const daily = new DailyPredictionService({
   paid: paidService,
@@ -113,6 +116,7 @@ const daily = new DailyPredictionService({
   statusExtra: () => ({ version: SERVER_VERSION, memoryMb: Math.round(process.memoryUsage().rss / 1048576) }),
   // Yeni hazırlanan tahmin toplayıcının bellekteki son görüntüsüyle hemen güncellenir
   marketLatest: (key) => market?.latest(key) ?? null,
+  capture,
 });
 // Dış tahmin verisi (yalnızca sunucuda model girdisi; uygulamada gösterilmez). MARKET_DATA=off ile kapatılır.
 const market =
@@ -164,6 +168,7 @@ const api = createApi({
     return { uid: t.uid, anonymous: t.firebase?.sign_in_provider === 'anonymous' };
   },
   service: paidService,
+  capture,
   checker: new CouponCheckService({ paid: paidService, store, narrator }),
   rewards,
   admin: createAdminService({ db, FieldValue, auth }),

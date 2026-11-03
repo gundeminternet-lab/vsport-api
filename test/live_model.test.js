@@ -9,10 +9,10 @@ import { createRng } from '../engine/rng.js';
 const model = { lambdaHome: 1.5, lambdaAway: 1.1, sigma: 0.15 };
 const near = (a, b, eps, msg) => assert.ok(Math.abs(a - b) <= eps, `${msg ?? ''} ${a} ≈ ${b}`);
 
-test('zaman eğrisi: gollerin yaklaşık %45\'i ilk yarıda; kalan pay dakikayla azalır; uzatma hesaba katılır', () => {
+test('zaman eğrisi: gollerin yaklaşık %43\'ü ilk yarıda (uzun uzatmalar dahil); kalan pay dakikayla azalır; uzatma hesaba katılır', () => {
   near(timeline({ minute: 0, period: 1 }).remShare, 1, 1e-9);
   const ht = timeline({ halftime: true }).remShare;
-  near(1 - ht, 0.45, 0.02, 'ilk yarı payı');
+  near(1 - ht, 0.43, 0.02, 'ilk yarı payı');
   let last = 1;
   for (const [minute, period] of [[10, 1], [30, 1], [45, 1], [46, 2], [60, 2], [75, 2], [90, 2], [94, 2]]) {
     const r = timeline({ minute, period }).remShare;

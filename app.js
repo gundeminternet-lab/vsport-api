@@ -28,6 +28,8 @@ export const GUEST_ROUTES = new Set([
   'getWeeklyBulletin',
   // Canlı Radar: misafir taramayı ve sonuçlanan sinyalleri görür (süren sinyaller kilitli)
   'getRadar',
+  'reportCapture',
+  'getCaptureLocks',
   'getRadarSignal',
   // Oyun ve topluluk: misafir yalnızca tabloları görür ve arar (oynamak için giriş gerekir)
   'photoBoard',
@@ -46,14 +48,16 @@ const STATUS = {
   'failed-precondition': 409,
   'subscription-required': 402,
   'resource-exhausted': 429,
+  'capture-locked': 423,
   internal: 500,
   unavailable: 503,
 };
 
-export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, daily = null, market = null, game = null, social = null, radar = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
+export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, daily = null, market = null, game = null, social = null, radar = null, capture = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
   const routes = {
     unlockContent: (d) => service.unlock(d),
     getContent: (d) => service.get(d),
+    askSpecial: (d) => service.askSpecial(d),
     getReview: (d) => service.review(d),
     unlockCoupon: (d) => coupons.unlock(d),
     unlockSpecial: (d) => service.unlockSpecial(d),
@@ -71,6 +75,12 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
     // Günlük toplu tahminler (Tahminler sekmesi, Ana Sayfa, Canlı takip)
     ...(daily ? { getDailyPredictions: (d) => daily.list(d), getPredictionDetail: (d) => daily.detail(d) } : {}),
     // Canlı Radar: sinyaller, abone olmayanın haftalık açma hakkı, alarm ayarları ve cihaz jetonu
+    ...(capture
+      ? {
+          reportCapture: (d) => capture.report(d),
+          getCaptureLocks: (d) => capture.list(d),
+        }
+      : {}),
     ...(radar
       ? {
           getRadar: (d) => radar.feed(d),
