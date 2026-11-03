@@ -205,3 +205,14 @@ test('giriş serisi: art arda günler artar, ara verilince 1\'den başlar; 3. g�
   assert.equal(again.streak, 1);
   assert.equal((await s.state({ uid: 'u1' })).streak.best, 3);
 });
+
+test('kapışma: oyuncu havuzu boşken de rakip 11 kişi çıkar (maç donmaz)', async () => {
+  const { s, pool } = svc();
+  const { sq } = await squadReady(s, 'u1');
+  pool.all = () => [];
+  const start = await s.duelStart({ uid: 'u1', squadId: sq.id, tactic: 'dengeli' });
+  assert.equal(start.opponent.lineup.filter((x) => x.name).length, 11);
+  assert.ok(start.opponent.power > 40);
+  const fin = await s.duelFinish({ uid: 'u1', duelId: start.duelId });
+  assert.ok(['W', 'D', 'L'].includes(fin.result));
+});

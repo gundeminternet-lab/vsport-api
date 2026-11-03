@@ -70,11 +70,15 @@ test('ilk gol: ilk gol olayının takımı; kendi kalesine ya da gol yoksa null'
   assert.equal(firstGoalSide(summary([])), null);
 });
 
-const paid = ({ unlocked = true, completed = true, summaryFails = false } = {}) => ({
+const paid = ({ unlocked = true, completed = true, summaryFails = false, oldContent = false } = {}) => ({
   validate() {},
   covers: async () => unlocked,
   findMatch: async () => ({ id: '9', timestamp: 0, completed, homeGoals: completed ? 0 : null, awayGoals: completed ? 2 : null, homeName: 'Liverpool', awayName: 'Brighton' }),
-  contentFor: async () => ({ key: 'eng_1_9', model: { lambdaHome: 1.117, lambdaAway: 1.882, sigma: 0 }, home: { name: 'Liverpool' }, away: { name: 'Brighton' } }),
+  contentFor: async () => (oldContent
+    ? { key: 'eng_1_9', home: { name: 'Liverpool' }, away: { name: 'Brighton' } }
+    : { key: 'eng_1_9', model: { lambdaHome: 1.117, lambdaAway: 1.882, sigma: 0 }, home: { name: 'Liverpool' }, away: { name: 'Brighton' } }),
+  // Gerçek servisteki gibi: içerikte model yoksa maç öncesi verilerle hesaplanır
+  modelFor: async (_m, c) => c.model ?? { lambdaHome: 1.117, lambdaAway: 1.882, sigma: 0 },
   espn: { getSummary: async () => { if (summaryFails) throw new Error('ağ'); return summary([{ type: { text: 'Goal' }, scoringPlay: true, team: { id: '2' } }]); } },
 });
 const args = { uid: 'u', league: 'eng.1', eventId: '9', kickoff: '2026-10-25T14:00:00Z' };
@@ -90,4 +94,9 @@ test('servis: bitmiş maçta karne döner; özet alınamazsa ilk gol bilinmiyor'
   assert.equal(r.checklist[4].hit, true);
   const r2 = await new StoryReviewService({ paid: paid({ summaryFails: true }) }).review(args);
   assert.equal(r2.checklist[4].hit, null);
+});
+
+test('servis: model alanı olmayan eski içerikte de karne döner', async () => {
+  const r = await new StoryReviewService({ paid: paid({ oldContent: true }) }).review(args);
+  assert.equal(r.score, '0-2');
 });
