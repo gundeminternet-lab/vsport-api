@@ -51,9 +51,9 @@ export const MISSIONS = [
   { id: 'bonus', title: 'Günlük bonusunu topla', reward: 50, done: (d) => d?.bonus === true },
   { id: 'photo', title: 'Fotoğraftan Bil\'i oyna', reward: 100, done: (d) => d?.photo?.finished === true },
   { id: 'quiz5', title: 'Bilgi yarışmasında 5 doğru yap', reward: 150, done: (d) => (d?.quiz?.correct ?? 0) >= 5 },
-  { id: 'duel', title: 'Bir kapışma yap', reward: 100, done: (d) => (d?.duels ?? 0) >= 1 },
+  { id: 'duel', title: 'Bir maç oyna', reward: 100, done: (d) => (d?.duels ?? 0) >= 1 },
   { id: 'pack', title: 'Bir paket aç', reward: 100, done: (d) => (d?.packs ?? 0) >= 1 },
-  { id: 'duelwin', title: 'Bir kapışma kazan', reward: 150, done: (d) => (d?.duelWins ?? 0) >= 1 },
+  { id: 'duelwin', title: 'Bir maç kazan', reward: 150, done: (d) => (d?.duelWins ?? 0) >= 1 },
   { id: 'boss', title: 'Günün Meydan Okuması\'na çık', reward: 100, done: (d) => d?.boss === true },
 ];
 

@@ -3,8 +3,10 @@
 // Krediler yalnızca oyunlarla kazanılır; burada harcanır (taraftar mağazasının günlük geliri de oyun içi kazançtır).
 //
 //   game_profiles/{uid}.club   { name, short, fans, crest: { shape, primary, secondary, symbol, pattern }, foundedAt,
+//                                kits: { home, away, gk } (her biri { pattern, shirt, second, shorts, socks }),
 //                                levels: { stadium, training, academy, fanshop }, build: { facility, to, startedAt, endsAt } | null,
 //                                shopDay }
+//   Kulüp kimliği (ad, kısaltma, arma, taraftar grubu, formalar) kuruluşta belirlenir ve sonra değişmez.
 //   club_names/{ad}            { uid }   kulüp adı tekil
 //   game_profiles/{uid}/cards/{id}.dev   { xp, plus, base }   oyuncu gelişimi (puan kazandıkça r ve özellikler artar)
 //   game_profiles/{uid}/daily/{gün}.training   o gün yapılan antrenman sayısı
@@ -23,6 +25,8 @@ export const CLUB = {
   colors: 14,
   symbols: 16,
   patterns: 5,
+  /** Forma desenleri: düz, dikey çizgili, yarım, yatay çizgili, çapraz kuşak (uygulamadaki KitPattern sırası). */
+  kitPatterns: 5,
   /** Kuruluş hediyesi (kredi). */
   foundingGift: 300,
 };
@@ -143,6 +147,59 @@ function checkCrest(c) {
   return crest;
 }
 
+// ---- Formalar ---------------------------------------------------------------------------------------------------
+
+const WHITE = 4;
+const BLACK = 5;
+/** Arma deseni → forma deseni (düz, dikey, yatay şerit → yatay çizgili, çapraz kuşak, iki renk → yarım). */
+const CREST_TO_KIT = [0, 1, 3, 4, 2];
+/** Kaleci forması için ayrışan renkler: mor, turuncu, yeşil, açık mavi, sarı, koyu yeşil, siyah. */
+const GK_COLORS = [9, 8, 3, 12, 2, 13, 5];
+
+function checkKit(k, what) {
+  const n = (v, max) => {
+    const x = Number(v);
+    if (!Number.isInteger(x) || x < 0 || x >= max) throw new AppError('invalid-argument', `Geçersiz ${what}.`);
+    return x;
+  };
+  const kit = { pattern: n(k?.pattern ?? 0, CLUB.kitPatterns), shirt: n(k?.shirt, CLUB.colors), second: n(k?.second, CLUB.colors), shorts: n(k?.shorts, CLUB.colors), socks: n(k?.socks, CLUB.colors) };
+  if (kit.pattern !== 0 && kit.shirt === kit.second) throw new AppError('invalid-argument', `${what[0].toLocaleUpperCase('tr')}${what.slice(1)}: desenin iki rengi farklı olmalı.`);
+  return kit;
+}
+
+/** Ev sahibi, deplasman ve kaleci formaları (kuruluşta). */
+export function checkKits(raw) {
+  if (!raw || typeof raw !== 'object') throw new AppError('invalid-argument', 'Kulübünün formalarını seç.');
+  const home = checkKit(raw.home, 'ev sahibi forması');
+  const away = checkKit(raw.away, 'deplasman forması');
+  const gk = checkKit(raw.gk, 'kaleci forması');
+  if (home.shirt === away.shirt) throw new AppError('invalid-argument', 'Ev sahibi ve deplasman formalarının ana rengi farklı olmalı.');
+  if (gk.shirt === home.shirt || gk.shirt === away.shirt) throw new AppError('invalid-argument', 'Kaleci forması takım formalarından farklı renkte olmalı.');
+  return { home, away, gk };
+}
+
+/** Armadan türetilen formalar (formasız eski kulüpler ve rakip takımlar için). */
+export function defaultKits(crest) {
+  const p = Number(crest?.primary ?? 0);
+  const s0 = Number(crest?.secondary ?? WHITE);
+  const sec = s0 === p ? (p === WHITE ? BLACK : WHITE) : s0;
+  const home = { pattern: CREST_TO_KIT[Number(crest?.pattern ?? 0)] ?? 0, shirt: p, second: sec, shorts: p, socks: p };
+  const away = { pattern: 0, shirt: sec, second: p, shorts: sec, socks: sec };
+  const g = GK_COLORS.find((c) => c !== home.shirt && c !== away.shirt && c !== home.second) ?? 9;
+  const gk = { pattern: 0, shirt: g, second: g === BLACK ? WHITE : BLACK, shorts: g, socks: g };
+  return { home, away, gk };
+}
+
+/** Rastgele arma (karma takımlar ve günün rakibi için; rng: createRng). */
+export function randomCrest(rng) {
+  const primary = rng.int(0, CLUB.colors - 1);
+  const secondary = (primary + 1 + rng.int(0, CLUB.colors - 2)) % CLUB.colors;
+  return { shape: rng.int(0, CLUB.shapes - 1), primary, secondary, symbol: rng.int(0, CLUB.symbols - 1), pattern: rng.int(0, CLUB.patterns - 1) };
+}
+
+/** Kulübün formaları; kuruluşta seçilmemişse armadan. */
+export const kitsOf = (club) => (club?.kits?.home ? club.kits : club?.crest ? defaultKits(club.crest) : null);
+
 // ---- Servis ---------------------------------------------------------------------------------------------------
 
 /**
@@ -185,6 +242,10 @@ export class ClubService {
       short: c.short,
       fans: c.fans,
       crest: c.crest,
+      kits: kitsOf(c),
+      // Eski kulüplerde formalar bir kez seçilebilir
+      kitsChosen: Boolean(c.kits?.home),
+      venue: `${c.name} Stadyumu`,
       foundedAt: c.foundedAt ? new Date(c.foundedAt).toISOString() : null,
       level: clubLevel(levels),
       supporters: fanCount(levels, wins),
@@ -229,14 +290,16 @@ export class ClubService {
     return this.view(p.club, { trainingToday: Number(daily?.training ?? 0), wins: Number(p.duelTotals?.w ?? 0) });
   }
 
-  /** Kulüp kur: ad (tekil), kısaltma, taraftar grubu, arma. Bir kez kurulur; kuruluş hediyesi verilir. */
-  async create({ uid, guest = false, name, short = null, fans, crest }) {
+  /** Kulüp kur: ad (tekil), kısaltma, taraftar grubu, arma, formalar. Bir kez kurulur ve değişmez; kuruluş hediyesi verilir. */
+  async create({ uid, guest = false, name, short = null, fans, crest, kits = null }) {
     this.game._member(uid, guest);
     const p = await this.game._profile(uid);
     if (p.club) throw new AppError('failed-precondition', 'Kulübün zaten kurulu.');
     const n = checkText(name, { min: CLUB.nameMin, max: CLUB.nameMax, what: 'Kulüp adı' });
     const f = checkText(fans, { min: CLUB.fansMin, max: CLUB.fansMax, what: 'Taraftar grubu adı' });
     const c = checkCrest(crest);
+    // Formalar seçilmediyse (eski uygulama) armadan türetilir
+    const k = kits ? checkKits(kits) : defaultKits(c);
     const key = nameKey(n);
     if (key.length < 3) throw new AppError('invalid-argument', 'Kulüp adı en az 3 harf içermeli.');
     const ok = await this.store.claimClubName(key, uid);
@@ -246,6 +309,7 @@ export class ClubService {
       short: shortOf(n, short),
       fans: f,
       crest: c,
+      kits: k,
       foundedAt: this.now(),
       levels: Object.fromEntries(FACILITY_IDS.map((x) => [x, 1])),
       build: null,
@@ -257,13 +321,17 @@ export class ClubService {
     return { club: await this._view(uid, p), gift: CLUB.foundingGift, balance };
   }
 
-  /** Arma ve taraftar grubu değiştirilebilir (kulüp adı kalıcıdır). */
-  async edit({ uid, guest = false, fans = null, crest = null, short = null }) {
+  /** Kulüp kimliği kuruluştan sonra değişmez (ad, arma, taraftar grubu, formalar). */
+  async edit({ uid, guest = false }) {
+    await this._club(uid, guest);
+    throw new AppError('failed-precondition', 'Kulüp adı, arması ve formaları kuruluştan sonra değiştirilemez.');
+  }
+
+  /** Formalar seçilmeden kurulmuş (eski) kulüpler formalarını bir kez seçer. */
+  async setKits({ uid, guest = false, kits }) {
     const p = await this._club(uid, guest);
-    const club = { ...p.club };
-    if (fans != null) club.fans = checkText(fans, { min: CLUB.fansMin, max: CLUB.fansMax, what: 'Taraftar grubu adı' });
-    if (crest != null) club.crest = checkCrest(crest);
-    if (short != null) club.short = shortOf(club.name, short);
+    if (p.club.kits?.home) throw new AppError('failed-precondition', 'Formalar kuruluşta seçildi; değiştirilemez.');
+    const club = { ...p.club, kits: checkKits(kits) };
     await this.store.updateProfile(uid, { club });
     p.club = club;
     return { club: await this._view(uid, p) };

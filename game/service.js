@@ -26,7 +26,7 @@ import {
 import { REGIONS } from './nations.js';
 import { fold, tierOf } from './pool.js';
 import { buildQuestions } from './quiz.js';
-import { ClubService, effectsOf } from './club.js';
+import { ClubService, defaultKits, effectsOf, kitsOf, randomCrest } from './club.js';
 import { autoBuild, evaluate, FORMATIONS, slotsOf, teamPower, validateSquad } from './squad.js';
 import { simulateDuel } from './duel.js';
 import { adaptTactic, animFormation, compactCard, DUEL_SECONDS, packOf, pickTactic, playDuel, TACTICS } from './match.js';
@@ -540,7 +540,8 @@ export class GameService {
     return { sold: ids.length, credits: total, balance };
   }
 
-  async _duelSummary(uid, p, squads, cards) {
+  /** En güçlü geçerli kadro: { s, v, power } ya da null. */
+  _bestSquad(squads, cards) {
     const owned = new Map(cards.map((c) => [c.id, c]));
     let best = null;
     for (const s of squads) {
@@ -549,6 +550,11 @@ export class GameService {
       const power = teamPower(v.ev);
       if (!best || power > best.power) best = { s, v, power };
     }
+    return best;
+  }
+
+  async _duelSummary(uid, p, squads, cards) {
+    const best = this._bestSquad(squads, cards);
     if (!best) {
       await this.store.deleteDuelPool(uid).catch(() => {});
       return;
@@ -556,6 +562,10 @@ export class GameService {
     await this.store.upsertDuelPool(uid, {
       username: p.username ?? null,
       name: p.club?.name ?? best.v.name,
+      // Rakip olarak çıktığında kulübün arması, formaları ve taraftar grubu görünür
+      crest: p.club?.crest ?? null,
+      kits: kitsOf(p.club),
+      fans: p.club?.fans ?? null,
       formation: best.s.formation,
       rating: best.v.ev.rating,
       chemistry: best.v.ev.chemistry,
@@ -616,14 +626,16 @@ export class GameService {
     if (list.length) {
       const o = list[rng.int(0, list.length - 1)];
       const lineup = fillLineup({ formation: o.formation, lineup: o.lineup, target: Math.round(power), pool: this.pool, rng });
-      return { name: o.name, username: o.username ?? null, formation: o.formation, lineup, bot: false };
+      const crest = o.crest ?? null;
+      return { name: o.name, username: o.username ?? null, formation: o.formation, lineup, bot: false, crest, kits: o.kits?.home ? o.kits : crest ? defaultKits(crest) : null, fans: o.fans ?? null };
     }
     const target = Math.round(power - 1);
     const cands = this.pool.pick((p) => Math.abs(p.r - target) <= 5, rng, 40);
     const formation = FORMATIONS[rng.int(0, 3)];
     // Rastgele seçilen adaylarda bir mevki eksik kalabilir: boş yuvalar doldurulur (rakip her zaman 11 kişi)
     const lineup = fillLineup({ formation, lineup: autoBuild(cands.map(asCard), formation, 'balanced'), target, pool: this.pool, rng });
-    return { name: 'Karma Takım', username: null, formation, lineup, bot: true };
+    const crest = randomCrest(createRng(`bot:${this.now()}:${target}`));
+    return { name: 'Karma Takım', username: null, formation, lineup, bot: true, crest, kits: defaultKits(crest), fans: null };
   }
 
   async duel({ uid, guest = false, squadId }) {
@@ -631,7 +643,7 @@ export class GameService {
     const day = trDay(this.now());
     const [daily, cards, squads, p] = await Promise.all([this.store.getDaily(uid, day), this.store.listCards(uid), this.store.listSquads(uid), this._profile(uid)]);
     this._needClub(p);
-    if (Number(daily?.duels ?? 0) >= DUEL.daily) throw new AppError('resource-exhausted', 'Bugünkü kapışma hakların bitti; yarın 3 yeni hak.');
+    if (Number(daily?.duels ?? 0) >= DUEL.daily) throw new AppError('resource-exhausted', 'Bugünkü maç hakların bitti; yarın 3 yeni hak.');
     const squad = squads.find((s) => s.id === squadId);
     if (!squad) throw new AppError('not-found', 'Kadro bulunamadı.');
     const v = validateSquad(squad, new Map(cards.map((c) => [c.id, c])));
@@ -678,7 +690,8 @@ export class GameService {
     let cands = this.pool.pick((x) => x.l === reg.league && near(x), rng, 70);
     if (cands.length < 40) cands = cands.concat(this.pool.pick(near, rng, 70, new Set(cands.map((c) => c.id))));
     const lineup = fillLineup({ formation: info.formation, lineup: autoBuild(cands.map(asCard), info.formation, 'chem'), target, pool: this.pool, rng });
-    return { name: info.name, username: null, formation: info.formation, lineup, bot: true, boss: true, league: info.league, iso: info.iso, tactic: pickTactic(createRng(`bosst:${day}`)) };
+    const crest = randomCrest(createRng(`bossc:${day}`));
+    return { name: info.name, username: null, formation: info.formation, lineup, bot: true, boss: true, league: info.league, iso: info.iso, tactic: pickTactic(createRng(`bosst:${day}`)), crest, kits: defaultKits(crest) };
   }
 
   /** Kadronun maç ekranındaki görünümü (yuva sırasıyla 11 oyuncu). */
@@ -698,12 +711,75 @@ export class GameService {
       formation: form.name,
       tactic,
       kit: t.kit ?? null,
+      // Kulüp formaları (ev sahibi, deplasman, kaleci) ve bu maçta giyilen
+      kits: t.kits ?? null,
+      wear: t.wear === 'away' ? 'away' : 'home',
       fans: t.fans ?? null,
       crest: t.crest ?? null,
+      short: t.short ?? null,
       lineup: slots.map((s, i) => {
         const c = t.lineup?.[s.key];
         return { slot: s.key, pos: s.pos, num: form.slots[i].num, name: c?.s ?? '', r: Number(c?.r ?? 0), ph: c?.ph ?? null };
       }),
+    };
+  }
+
+  /** Sıradaki maçın rakibi: gün içinde maç oynanana kadar aynı kalır (profilde metin olarak saklanır). */
+  async _nextOpponent(uid, p, day, power) {
+    const saved = p.nextDuel;
+    if (saved?.day === day && typeof saved.opp === 'string') {
+      try {
+        const o = JSON.parse(saved.opp);
+        if (o?.formation && o.lineup && Object.keys(o.lineup).length >= 11) return o;
+      } catch {
+        // bozuk kayıt: yeni rakip
+      }
+    }
+    const opp = await this._opponent(uid, power, this.random('duel'));
+    const compact = { ...opp, lineup: Object.fromEntries(Object.entries(opp.lineup).filter(([, c]) => c).map(([k, c]) => [k, compactCard(c)])) };
+    await this.store.updateProfile(uid, { nextDuel: { day, at: this.now(), opp: JSON.stringify(compact) } });
+    p.nextDuel = { day, opp: JSON.stringify(compact) };
+    return compact;
+  }
+
+  /**
+   * Sıradaki maç (maç öncesi ekranı): rakip, stadyum ve ödüller. Normal maçta rakip önceden belirlenir ve maç
+   * başlayınca aynı rakiple oynanır; Günün Meydan Okuması güne bağlıdır.
+   */
+  async duelNext({ uid, guest = false, mode = 'normal' }) {
+    this._member(uid, guest);
+    if (mode !== 'normal' && mode !== 'boss') throw new AppError('invalid-argument', 'Geçersiz maç türü.');
+    const day = trDay(this.now());
+    const p = await this._profile(uid);
+    this._needClub(p);
+    const [cards, squads, daily] = await Promise.all([this.store.listCards(uid), this.store.listSquads(uid), this.store.getDaily(uid, day)]);
+    const best = this._bestSquad(squads, cards);
+    if (!best) throw new AppError('failed-precondition', 'Maça çıkmak için önce 11 kişilik bir kadro kur.');
+    await this.pool.ensure?.();
+    const opp = mode === 'boss' ? this._boss(day, best.power) : await this._nextOpponent(uid, p, day, best.power);
+    const oe = evaluate(opp.formation, opp.lineup);
+    const eff = effectsOf(p.club?.levels);
+    const R = mode === 'boss' ? BOSS : DUEL;
+    return {
+      mode,
+      opponent: {
+        name: opp.name,
+        username: opp.username ?? null,
+        bot: opp.bot === true,
+        boss: opp.boss === true,
+        league: opp.league ?? null,
+        iso: opp.iso ?? null,
+        formation: opp.formation,
+        power: Math.round(teamPower(oe) * 10) / 10,
+        rating: oe.rating,
+        chemistry: oe.chemistry,
+        crest: opp.crest ?? null,
+        kits: opp.kits ?? null,
+        fans: opp.fans ?? null,
+      },
+      venue: { name: `${p.club.name} Stadyumu`, capacity: eff.stadium.capacity, incomePct: eff.stadium.incomePct },
+      rewards: [R.win, R.draw, R.loss],
+      left: mode === 'normal' ? Math.max(0, DUEL.daily - Number(daily?.duels ?? 0)) : daily?.boss === true ? 0 : 1,
     };
   }
 
@@ -714,7 +790,7 @@ export class GameService {
   async duelStart({ uid, guest = false, squadId, tactic = 'dengeli', mode = 'normal', kit = null }) {
     this._member(uid, guest);
     if (!TACTICS[tactic]) throw new AppError('invalid-argument', 'Geçersiz taktik.');
-    if (mode !== 'normal' && mode !== 'boss') throw new AppError('invalid-argument', 'Geçersiz kapışma türü.');
+    if (mode !== 'normal' && mode !== 'boss') throw new AppError('invalid-argument', 'Geçersiz maç türü.');
     const day = trDay(this.now());
     let p = await this._profile(uid);
     this._needClub(p);
@@ -724,7 +800,7 @@ export class GameService {
       p = await this._profile(uid);
     }
     const [daily, cards, squads] = await Promise.all([this.store.getDaily(uid, day), this.store.listCards(uid), this.store.listSquads(uid)]);
-    if (mode === 'normal' && Number(daily?.duels ?? 0) >= DUEL.daily) throw new AppError('resource-exhausted', `Bugünkü kapışma hakların bitti; yarın ${DUEL.daily} yeni hak.`);
+    if (mode === 'normal' && Number(daily?.duels ?? 0) >= DUEL.daily) throw new AppError('resource-exhausted', `Bugünkü maç hakların bitti; yarın ${DUEL.daily} yeni hak.`);
     if (mode === 'boss' && daily?.boss === true) throw new AppError('resource-exhausted', 'Günün Meydan Okuması bugün oynandı; yarın yeni rakip seni bekliyor.');
     const squad = squads.find((x) => x.id === squadId);
     if (!squad) throw new AppError('not-found', 'Kadro bulunamadı.');
@@ -733,7 +809,8 @@ export class GameService {
     await this.pool.ensure?.();
     const rng = this.random('duel');
     const power = teamPower(v.ev);
-    const opp = mode === 'boss' ? this._boss(day, power) : await this._opponent(uid, power, rng);
+    // Normal maçta sıradaki maçın rakibi (maç öncesi ekranında gösterilen) sahaya çıkar
+    const opp = mode === 'boss' ? this._boss(day, power) : await this._nextOpponent(uid, p, day, power);
     const oe = evaluate(opp.formation, opp.lineup);
     const kitOk = (k) => (Number.isInteger(k) && k >= 0 && k < 32 ? k : null);
     const me = {
@@ -742,6 +819,10 @@ export class GameService {
       squad: v.name,
       fans: p.club?.fans ?? null,
       crest: p.club?.crest ?? null,
+      short: p.club?.short ?? null,
+      // Takım kulübün formasıyla çıkar: ev sahibi (varsayılan) ya da deplasman
+      kits: kitsOf(p.club),
+      wear: kit === 'away' ? 'away' : 'home',
       formation: squad.formation,
       power: Math.round(power * 10) / 10,
       rating: v.ev.rating,
@@ -762,6 +843,9 @@ export class GameService {
       rating: oe.rating,
       chemistry: oe.chemistry,
       kit: rng.int(0, 11),
+      crest: opp.crest ?? null,
+      kits: opp.kits ?? null,
+      fans: opp.fans ?? null,
       lineup: Object.fromEntries(Object.entries(opp.lineup).filter(([, c]) => c).map(([k, c]) => [k, compactCard(c)])),
     };
     const seed = `duel-${this.now()}-${rng.int(0, 1e9)}`;
@@ -780,12 +864,14 @@ export class GameService {
     };
     if (mode === 'normal') await this.store.incrementDaily(uid, day, 'duels', 1);
     else await this.store.updateDaily(uid, day, { boss: true });
-    await this.store.updateProfile(uid, { pendingDuel: pending });
+    // Rakip sahaya çıktı: sıradaki maç için yeni rakip belirlenir
+    await this.store.updateProfile(uid, { pendingDuel: pending, nextDuel: null });
     const name2 = TACTICS[oppT2].name;
     return {
       duelId: pending.id,
       mode,
       seconds: DUEL_SECONDS,
+      venue: p.club ? `${p.club.name} Stadyumu` : null,
       pack: packOf(first, { firstHalf: true }),
       me: this._teamView(me, tactic),
       opponent: this._teamView(them, oppT1),
@@ -804,13 +890,13 @@ export class GameService {
     this._member(uid, guest);
     if (tactic != null && !TACTICS[tactic]) throw new AppError('invalid-argument', 'Geçersiz taktik.');
     const p = await this._profile(uid);
-    if (!p.pendingDuel || p.pendingDuel.id !== duelId) throw new AppError('not-found', 'Bu kapışma bitmiş ya da bulunamadı.');
+    if (!p.pendingDuel || p.pendingDuel.id !== duelId) throw new AppError('not-found', 'Bu maç bitmiş ya da bulunamadı.');
     return this._finishDuel(uid, p, duelId, tactic);
   }
 
   async _finishDuel(uid, p, duelId, tactic) {
     const pd = await this.store.takePendingDuel(uid, duelId);
-    if (!pd) throw new AppError('not-found', 'Bu kapışma bitmiş ya da bulunamadı.');
+    if (!pd) throw new AppError('not-found', 'Bu maç bitmiş ya da bulunamadı.');
     const me2 = tactic && TACTICS[tactic] ? tactic : pd.me.tactic;
     const match = playDuel({ me: pd.me, opp: pd.opp, seed: pd.seed, tactics: { me1: pd.me.tactic, opp1: pd.opp.tactic, me2, opp2: pd.opp.tacticHT } });
     const sc = match.timeline.score;
