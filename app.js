@@ -20,6 +20,7 @@ export const GUEST_ROUTES = new Set([
   'getEntitlement',
   'getDailyPredictions',
   'getPredictionDetail',
+  'getAiCoupons',
   'getTrackRecord',
   'getVerdicts',
   'getLineupUpdate',
@@ -53,7 +54,7 @@ const STATUS = {
   unavailable: 503,
 };
 
-export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, daily = null, market = null, game = null, social = null, radar = null, capture = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
+export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, daily = null, aiCoupons = null, market = null, game = null, social = null, radar = null, capture = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
   const routes = {
     unlockContent: (d) => service.unlock(d),
     getContent: (d) => service.get(d),
@@ -74,6 +75,8 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
     ...(wheel ? { spinWheel: (d) => wheel.spin(d), getWheel: (d) => wheel.status(d) } : {}),
     // Günlük toplu tahminler (Tahminler sekmesi, Ana Sayfa, Canlı takip)
     ...(daily ? { getDailyPredictions: (d) => daily.list(d), getPredictionDetail: (d) => daily.detail(d) } : {}),
+    // AI günlük kuponlar (Banko / İdeal / Sürpriz, İlk yarı KG Var, İY/MS dönüş)
+    ...(aiCoupons ? { getAiCoupons: (d) => aiCoupons.list(d) } : {}),
     // Canlı Radar: sinyaller, abone olmayanın haftalık açma hakkı, alarm ayarları ve cihaz jetonu
     ...(capture
       ? {

@@ -1,6 +1,6 @@
 // Dış tahmin verisi toplayıcı: önümüzdeki ~48 saatin maçları için dış kaynakların fiyatlarını periyodik okur,
-// olasılığa çevirir ve açılış / son / kapanış anlarını saklar. Veriler YALNIZCA sunucuda model girdisi ve
-// karşılaştırma içindir: uygulamaya oran, kaynak adı ya da bağlantı gönderilmez (yönetici yalnızca kapsama sayılarını görür).
+// olasılığa çevirir ve açılış / son / kapanış anlarını saklar. Veriler sunucuda model girdisi ve karşılaştırma içindir;
+// AI günlük kuponları (ai_coupons.js) oranları buradan alır. Kaynak adı ya da bağlantı uygulamaya gönderilmez.
 //
 // Firestore (istemci kurallarıyla kapalı):
 //   odds/{matchKey} = { key, league, eventId, kickoffMs, home, away, homeId, awayId, source,
@@ -95,8 +95,10 @@ export class MarketCollector {
   /**
    * onUpdate: async (key, snap) → görüntü değişince çağrılır (daily.js → applyMarket: tahminler hareket eder).
    */
-  constructor({ store, matches, sources, leagues = LEAGUES, now = () => Date.now(), perTick = 8, log = console, isAdmin = null, coverageCacheMs = 10 * MIN, onUpdate = null }) {
+  constructor({ store, matches, sources, leagues = LEAGUES, now = () => Date.now(), perTick = 8, log = console, isAdmin = null, coverageCacheMs = 10 * MIN, onUpdate = null, focus = null }) {
     this.store = store;
+    // AI kuponlarındaki maçlar (Set döndüren işlev): son 12 saatte 15 dakikada bir okunur
+    this.focus = focus;
     this.onUpdate = onUpdate;
     this.matches = matches;
     this.sources = sources;
@@ -139,6 +141,15 @@ export class MarketCollector {
   _interval(m, now) {
     const ls = this._leagueState(m.league);
     const base = refreshEvery(m.timestamp - now);
+    if (this.focus && m.timestamp - now <= 12 * HOUR) {
+      let keys = null;
+      try {
+        keys = this.focus();
+      } catch {
+        keys = null;
+      }
+      if (keys?.has(matchKey(m.league, m.id))) return Math.min(base, 15 * MIN);
+    }
     return ls.hits === 0 && ls.checked >= 6 ? base * 4 : base;
   }
 
@@ -297,6 +308,11 @@ export class MarketCollector {
     }
     st.nextAt = Math.min(now + this._interval(m, now), m.timestamp - CLOSE_WINDOW.before);
     if (st.nextAt <= now) st.nextAt = now + MIN;
+  }
+
+  /** Maçın bellekteki kaydı (fiyatlar dahil); yoksa null. */
+  doc(key) {
+    return this._state.get(key)?.doc ?? null;
   }
 
   /** Maçın bellekteki son görüntüsü (yeni hazırlanan tahmin hemen güncel veriyle başlasın). */

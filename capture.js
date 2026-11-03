@@ -11,7 +11,7 @@ import { AppError } from './errors.js';
 
 export const CAPTURE_MAX_KEYS = 12;
 const KEY_RE = /^[A-Za-z0-9_]{3,120}$/;
-const AREAS = new Set(['predictions', 'prediction', 'analysis', 'commentary', 'simulation', 'special', 'ask', 'ai', 'radar', 'other']);
+const AREAS = new Set(['predictions', 'prediction', 'analysis', 'commentary', 'simulation', 'special', 'ask', 'ai', 'radar', 'coupons', 'other']);
 
 export const CAPTURE_MESSAGE = 'Bu maçın AI tahmini, ekran görüntüsü alınmaya çalışıldığı için hesabına kapatıldı.';
 export const captureLocked = () => new AppError('capture-locked', CAPTURE_MESSAGE);

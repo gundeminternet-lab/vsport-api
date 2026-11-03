@@ -7,6 +7,7 @@
 import { baseMatrix, mixtureNodes, scoreMatrix, scoresForOutcome } from './engine/analysis.js';
 import { simulateMatch, simulateToScore } from './engine/simulator.js';
 import { createRng, seedToInt } from './engine/rng.js';
+import { calibrate, calibrateGoals } from './engine/calibration.js';
 import { MODEL, LEAGUES } from './engine/config.js';
 import { buildChoreography } from './engine/animation/choreography.js';
 import { buildPlayers } from './engine/animation/players.js';
@@ -49,6 +50,9 @@ export function markets(lambdaHome, lambdaAway, sigma = 0) {
     iy2: sumMatrix(ht, (i, j) => i < j),
     iyOver05: sumMatrix(ht, (i, j) => i + j >= 1),
   };
+  // Son ayar: karşılıklı gol ve gol çizgileri gerçekte görülen oranlara (engine/calibration.js)
+  p.kgVar = calibrate('kgVar', p.kgVar);
+  Object.assign(p, calibrateGoals(p));
   const scores = [];
   for (let i = 0; i < ft.length; i++) for (let j = 0; j < ft[i].length; j++) scores.push({ score: `${i}-${j}`, p: ft[i][j] });
   scores.sort((a, b) => b.p - a.p);
@@ -316,8 +320,9 @@ export function buildAi(analysis, { editorComment = null, seed = null } = {}) {
     const other = gap > 0 ? A : H;
     const fp = gap > 0 ? hp : ap;
     const op = gap > 0 ? ap : hp;
+    // "Açık favori" yalnızca kazanma ihtimali yarıyı geçince (fark büyük olsa da %49 açık favori sayılmaz)
     overview =
-      Math.abs(gap) > 0.25
+      Math.abs(gap) > 0.25 && fp >= 50
         ? say(
             'ov.big',
             [
