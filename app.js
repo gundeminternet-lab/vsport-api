@@ -135,6 +135,13 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
           duelFinish: (d) => game.duelFinish(d),
           duelBoard: (d) => game.duelBoard(d),
           gameClaimChest: (d) => game.claimChest(d),
+          // Kulüp: kuruluş, arma, tesis yükseltme, taraftar geliri, antrenman
+          clubCreate: (d) => game.club.create(d),
+          clubEdit: (d) => game.club.edit(d),
+          clubGet: (d) => game.club.get(d),
+          clubUpgrade: (d) => game.club.upgrade(d),
+          clubCollect: (d) => game.club.collect(d),
+          clubTrain: (d) => game.club.train(d),
           creditLeaders: (d) => game.leaders(d),
         }
       : {}),
