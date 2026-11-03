@@ -26,6 +26,7 @@ import {
 import { REGIONS } from './nations.js';
 import { fold, tierOf } from './pool.js';
 import { buildQuestions } from './quiz.js';
+import { ClubService, effectsOf } from './club.js';
 import { autoBuild, evaluate, FORMATIONS, slotsOf, teamPower, validateSquad } from './squad.js';
 import { simulateDuel } from './duel.js';
 import { adaptTactic, animFormation, compactCard, DUEL_SECONDS, packOf, pickTactic, playDuel, TACTICS } from './match.js';
@@ -92,12 +93,19 @@ export class GameService {
     this.now = now;
     this.random = random ?? (() => createRng(randomInt(0, 2 ** 31)));
     this.log = log;
+    // Kulüp: kuruluş, tesisler, antrenman (club.js)
+    this.club = new ClubService({ game: this });
     this._quiz = new Map(); // oturum → { uid, day, questions, index, askedAt, score, pro }
   }
 
   _member(uid, guest) {
     if (!uid) throw new AppError('permission-denied', 'Giriş yapmalısınız.');
     if (guest) throw new AppError('unauthenticated', 'Oyunlar için Google ile giriş yap.');
+  }
+
+  /** Kadro, kapışma ve hoşgeldin paketi kulüp ister. */
+  _needClub(p) {
+    if (!p.club) throw new AppError('failed-precondition', 'Önce kulübünü kur: Benim 11\'im › Kulüp kur.');
   }
 
   async _pro(uid) {
@@ -168,6 +176,8 @@ export class GameService {
         this.log.warn?.('[game] yarım kapışma bitirilemedi', e?.message ?? e);
       }
     }
+    // Biten tesis inşaatı seviyeye işlenir
+    if (p.club) await this.club.settle(uid, p).catch((e) => this.log.warn?.('[game] inşaat işlenemedi', e?.message ?? e));
     const week = this._week(this.now());
     const board = await this.store.duelBoardEntry(week, uid).catch(() => null);
     const yesterday = trDay(this.now() - DAY);
@@ -196,6 +206,7 @@ export class GameService {
       packs: Object.values(PACKS).map((k) => ({ id: k.id, name: k.name, cost: k.cost, count: k.count, desc: k.desc, daily: k.daily === true, guaranteed: k.guaranteed ?? 0 })),
       formations: FORMATIONS,
       maxSquads: MAX_SQUADS,
+      club: this.club.view(p.club ?? null, { trainingToday: Number(daily?.training ?? 0), wins: Number(p.duelTotals?.w ?? 0) }),
       poolReady: this.pool.ready,
       streak: { count: streakAlive ? Number(p.streak?.count ?? 0) : 0, best: Number(p.streak?.best ?? 0), today: p.streak?.lastDay === day, bonuses: STREAK_BONUS },
       chest: { reward: MISSION_CHEST, ready: allClaimed && daily?.chest !== true, claimed: daily?.chest === true },
@@ -484,6 +495,7 @@ export class GameService {
     const r = REGIONS[region];
     if (!r) throw new AppError('invalid-argument', 'Geçersiz bölge.');
     const p = await this._profile(uid);
+    this._needClub(p);
     if (p.welcomeDone) throw new AppError('failed-precondition', 'Hoşgeldin paketi yalnızca bir kez açılır.');
     await this.pool.ensure?.();
     const rng = this.random(`welcome:${region}`);
@@ -543,7 +555,7 @@ export class GameService {
     }
     await this.store.upsertDuelPool(uid, {
       username: p.username ?? null,
-      name: best.v.name,
+      name: p.club?.name ?? best.v.name,
       formation: best.s.formation,
       rating: best.v.ev.rating,
       chemistry: best.v.ev.chemistry,
@@ -555,6 +567,7 @@ export class GameService {
   async saveSquad({ uid, guest = false, id = null, name, formation, slots }) {
     this._member(uid, guest);
     const [cards, squads, p] = await Promise.all([this.store.listCards(uid), this.store.listSquads(uid), this._profile(uid)]);
+    this._needClub(p);
     if (!id && squads.length >= MAX_SQUADS) throw new AppError('failed-precondition', `En fazla ${MAX_SQUADS} kadro kurabilirsin.`);
     if (id && !squads.some((s) => s.id === id)) throw new AppError('not-found', 'Kadro bulunamadı.');
     const owned = new Map(cards.map((c) => [c.id, c]));
@@ -617,6 +630,7 @@ export class GameService {
     this._member(uid, guest);
     const day = trDay(this.now());
     const [daily, cards, squads, p] = await Promise.all([this.store.getDaily(uid, day), this.store.listCards(uid), this.store.listSquads(uid), this._profile(uid)]);
+    this._needClub(p);
     if (Number(daily?.duels ?? 0) >= DUEL.daily) throw new AppError('resource-exhausted', 'Bugünkü kapışma hakların bitti; yarın 3 yeni hak.');
     const squad = squads.find((s) => s.id === squadId);
     if (!squad) throw new AppError('not-found', 'Kadro bulunamadı.');
@@ -684,6 +698,8 @@ export class GameService {
       formation: form.name,
       tactic,
       kit: t.kit ?? null,
+      fans: t.fans ?? null,
+      crest: t.crest ?? null,
       lineup: slots.map((s, i) => {
         const c = t.lineup?.[s.key];
         return { slot: s.key, pos: s.pos, num: form.slots[i].num, name: c?.s ?? '', r: Number(c?.r ?? 0), ph: c?.ph ?? null };
@@ -701,6 +717,7 @@ export class GameService {
     if (mode !== 'normal' && mode !== 'boss') throw new AppError('invalid-argument', 'Geçersiz kapışma türü.');
     const day = trDay(this.now());
     let p = await this._profile(uid);
+    this._needClub(p);
     let resolved = null;
     if (p.pendingDuel) {
       resolved = await this._finishDuel(uid, p, p.pendingDuel.id, null).catch(() => null);
@@ -720,7 +737,11 @@ export class GameService {
     const oe = evaluate(opp.formation, opp.lineup);
     const kitOk = (k) => (Number.isInteger(k) && k >= 0 && k < 32 ? k : null);
     const me = {
-      name: v.name,
+      // Takım sahada kulübün adıyla çıkar; taraftar grubu ve arma maç ekranında görünür
+      name: p.club?.name ?? v.name,
+      squad: v.name,
+      fans: p.club?.fans ?? null,
+      crest: p.club?.crest ?? null,
       formation: squad.formation,
       power: Math.round(power * 10) / 10,
       rating: v.ev.rating,
@@ -795,10 +816,14 @@ export class GameService {
     const sc = match.timeline.score;
     const result = sc.home > sc.away ? 'W' : sc.home === sc.away ? 'D' : 'L';
     const R = pd.mode === 'boss' ? BOSS : DUEL;
-    const reward = result === 'W' ? R.win : result === 'D' ? R.draw : R.loss;
+    const baseReward = result === 'W' ? R.win : result === 'D' ? R.draw : R.loss;
+    // Stadyum geliri: stadyum seviyesine göre maç ödülüne yüzde eklenir
+    const incomePct = p.club ? effectsOf(p.club.levels).stadium.incomePct : 0;
+    const stadiumBonus = Math.round((baseReward * incomePct) / 100);
+    const reward = baseReward + stadiumBonus;
     const totals = { w: Number(p.duelTotals?.w ?? 0), d: Number(p.duelTotals?.d ?? 0), l: Number(p.duelTotals?.l ?? 0) };
     totals[result === 'W' ? 'w' : result === 'D' ? 'd' : 'l']++;
-    const record = { at: this.now(), squad: pd.me.name, opponent: pd.opp.name, opponentUser: pd.opp.username ?? null, score: [sc.home, sc.away], result, reward, mode: pd.mode };
+    const record = { at: this.now(), squad: pd.me.squad ?? pd.me.name, opponent: pd.opp.name, opponentUser: pd.opp.username ?? null, score: [sc.home, sc.away], result, reward, mode: pd.mode };
     await this.store.updateProfile(uid, { duels: [record, ...(p.duels ?? [])].slice(0, 10), duelTotals: totals });
     if (result === 'W') await this.store.incrementDaily(uid, pd.day, 'duelWins', 1);
     const week = this._week(Number(pd.at ?? this.now()));
@@ -818,6 +843,7 @@ export class GameService {
       halftimeScore: [match.timeline.halftimeScore.home, match.timeline.halftimeScore.away],
       result,
       reward,
+      stadiumBonus,
       balance,
       goals: match.goals,
       reds: match.reds,

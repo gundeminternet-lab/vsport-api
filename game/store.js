@@ -14,6 +14,8 @@
 //   duel_boards/{hafta}/entries/{uid}        { points, played, w, d, l, gf, ga, username, photoURL, updatedAt }
 //   game_profiles/{uid}.pendingDuel          devre arasındaki kapışma (ikinci yarı taktiği bekleniyor)
 //   game_pool/{lig}                          oyuncu havuzu (pool.js)
+//   game_profiles/{uid}.club                 kulüp, tesisler ve inşaat (club.js)
+//   club_names/{ad}                          { uid }  kulüp adı tekil
 
 import { AppError } from '../errors.js';
 
@@ -108,6 +110,19 @@ export function createGameStore(db, FieldValue) {
       const batch = db.batch();
       for (const id of ids) batch.delete(prof(uid).collection('cards').doc(id));
       await batch.commit();
+    },
+    async updateCard(uid, id, patch) {
+      await prof(uid).collection('cards').doc(id).set(patch, { merge: true });
+    },
+    /** Kulüp adını ayırır (tekil). Ad boşsa ya da zaten bu kullanıcınınsa true. */
+    async claimClubName(key, uid) {
+      const ref = db.doc(`club_names/${key}`);
+      return db.runTransaction(async (tx) => {
+        const s = await tx.get(ref);
+        if (s.exists && s.get('uid') !== uid) return false;
+        if (!s.exists) tx.set(ref, { uid, at: FieldValue.serverTimestamp() });
+        return true;
+      });
     },
     async listSquads(uid) {
       const q = await prof(uid).collection('squads').limit(10).get();

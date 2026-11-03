@@ -255,6 +255,7 @@ test('bilgi yarışması: doğru cevapla devam, yanlışta biter ve doğru baş�
 test('hoşgeldin paketi: bölgeden 18 oyuncu (2 KL, 6 DEF, 6 OS, 4 FV), bir kez', async () => {
   const { s, store } = svc();
   await s.state({ uid: 'u1' });
+  await s.club.create({ uid: 'u1', name: 'u1 Spor', fans: 'Tribün Aslanları', crest: { shape: 0, primary: 0, secondary: 1, symbol: 0, pattern: 0 } }).catch(() => {});
   const w = await s.welcomePack({ uid: 'u1', region: 'tur' });
   assert.equal(w.cards.length, 18);
   const count = (g) => w.cards.filter((c) => c.g === g).length;
@@ -286,6 +287,7 @@ test('paketler: ücretsiz günlük paket bir kez, ücretli pakette kredi düşer
 
 async function squadReady(s, uid) {
   await s.state({ uid });
+  await s.club.create({ uid, name: `${uid} Spor`, fans: 'Tribün Aslanları', crest: { shape: 0, primary: 0, secondary: 1, symbol: 0, pattern: 0 } }).catch(() => {});
   const w = await s.welcomePack({ uid, region: 'tur' });
   const byG = (g) => w.cards.filter((c) => c.g === g).map((c) => c.id);
   const kl = byG('KL'), def = byG('DEF'), os = byG('OS'), fv = byG('FV');

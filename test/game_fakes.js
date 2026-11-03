@@ -100,6 +100,17 @@ export function memoryGameStore({ users = {} } = {}) {
       const m = s.cards.get(uid) ?? new Map();
       for (const id of ids) m.delete(id);
     },
+    async updateCard(uid, id, patch) {
+      const m = s.cards.get(uid) ?? new Map();
+      if (m.has(id)) m.set(id, { ...m.get(id), ...clone(patch) });
+    },
+    clubNames: new Map(),
+    async claimClubName(key, uid) {
+      const owner = s.clubNames.get(key);
+      if (owner && owner !== uid) return false;
+      s.clubNames.set(key, uid);
+      return true;
+    },
     async listSquads(uid) {
       return [...(s.squads.get(uid) ?? new Map()).entries()].map(([id, x]) => ({ id, ...clone(x) }));
     },

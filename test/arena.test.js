@@ -21,6 +21,7 @@ function svc({ now = () => NOW } = {}) {
 
 async function squadReady(s, uid) {
   await s.state({ uid });
+  await s.club.create({ uid, name: `${uid} Spor`, fans: 'Tribün Aslanları', crest: { shape: 0, primary: 0, secondary: 1, symbol: 0, pattern: 0 } }).catch(() => {});
   const w = await s.welcomePack({ uid, region: 'tur' });
   const byG = (g) => w.cards.filter((c) => c.g === g).map((c) => c.id);
   const kl = byG('KL'), def = byG('DEF'), os = byG('OS'), fv = byG('FV');
