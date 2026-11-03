@@ -56,6 +56,7 @@ import { GameService } from './game/service.js';
 import { createGameStore } from './game/store.js';
 import { PlayerPool } from './game/pool.js';
 import { SocialService, createSocialStore } from './social.js';
+import { NewsService, createNewsStore, feedsFromEnv, DEFAULT_FEEDS } from './news.js';
 
 function serviceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -96,7 +97,7 @@ const store = {
 };
 
 /** /version ve Tahminler tanılamasında görünen sürüm. */
-const SERVER_VERSION = '2026-11-03-kupon-1';
+const SERVER_VERSION = '2026-11-03-haber-1';
 const espn = new EspnClient();
 const trackService = new TrackService({ store: createTrackStore(db), espn });
 // Abonelik: Google Play doğrulaması + erişim denetimi (bitmiş görünen Play aboneliği mağazadan yeniden okunur)
@@ -149,6 +150,13 @@ const playerPool = new PlayerPool({ store: gameStore, espn });
 const game = new GameService({ store: gameStore, pool: playerPool, access });
 const social = new SocialService({
   store: createSocialStore(db, FieldValue),
+  isAdmin: async (uid) => (await db.doc(`users/${uid}`).get()).get('role') === 'admin',
+});
+// Sosyal → Haberler: ücretsiz RSS beslemelerinden günlük futbol haberleri; yorum yazan Sosyal'deki kullanıcı adıyla görünür
+const news = new NewsService({
+  store: createNewsStore(db, FieldValue),
+  author: (uid, guest) => social._author(uid, guest),
+  feeds: feedsFromEnv(process.env.NEWS_FEEDS) ?? DEFAULT_FEEDS,
   isAdmin: async (uid) => (await db.doc(`users/${uid}`).get()).get('role') === 'admin',
 });
 // Canlı Radar: başlamış maçlarda baskı sinyalleri; bildirim yalnızca PRO abonelerin cihazlarına (jetonla, konuyla değil)
@@ -207,6 +215,7 @@ const api = createApi({
   market,
   game,
   social,
+  news,
   progress,
   track: trackService,
   lineup: new LineupService({ paid: paidService, espn }),
@@ -238,6 +247,10 @@ const api = createApi({
     // Dış tahmin verisi toplayıcısı: okuma, bulunan, kapanan maç sayıları (kaynak adı içermez)
     get market() {
       return market?.status() ?? null;
+    },
+    // Haber beslemeleri: hangi besleme okundu, kaç haber var
+    get news() {
+      return news.status();
     },
     get memoryMb() {
       return Math.round(process.memoryUsage().rss / 1048576);
@@ -319,6 +332,13 @@ setTimeout(() => {
   build();
   setInterval(build, 60e3);
 }, 70e3);
+
+// Haberler: 15 dakikada bir beslemeler okunur (liste açılınca da gerekirse yenilenir)
+setTimeout(() => {
+  const pull = () => news.refresh().then((n) => n && console.log(`[news] ${n} yeni haber`)).catch((e) => console.error('[news]', e?.message ?? e));
+  pull();
+  setInterval(pull, 15 * 60e3);
+}, 25e3);
 
 // Dış tahmin verisi: günlük tahmin hattıyla aynı fikstür planını kullanır, dakikada en fazla 8 maç okur
 if (market) {

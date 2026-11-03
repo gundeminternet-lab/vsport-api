@@ -5,6 +5,7 @@
 //   POST /api/{ad}  { data: {...} }   → 200 { result } | 4xx/5xx { error: { code, message } }
 //   POST /play/rtdn?secret=…            → Google Play abonelik bildirimi (Pub/Sub push)
 //        ad: getRadar | getRadarSignal | revealRadarSignal | getRadarAlarms | saveRadarAlarms | registerPushToken | sendTestPush | unlockContent | getContent | getReview | unlockCoupon | unlockSpecial | getSpecial | assistantAnalyze | getTrackRecord | getLineupUpdate | getLiveForecast | getWeeklyBulletin | readCouponImage | getStoryReview | deleteAccount | getVerdicts | verifyPlaySubscription | getEntitlement | spinWheel | getWheel | getDailyPredictions | getPredictionDetail | adminMarketStatus
+//            getNews | getNewsComments | addNewsComment | deleteNewsComment
 //            setFeatured | clearFeatured | adminSetSubscription (ve diğer yönetim/ödül/ses uçları)
 //   Authorization: Bearer <Firebase ID token>   (uygulama her istekte gönderir)
 //   Misafir (Firebase anonim oturum) yalnızca GUEST_ROUTES'taki okuma uçlarını kullanabilir; deneme hakkı, çark,
@@ -21,6 +22,9 @@ export const GUEST_ROUTES = new Set([
   'getDailyPredictions',
   'getPredictionDetail',
   'getAiCoupons',
+  // Sosyal → Haberler: misafir haberleri ve yorumları okur (yorum yazmak için giriş gerekir)
+  'getNews',
+  'getNewsComments',
   'getTrackRecord',
   'getVerdicts',
   'getLineupUpdate',
@@ -54,7 +58,7 @@ const STATUS = {
   unavailable: 503,
 };
 
-export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, daily = null, aiCoupons = null, market = null, game = null, social = null, radar = null, capture = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
+export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, daily = null, aiCoupons = null, market = null, game = null, social = null, news = null, radar = null, capture = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
   const routes = {
     unlockContent: (d) => service.unlock(d),
     getContent: (d) => service.get(d),
@@ -133,6 +137,15 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
           socialFollow: (d) => social.follow(d),
           presence: (d) => social.presence(d),
           communityStats: (d) => social.stats(d),
+        }
+      : {}),
+    // Günlük futbol haberleri ve haber yorumları
+    ...(news
+      ? {
+          getNews: (d) => news.list(d),
+          getNewsComments: (d) => news.comments(d),
+          addNewsComment: (d) => news.comment(d),
+          deleteNewsComment: (d) => news.removeComment(d),
         }
       : {}),
     // Yönetici: dış tahmin verisinin lig bazında kapsaması (yalnızca sayılar)
