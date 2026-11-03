@@ -18,9 +18,12 @@
 import { mixtureNodes } from './analysis.js';
 
 export const LIVE = Object.freeze({
-  ramp: 0.5, // gol yoğunluğu: r(t) = 1 + ramp·t/90 → ilk yarıda gollerin yaklaşık %45'i
-  stoppage1: 2.5, // ilk yarı beklenen uzatma (dk)
-  stoppage2: 5.5, // ikinci yarı beklenen uzatma (dk)
+  // Zaman eğrisi: 2025-26 gol dakikalı gerçek maçlarla (Premier Lig, Bundesliga; 647 maç) dakika dakika ayarlandı.
+  // Uzun uzatma kuralından (2023-24) sonra son dakikalarda çok daha fazla gol atılıyor; eski değerler (0.5 / 2.5 / 5.5)
+  // 80. dakikadan sonra "başka gol olur" ihtimalini ~9 puan düşük veriyordu.
+  ramp: 0.6, // gol yoğunluğu: r(t) = 1 + ramp·t/90 → ilk yarıda gollerin ~%42,5'i (2025-26 gerçek: %43,9)
+  stoppage1: 4.5, // ilk yarı beklenen uzatma (dk)
+  stoppage2: 8, // ikinci yarı beklenen uzatma (dk)
   sotXg: 0.24, // isabetli şut başına kaba gol değeri
   shotXg: 0.04, // isabetsiz / bloklanan şut başına
   priorShots: 3, // maç öncesi gücün "maç" cinsinden ağırlığı (şut verisi varken); yapay maç denemesinde en iyi 2-3

@@ -20,8 +20,9 @@ const sampleXg = (rng) => XG_MIN + XG_SPAN * rng.next() ** XG_EXP;
 
 // Maç saati: uzatma dakikaları dahil. c = 0'dan başlayan "saat dakikası".
 function buildClock(rng, fixed = null) {
-  const s1 = fixed ? fixed.s1 : rng.pickWeighted([1, 2, 3, 4], [0.3, 0.4, 0.2, 0.1]);
-  const s2 = fixed ? fixed.s2 : rng.pickWeighted([2, 3, 4, 5, 6, 7], [0.15, 0.25, 0.25, 0.15, 0.12, 0.08]);
+  // Uzatmalar: 2023-24'ten beri uzun (ilk yarı ~4, ikinci yarı ~7-8 dk)
+  const s1 = fixed ? fixed.s1 : rng.pickWeighted([2, 3, 4, 5, 6], [0.15, 0.3, 0.3, 0.15, 0.1]);
+  const s2 = fixed ? fixed.s2 : rng.pickWeighted([4, 5, 6, 7, 8, 9, 10, 11], [0.06, 0.12, 0.2, 0.22, 0.18, 0.12, 0.06, 0.04]);
   const firstHalfClock = 45 + s1;
   const total = firstHalfClock + 45 + s2;
   const slots = [];
@@ -44,15 +45,17 @@ function buildClock(rng, fixed = null) {
 
 // Dakika temposu: maçın başı sakin, ikinci yarı ve son dakikalar daha gollü. Büyük liglerde gollerin ~%44-45'i
 // ilk yarıda atılır; ilk yarının orta bölümü buna göre ayarlı (önceki 1,0 → ilk yarı payı ~%47'ydi).
+// Gol dakikalı 2025-26 maçlarıyla (647 maç) ayarlandı: gollerin %11'i ilk 15 dakikada, %25'i 76. dakikadan sonra
+// (uzatmalar dahil).
 function tempoOf(slot) {
   if (slot.half === 1) {
-    if (slot.minute <= 10 && !slot.extra) return 0.86;
-    if (slot.minute >= 38) return 1.0;
-    return 0.95;
+    if (slot.minute <= 10 && !slot.extra) return 0.78;
+    if (slot.extra || slot.minute >= 38) return 1.06;
+    return 0.92;
   }
-  if (slot.extra || slot.minute >= 85) return 1.16;
+  if (slot.extra || slot.minute >= 85) return 1.2;
   if (slot.minute >= 75) return 1.1;
-  return 1.02;
+  return 0.98;
 }
 
 function cardTempoOf(slot) {
@@ -86,7 +89,7 @@ function calibrateScales(lam) {
   const hit = scaleCache.get(key);
   if (hit) return hit;
 
-  const { slots, total } = buildClock(null, { s1: 2, s2: 4 }); // ortalama uzatma düzeni
+  const { slots, total } = buildClock(null, { s1: 4, s2: 7 }); // ortalama uzatma düzeni
   const tempo = normalise(slots.map(tempoOf));
   const pois = (g) => {
     const p = [Math.exp(-g)];

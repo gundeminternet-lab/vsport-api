@@ -28,6 +28,17 @@ import {
   resolveSignal,
 } from './radar.js';
 
+/**
+ * Öğrenme katsayısı: tutan sinyal sayısı / ham modelin beklediği tutma sayısı. Az veride 1'e çekilir (LEARN_PRIOR
+ * sahte sinyal), 0,6-1,5 arasında sınırlıdır. c: { n, hit, p } (p: beklenen tutma toplamı).
+ */
+export const LEARN_PRIOR = 15;
+export function learnedFactor(c) {
+  if (!c || !(c.n > 0) || !(c.p > 0)) return 1;
+  const k = (c.hit + LEARN_PRIOR) / (c.p + LEARN_PRIOR);
+  return Math.min(1.5, Math.max(0.6, k));
+}
+
 export const FREE_REVEALS = 3;
 export const MAX_RULES = 10;
 export const MAX_TOKENS = 5;
@@ -323,7 +334,7 @@ export class RadarService {
       index: f.index,
       label: STAR_LABELS[f.stars],
       pressure: f.pressure,
-      chance: f.chance,
+      chance: await this._learnedChance(f),
       // Süre sonu saati: ilk yarıdaki sinyalde saat + süre (uzatma, sonuçta süreye eklenir), sonra oynanan dakikadan
       target: { ...f.target, deadlineLabel: f.target.untilEnd ? 'MS' : f.e <= 45 ? `${Math.round(f.target.deadline)}'` : clockOf(f.target.deadline, h1) },
       view: { source: view.source, w5: view.w5, w10: view.w10, total: view.total },
@@ -523,6 +534,47 @@ export class RadarService {
   _show(sig, v) {
     if (sig.status !== 'open' || v.subscribed || v.revealed.has(sig.id)) return publicView(sig);
     return lockedView(sig);
+  }
+
+  /**
+   * Radar kendi geçmişinden öğrenir: son 30 günde sonuçlanan sinyallerde tutma oranı ile ham modelin verdiği ortalama
+   * ihtimal karşılaştırılır; aradaki oran sonraki sinyallerin gösterilen ihtimaline uygulanır (az veride 1'e çekilir).
+   * Önbellek 6 saat.
+   */
+  async _learned() {
+    if (this._calib && this.now() - this._calib.at < 6 * HOUR) return this._calib.value;
+    const days = [];
+    for (let k = 0; k < 30; k++) days.push(new Date(this.now() + 3 * HOUR - k * 24 * HOUR).toISOString().slice(0, 10));
+    const docs = (await this.store.getStats?.(days).catch(() => [])) ?? [];
+    const value = {};
+    for (const d of docs) {
+      for (const [k, v] of Object.entries(d.calib ?? {})) {
+        const c = (value[k] ??= { n: 0, hit: 0, p: 0 });
+        c.n += Number(v?.n ?? 0);
+        c.hit += Number(v?.hit ?? 0);
+        c.p += Number(v?.p ?? 0);
+      }
+    }
+    this._calib = { at: this.now(), value };
+    return value;
+  }
+
+  async _learnedChance(f) {
+    const ch = f.chance;
+    if (!ch || !Number.isFinite(ch.p)) return ch;
+    let value = {};
+    try {
+      value = await this._learned();
+    } catch {
+      value = {};
+    }
+    // Tür+yıldız yeterli veri yoksa türün bütün yıldızları birlikte
+    const same = value[`${f.type}_${f.stars}`];
+    const all = Object.entries(value).filter(([k]) => k.startsWith(`${f.type}_`)).reduce((a, [, v]) => ({ n: a.n + v.n, hit: a.hit + v.hit, p: a.p + v.p }), { n: 0, hit: 0, p: 0 });
+    const k = learnedFactor(same && same.n >= 20 ? same : all);
+    const adj = (v) => Math.round(Math.min(0.95, Math.max(0.03, v * k)) * 100) / 100;
+    // Baskısız ihtimal de aynı katsayıyla: "baskı olmasaydı" karşılaştırması tutarlı kalır
+    return { ...ch, raw: ch.p, p: adj(ch.p), base: Number.isFinite(ch.base) ? adj(ch.base) : ch.base, learned: Math.round(k * 100) / 100 };
   }
 
   /** Son 7 günün karnesi (radar_stats günlükleri, 10 dakika saklanır). */
@@ -751,6 +803,8 @@ export function createRadarStore(db, FieldValue) {
           hit: inc(hit ? 1 : 0),
           byStars: { [sig.stars]: { n: inc(1), hit: inc(hit ? 1 : 0) } },
           byType: { [sig.type]: { n: inc(1), hit: inc(hit ? 1 : 0) } },
+          // Öğrenme: sinyal anında ham modelin verdiği ihtimal (tutma oranıyla kıyaslanır, bkz. learnedFactor)
+          calib: { [`${sig.type}_${sig.stars}`]: { n: inc(1), hit: inc(hit ? 1 : 0), p: inc(Number(sig.chance?.raw ?? sig.chance?.p ?? 0)) } },
         },
         { merge: true },
       );

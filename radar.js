@@ -13,6 +13,8 @@
 // Yıldızlar baskının yoğunluğudur (★ Baskı, ★★ Güçlü baskı, ★★★ Çok güçlü baskı). Sinyal anındaki veriler dondurulur;
 // sonrasında hedefin (takımın golü, maçta gol, korner) süre içinde gerçekleşip gerçekleşmediği izlenir.
 
+import { LIVE } from './engine/live_model.js';
+
 export const RADAR = Object.freeze({
   window: 10, // baskı penceresi (dk)
   short: 5, // kısa pencere: baskı sürüyor mu
@@ -410,7 +412,8 @@ export function teamRate(m, side, lambdas = null, view = null) {
 /** [minutes] dk içinde gol ihtimali (0-1): hız zamanla artar (maç sonuna doğru daha çok gol). */
 export function chanceIn(rate, fromE, minutes, mult = 1) {
   let mass = 0;
-  for (let t = 0; t < minutes; t++) mass += rate * mult * (1 + (0.5 * Math.min(95, fromE + t)) / 90) / 1.25;
+  // Zaman eğrisi canlı modelle aynı (engine/live_model.js → LIVE.ramp; ortalaması 1 olacak biçimde)
+  for (let t = 0; t < minutes; t++) mass += (rate * mult * (1 + (LIVE.ramp * Math.min(95, fromE + t)) / 90)) / (1 + LIVE.ramp / 2);
   return 1 - Math.exp(-mass);
 }
 

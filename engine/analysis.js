@@ -1,6 +1,7 @@
 // Analiz motoru: takımların geçmiş maçları, form, lig durumu, gol ortalamaları ve H2H verisinden
 // iki takımın bu maçtaki "beklenen gol" (λ) değerlerini ve sonuç olasılıklarını hesaplar.
 
+import { calibrate, calibrateGoals } from './calibration.js';
 import { MODEL, LEAGUES } from './config.js';
 import { ratingLambdas, crossRatingLambdas } from './ratings.js';
 
@@ -232,13 +233,14 @@ export function matchProbabilities(lh, la, sigma = 0) {
     }
   }
   scores.sort((a, b) => b.p - a.p);
+  const goals = calibrateGoals({ over15, over25, over35: over25 });
   return {
     homeWin,
     draw,
     awayWin,
-    over15,
-    over25,
-    btts,
+    over15: goals.over15,
+    over25: goals.over25,
+    btts: calibrate('kgVar', btts),
     topScores: scores.slice(0, 5).map((s) => ({ score: s.score, p: round(s.p, 3) })),
   };
 }

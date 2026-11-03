@@ -8,6 +8,7 @@
 //   open / close / current: aynı alanların açılış, kapanış ve güncel değerleri (varsa)
 // Biçim liglere ve sağlayıcılara göre değişebildiği için her alan isteğe bağlıdır; okunamayan pazar atlanır.
 
+import { uncalibrate } from './calibration.js';
 import { baseMatrix } from './analysis.js';
 import { MODEL } from './config.js';
 
@@ -274,11 +275,14 @@ function outcomeProbs(m) {
 export function marketLambdas({ x12, ou = null }, { rho = MODEL.dcRho, maxG = 10 } = {}) {
   if (!x12) return null;
   const line = ou && Number.isFinite(ou.line) ? (Number.isInteger(ou.line * 2) ? ou.line : null) : null;
+  // Piyasanın alt/üst görüşü gerçek dünya oranıdır; ham tabloyla kıyaslamak için kalibrasyonun tersi alınır
+  const lineKey = { 1.5: 'over15', 2.5: 'over25', 3.5: 'over35' }[line];
+  const overRaw = line === null ? null : lineKey ? uncalibrate(lineKey, ou.over) : ou.over;
   const err = (lh, la) => {
     const m = baseMatrix(lh, la, rho, maxG);
     const o = outcomeProbs(m);
     let e = (o.h - x12.home) ** 2 + (o.a - x12.away) ** 2 + (o.d - x12.draw) ** 2;
-    if (line !== null) e += (overProb(m, line) - ou.over) ** 2;
+    if (line !== null) e += (overProb(m, line) - overRaw) ** 2;
     return e;
   };
   let best = { lh: 1.4, la: 1.1, e: Infinity };
