@@ -118,6 +118,20 @@ export class PaidContentService {
   /** İçerik maç başına bir kez üretilir ve saklanır; herkes aynı analizi ve aynı simülasyonu görür. */
   async contentFor(match, { asOf } = {}) {
     const key = matchKey(match.league, match.id);
+    // Aynı maç için eşzamanlı istekler (ör. biten maçta karşılaştırma ve simülasyon karnesi) tek hesaplamayı paylaşır
+    this._contentInflight ??= new Map();
+    const pending = this._contentInflight.get(key);
+    if (pending) return pending;
+    const p = this._contentFor(match, key, asOf);
+    this._contentInflight.set(key, p);
+    try {
+      return await p;
+    } finally {
+      this._contentInflight.delete(key);
+    }
+  }
+
+  async _contentFor(match, key, asOf) {
     const cached = await this.store.getContent(key);
     if (cached && cached.version === CONTENT_VERSION) return cached;
 
