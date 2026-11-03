@@ -11,6 +11,11 @@ import { memoryGameStore, syntheticPool } from './game_fakes.js';
 
 const NOW = Date.UTC(2026, 9, 28, 9, 0);
 const crest = { shape: 2, primary: 3, secondary: 5, symbol: 7, pattern: 1 };
+const kits = {
+  home: { pattern: 1, shirt: 3, second: 4, shorts: 4, socks: 3 },
+  away: { pattern: 0, shirt: 4, second: 3, shorts: 3, socks: 4 },
+  gk: { pattern: 0, shirt: 9, second: 5, shorts: 9, socks: 9 },
+};
 
 function svc(clock = { t: NOW }) {
   const store = memoryGameStore({ users: { u1: { username: 'tostcu23' }, u2: { username: 'rakip' } } });
@@ -159,11 +164,64 @@ test('antrenman: gelişim puanı birikir, güç artar, günlük hak ve akademi s
   await assert.rejects(s.club.train({ uid: 'u1', cardId: card.id, drill: 'teknik' }), /gelişim sınırında/);
 });
 
-test('kulüp düzenleme: arma ve taraftar grubu değişir, ad kalıcı', async () => {
+test('kulüp kimliği kilitli: ad, arma ve taraftar grubu kuruluştan sonra değişmez', async () => {
   const { s } = svc();
-  await s.club.create({ uid: 'u1', name: 'Kuzey Yıldızı', fans: 'Kuzey Aslanları', crest });
-  const r = await s.club.edit({ uid: 'u1', fans: 'Yıldız Ordusu', crest: { ...crest, symbol: 2 } });
-  assert.equal(r.club.fans, 'Yıldız Ordusu');
-  assert.equal(r.club.crest.symbol, 2);
-  assert.equal(r.club.name, 'Kuzey Yıldızı');
+  await s.club.create({ uid: 'u1', name: 'Kuzey Yıldızı', fans: 'Kuzey Aslanları', crest, kits });
+  await assert.rejects(s.club.edit({ uid: 'u1', fans: 'Yıldız Ordusu', crest: { ...crest, symbol: 2 } }), /değiştirilemez/);
+  const st = await s.club.get({ uid: 'u1' });
+  assert.equal(st.club.fans, 'Kuzey Aslanları');
+  assert.equal(st.club.crest.symbol, crest.symbol);
+  // Formalar kuruluşta seçildi: yeniden seçilemez
+  await assert.rejects(s.club.setKits({ uid: 'u1', kits }), /değiştirilemez/);
+});
+
+test('formalar: kuruluşta seçilir ve denetlenir; eski kulüp bir kez seçer', async () => {
+  const { s, store } = svc();
+  await assert.rejects(s.club.create({ uid: 'u1', name: 'Kuzey Spor', fans: 'Aslanlar', crest, kits: { ...kits, away: { ...kits.away, shirt: kits.home.shirt } } }), /ana rengi farklı/);
+  await assert.rejects(s.club.create({ uid: 'u1', name: 'Kuzey Spor', fans: 'Aslanlar', crest, kits: { ...kits, gk: { ...kits.gk, shirt: kits.away.shirt } } }), /Kaleci/);
+  await assert.rejects(s.club.create({ uid: 'u1', name: 'Kuzey Spor', fans: 'Aslanlar', crest, kits: { ...kits, home: { ...kits.home, pattern: 1, second: kits.home.shirt } } }), /iki rengi/);
+  await assert.rejects(s.club.create({ uid: 'u1', name: 'Kuzey Spor', fans: 'Aslanlar', crest, kits: { ...kits, home: { ...kits.home, socks: 99 } } }), /Geçersiz/);
+  const r = await s.club.create({ uid: 'u1', name: 'Kuzey Spor', fans: 'Aslanlar', crest, kits });
+  assert.deepEqual(r.club.kits, kits);
+  assert.equal(r.club.kitsChosen, true);
+  assert.equal(r.club.venue, 'Kuzey Spor Stadyumu');
+  // Formasız kurulmuş eski kulüp: armadan türetilen formalar görünür, bir kez seçilebilir
+  await s.club.create({ uid: 'u2', name: 'Güney Spor', fans: 'Güneyliler', crest: { ...crest, primary: 1, secondary: 4 } });
+  const old = store.profiles.get('u2');
+  delete old.club.kits;
+  const v = await s.club.get({ uid: 'u2' });
+  assert.equal(v.club.kitsChosen, false);
+  assert.equal(v.club.kits.home.shirt, 1);
+  assert.notEqual(v.club.kits.gk.shirt, v.club.kits.home.shirt);
+  const set = await s.club.setKits({ uid: 'u2', kits: { ...kits, home: { ...kits.home, shirt: 6 } } });
+  assert.equal(set.club.kits.home.shirt, 6);
+  await assert.rejects(s.club.setKits({ uid: 'u2', kits }), /değiştirilemez/);
+});
+
+test('sıradaki maç: rakip önceden belirlenir, maçta aynı rakip çıkar; kulüp formasıyla oynanır', async () => {
+  const { s } = svc();
+  await s.club.create({ uid: 'u1', name: 'Kuzey Yıldızı', fans: 'Kuzey Aslanları', crest, kits });
+  await assert.rejects(s.duelNext({ uid: 'u1' }), /kadro kur/);
+  const { sq } = await squad(s, 'u1');
+  const n1 = await s.duelNext({ uid: 'u1' });
+  const n2 = await s.duelNext({ uid: 'u1' });
+  assert.equal(n1.opponent.name, n2.opponent.name);
+  assert.equal(n1.opponent.power, n2.opponent.power);
+  assert.ok(n1.opponent.kits?.home, 'rakibin forması');
+  assert.ok(n1.opponent.crest, 'rakibin arması');
+  assert.equal(n1.venue.name, 'Kuzey Yıldızı Stadyumu');
+  assert.deepEqual(n1.rewards, [DUEL.win, DUEL.draw, DUEL.loss]);
+  const start = await s.duelStart({ uid: 'u1', squadId: sq.id, tactic: 'dengeli', kit: 'away' });
+  assert.equal(start.opponent.name, n1.opponent.name);
+  assert.deepEqual(start.me.kits, kits);
+  assert.equal(start.me.wear, 'away');
+  assert.deepEqual(start.me.crest, crest);
+  assert.ok(start.opponent.kits?.home);
+  const fin = await s.duelFinish({ uid: 'u1', duelId: start.duelId });
+  assert.equal(fin.me.wear, 'away');
+  assert.deepEqual(fin.me.kits, kits);
+  // Maç oynandı: sıradaki maç için rakip yeniden belirlenir (kayıt silindi)
+  const boss = await s.duelNext({ uid: 'u1', mode: 'boss' });
+  assert.equal(boss.opponent.boss, true);
+  assert.ok(boss.opponent.kits?.home);
 });
