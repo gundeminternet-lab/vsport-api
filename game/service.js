@@ -41,6 +41,43 @@ const BOSS_FORMATIONS = ['4-3-3', '4-2-3-1', '4-4-2', '3-5-2', '4-1-4-1', '3-4-3
 const hashOf = (str) => [...String(str)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7);
 
 /** Kart olarak saklanan alanlar (havuzdaki kompakt oyuncu + oyuncu kimliği + katman). */
+// Havuz boş ya da dar kaldığında rakibin boş yuvaları bu adlarla doldurulur (rakip her zaman 11 kişi çıkar)
+const BOT_NAMES = [
+  'Kaan Aydın', 'Emre Yıldız', 'Mert Kaya', 'Burak Şahin', 'Can Demir', 'Arda Çelik', 'Oğuz Koç', 'Serkan Polat', 'Umut Arslan',
+  'Kerem Doğan', 'Barış Kurt', 'Tolga Özkan', 'Yusuf Aksoy', 'Onur Tekin', 'Eren Güneş', 'Selim Acar', 'Furkan Erdem', 'Cenk Bulut',
+];
+const shortName = (n) => {
+  const parts = n.split(' ');
+  return parts.length > 1 ? `${parts[0][0]}. ${parts.slice(1).join(' ')}` : n;
+};
+
+/** Eksik yuvaları doldurur: önce havuzdan (genişleyen güç aralığıyla), havuz yetmezse yapay oyuncularla. Saf değil (rng). */
+export function fillLineup({ formation, lineup, target, pool, rng, used = new Set() }) {
+  const slots = slotsOf(formation) ?? [];
+  const out = { ...(lineup ?? {}) };
+  for (const c of Object.values(out)) if (c) used.add(c.pid ?? c.id);
+  let bot = 0;
+  for (const s of slots) {
+    if (out[s.key]) continue;
+    let pick = null;
+    for (const tol of [6, 12, 25, 99]) {
+      const list = pool ? pool.pick((p) => p.g === s.g && Math.abs(p.r - target) <= tol && !used.has(p.id), rng, 1) : [];
+      if (list.length) {
+        pick = asCard(list[0]);
+        break;
+      }
+    }
+    if (!pick) {
+      const n = BOT_NAMES[(rng.int(0, BOT_NAMES.length - 1) + bot++) % BOT_NAMES.length];
+      pick = { pid: `bot-${s.key}-${bot}`, n, s: shortName(n), pos: s.pos, g: s.g, r: Math.max(45, Math.min(92, Math.round(target + rng.int(-3, 3)))), st: null, c: 'Karma Takım', ci: 'karma', cl: null, l: null, na: null, ni: null, ph: null };
+      pick.tier = tierOf(pick.r);
+    }
+    out[s.key] = pick;
+    used.add(pick.pid ?? pick.id);
+  }
+  return out;
+}
+
 const asCard = (p) => ({ pid: p.id, n: p.n, s: p.s, pos: p.pos, g: p.g, r: p.r, st: p.st, c: p.c, ci: p.ci, cl: p.cl ?? null, l: p.l, na: p.na ?? null, ni: p.ni ?? null, ph: p.ph ?? null, tier: tierOf(p.r) });
 
 export class GameService {
@@ -565,12 +602,14 @@ export class GameService {
     }
     if (list.length) {
       const o = list[rng.int(0, list.length - 1)];
-      return { name: o.name, username: o.username ?? null, formation: o.formation, lineup: o.lineup, bot: false };
+      const lineup = fillLineup({ formation: o.formation, lineup: o.lineup, target: Math.round(power), pool: this.pool, rng });
+      return { name: o.name, username: o.username ?? null, formation: o.formation, lineup, bot: false };
     }
     const target = Math.round(power - 1);
     const cands = this.pool.pick((p) => Math.abs(p.r - target) <= 5, rng, 40);
     const formation = FORMATIONS[rng.int(0, 3)];
-    const lineup = autoBuild(cands.map(asCard), formation, 'balanced');
+    // Rastgele seçilen adaylarda bir mevki eksik kalabilir: boş yuvalar doldurulur (rakip her zaman 11 kişi)
+    const lineup = fillLineup({ formation, lineup: autoBuild(cands.map(asCard), formation, 'balanced'), target, pool: this.pool, rng });
     return { name: 'Karma Takım', username: null, formation, lineup, bot: true };
   }
 
@@ -624,7 +663,7 @@ export class GameService {
     const near = (x) => Math.abs(x.r - target) <= 4;
     let cands = this.pool.pick((x) => x.l === reg.league && near(x), rng, 70);
     if (cands.length < 40) cands = cands.concat(this.pool.pick(near, rng, 70, new Set(cands.map((c) => c.id))));
-    const lineup = autoBuild(cands.map(asCard), info.formation, 'chem');
+    const lineup = fillLineup({ formation: info.formation, lineup: autoBuild(cands.map(asCard), info.formation, 'chem'), target, pool: this.pool, rng });
     return { name: info.name, username: null, formation: info.formation, lineup, bot: true, boss: true, league: info.league, iso: info.iso, tactic: pickTactic(createRng(`bosst:${day}`)) };
   }
 
