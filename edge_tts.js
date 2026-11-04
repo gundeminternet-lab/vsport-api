@@ -10,6 +10,7 @@ const CHROMIUM_MAJOR = CHROMIUM_FULL_VERSION.split('.')[0];
 const WSS = 'wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1';
 
 export const EDGE_VOICES = {
+  spiker: 'Microsoft Server Speech Text to Speech Voice (tr-TR, AhmetNeural)',
   female: 'Microsoft Server Speech Text to Speech Voice (tr-TR, EmelNeural)',
   male: 'Microsoft Server Speech Text to Speech Voice (tr-TR, AhmetNeural)',
 };
@@ -43,7 +44,7 @@ export function ssmlMessage(text, voiceKey = 'female', { rate = '-6%', pitch = '
 }
 
 /** Edge için hız/ton: tts.js'teki hava tablosundan (döngüsel içe aktarmayı önlemek için burada yerel kopya). */
-const EDGE_BASE = { female: { rate: -4, pitch: 0 }, male: { rate: -6, pitch: -2 } };
+const EDGE_BASE = { spiker: { rate: 2, pitch: -4 }, female: { rate: -4, pitch: 0 }, male: { rate: -6, pitch: -2 } };
 const EDGE_MOOD = { warm: [0, 0], calm: [-3, -1], excited: [7, 4], serious: [-6, -3] };
 export function edgeProsody(voiceKey = 'female', mood = 'warm') {
   const b = EDGE_BASE[voiceKey] ?? EDGE_BASE.female;
