@@ -98,7 +98,7 @@ const store = {
 };
 
 /** /version ve Tahminler tanılamasında görünen sürüm. */
-const SERVER_VERSION = '2026-11-03-surum-2';
+const SERVER_VERSION = '2026-11-03-surum-3';
 const espn = new EspnClient();
 const trackService = new TrackService({ store: createTrackStore(db), espn });
 // Abonelik: Google Play doğrulaması + erişim denetimi (bitmiş görünen Play aboneliği mağazadan yeniden okunur)
@@ -125,6 +125,8 @@ const daily = new DailyPredictionService({
   marketLatest: (key) => market?.latest(key) ?? null,
   capture,
 });
+// Kişiye özel yorum: tam içerik gecikirse günlük tahmindeki modelle hemen yanıt verilir
+paidService.quickModel = (key) => daily.baseModel(key);
 // Dış tahmin verisi (yalnızca sunucuda model girdisi; uygulamada gösterilmez). MARKET_DATA=off ile kapatılır.
 const market =
   process.env.MARKET_DATA === 'off'

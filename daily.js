@@ -454,6 +454,13 @@ export class DailyPredictionService {
   }
 
   /** Maçın kilitlenen son gol beklentileri (canlı modelin maç öncesi tabanı). Canlı güncelleme yoksa null. */
+  /** Kişiye özel yorumun hızlı yolu: maç öncesi tahmindeki model (yoksa null). */
+  async baseModel(key) {
+    const e = await this.store.getDaily(key);
+    const m = e?.model;
+    return m && Number.isFinite(m.lh) && Number.isFinite(m.la) ? { lambdaHome: m.lh, lambdaAway: m.la, sigma: Number.isFinite(m.sigma) ? m.sigma : 0 } : null;
+  }
+
   async finalLambdas(key) {
     const e = await this.store.getDaily(key);
     const l = e?.live?.lambdas;

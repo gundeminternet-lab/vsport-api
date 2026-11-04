@@ -49,8 +49,26 @@ export const matchKey = (league, id) => `${String(league).replace(/[^a-zA-Z0-9]/
 const DAY = 86400000;
 const utcDay = (ms) => new Date(Math.floor(ms / DAY) * DAY);
 
+/** Süre sınırı: [promise] [ms] içinde bitmezse TIMED_OUT döner (iş arka planda sürer). */
+const TIMED_OUT = Symbol('timed-out');
+function within(promise, ms) {
+  let timer;
+  const limit = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(TIMED_OUT), ms);
+  });
+  return Promise.race([Promise.resolve(promise), limit]).finally(() => clearTimeout(timer));
+}
+
+const validModel = (m) => Boolean(m) && Number.isFinite(m.lambdaHome) && Number.isFinite(m.lambdaAway);
+
 export class PaidContentService {
-  constructor({ store, espn, now = () => Date.now(), memoryFactory = () => new TeamMemory(), leagues = LEAGUES, track = null, access = null, capture = null }) {
+  constructor({ store, espn, now = () => Date.now(), memoryFactory = () => new TeamMemory(), leagues = LEAGUES, track = null, access = null, capture = null, quickModel = null, askBudgetMs = 20e3 }) {
+    /**
+     * Kişiye özel yorumun hızlı yolu: maçın günlük tahminindeki model (key → { lambdaHome, lambdaAway, sigma } | null).
+     * Maçın tam içeriği [askBudgetMs] içinde hazır olmazsa bununla yanıt verilir (tam içerik arka planda hazırlanmaya devam eder).
+     */
+    this.quickModel = quickModel;
+    this.askBudgetMs = askBudgetMs;
     this.capture = capture; // ekran görüntüsü kilidi (capture.js): kilitli maçın AI içeriği bu kullanıcıya gösterilmez
     this.track = track; // tahmin karnesi (TrackService): maç öncesi üretilen tahmin kaydedilir
     this.leagues = new Set(leagues);
@@ -409,22 +427,39 @@ export class PaidContentService {
     }
     const started = match.completed || match.timestamp <= this.now();
     const asOf = started ? { asOf: match.timestamp - 60000 } : {};
-    let content;
-    let model;
+    let content = null;
+    let model = null;
+    let failure = null;
+    // Tam içerik süre sınırıyla beklenir: hazır değilse günlük tahmindeki modelle hemen yanıt verilir
+    // (eskiden içerik baştan hesaplanırken istek dakikalarca sürüyor, ekran "AI inceliyor"da takılı kalıyordu).
+    const gen = this.contentFor(match, asOf);
+    gen.catch(() => {});
     try {
-      content = await this.contentFor(match, asOf);
-      model = await this.modelFor(match, content, asOf);
+      const c = await within(gen, this.askBudgetMs);
+      if (c !== TIMED_OUT) {
+        content = c;
+        model = await within(this.modelFor(match, c, asOf), this.askBudgetMs).then((m) => (m === TIMED_OUT ? null : m));
+      } else {
+        console.warn(`[askSpecial] ${key}: içerik ${Math.round(this.askBudgetMs / 1000)} sn içinde hazırlanamadı; günlük modelle yanıtlanıyor`);
+      }
     } catch (e) {
       if (e instanceof AppError) throw e;
       console.error(`[askSpecial] ${key}:`, e?.stack ?? e);
-      throw new AppError('unavailable', 'Bu maçın AI verisi şu an hazırlanamadı. Biraz sonra tekrar dene.');
+      failure = e;
     }
-    if (!model || !Number.isFinite(model.lambdaHome) || !Number.isFinite(model.lambdaAway)) {
+    if (!validModel(model) && this.quickModel) {
+      const q = await this.quickModel(key).catch(() => null);
+      if (validModel(q)) model = q;
+    }
+    if (!validModel(model)) {
+      if (failure || !content) throw new AppError('unavailable', 'Bu maçın AI verisi hazırlanıyor. Bir dakika sonra tekrar dene.');
       throw new AppError('failed-precondition', 'Bu maç için yeterli veri yok; özel yorum hazırlanamadı.');
     }
     let corners = null;
     if (market === 'corners') {
-      const sp = await this.specialFor(match, ['corners'], asOf).catch(() => null);
+      const sp = await within(this.specialFor(match, ['corners'], asOf), 10e3)
+        .then((r) => (r === TIMED_OUT ? null : r))
+        .catch(() => null);
       const meta = sp?.corners?.meta;
       if (meta && Number.isFinite(meta.home)) corners = { home: meta.home, away: meta.away, source: meta.source };
     }
