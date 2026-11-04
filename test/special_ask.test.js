@@ -158,3 +158,32 @@ test('özel yorum servisi: abonelik ya da AI paketi gerekir; maç bitince herkes
   assert.equal(other.ask.market, 'kg');
   await assert.rejects(capture.report({ uid: 'u1', keys: [] }), (e) => e.code === 'invalid-argument');
 });
+
+test('özel yorum servisi: tam içerik gecikirse günlük tahmindeki modelle hemen yanıt verir (ekran takılı kalmaz)', async () => {
+  const fixture = { league: 'demo.1', eventId: '9001', kickoff: new Date(FUTURE).toISOString() };
+  const sub = makeStore({ subscription: subscribed('weekly') });
+  let asked = 0;
+  const svc = new PaidContentService({
+    leagues: ['demo.1'],
+    store: sub,
+    espn: makeEspn(),
+    now: () => FUTURE - 2 * 86400000,
+    askBudgetMs: 30,
+    quickModel: async () => {
+      asked++;
+      return { lambdaHome: 1.7, lambdaAway: 0.9, sigma: 0.1 };
+    },
+  });
+  // İçerik hesaplaması bitmeyecek kadar uzun sürüyor
+  svc.contentFor = () => new Promise(() => {});
+  const t0 = Date.now();
+  const r = await svc.askSpecial({ uid: 'u1', ...fixture, market: 'ms', choice: '1' });
+  assert.ok(Date.now() - t0 < 2000, 'süre sınırında yanıt');
+  assert.equal(asked, 1);
+  assert.equal(r.ask.market, 'ms');
+  assert.ok(r.ask.pct > 0);
+  // Hızlı model de yoksa anlaşılır bir hata (sonsuz bekleme değil)
+  const none = new PaidContentService({ leagues: ['demo.1'], store: sub, espn: makeEspn(), now: () => FUTURE - 2 * 86400000, askBudgetMs: 30, quickModel: async () => null });
+  none.contentFor = () => new Promise(() => {});
+  await assert.rejects(none.askSpecial({ uid: 'u1', ...fixture, market: 'ms', choice: '1' }), (e) => e.code === 'unavailable' && /hazırlanıyor/.test(e.message));
+});
