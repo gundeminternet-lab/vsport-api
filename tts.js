@@ -1,15 +1,17 @@
 // İnsansı (nöral) AI sesi: Türkçe metni MP3'e çevirir.
-//   "spiker" (vSport Spiker, uygulamanın kendi sesi):
-//     0) ElevenLabs — ELEVENLABS_API_KEY ve ELEVENLABS_VOICE_ID tanımlıysa. Ses, vSport için ElevenLabs'te tasarlanmış
-//        (Voice Design) özel bir sestir; başka uygulamada duyulmaz. ELEVENLABS_MODEL (varsayılan eleven_multilingual_v2),
+//   "spiker" (vSport Spiker, uygulamanın kendi sesi) sırayla:
+//     0) ElevenLabs — ELEVENLABS_API_KEY ve ELEVENLABS_VOICE_ID tanımlıysa (ücretli, isteğe bağlı). ELEVENLABS_MODEL,
 //        ELEVENLABS_MONTHLY_LIMIT (aylık karakter, varsayılan 110.000) ve ELEVENLABS_FORMAT ile ayarlanır.
-//        Aylık sınır dolarsa ya da hizmet yanıt vermezse aşağıdakilere düşülür.
+//     1) Google Cloud Chirp 3 HD — GOOGLE_TTS_API_KEY tanımlıysa. Aylık 1 milyon karakter ücretsizdir; sunucu
+//        GOOGLE_TTS_MONTHLY_LIMIT (varsayılan 950.000) karakterde durur, böylece ücret çıkmaz. Ses GOOGLE_TTS_VOICE
+//        (varsayılan tr-TR-Chirp3-HD-Fenrir). Ay, Google faturasıyla aynı olsun diye Pasifik saatine göre sayılır.
+//     Sınır dolarsa ya da hizmet yanıt vermezse aşağıdakilere düşülür.
 //   Bütün sesler için:
-//     1) Azure Konuşma hizmeti — AZURE_SPEECH_KEY ve AZURE_SPEECH_REGION tanımlıysa (resmi, aylık 0,5M karakter ücretsiz)
-//     2) Edge "Sesli oku" (edge_tts.js) — anahtar gerekmez; TTS_PROVIDER=off ile kapatılabilir
+//     2) Azure Konuşma hizmeti — AZURE_SPEECH_KEY ve AZURE_SPEECH_REGION tanımlıysa (resmi, aylık 0,5M karakter ücretsiz)
+//     3) Edge "Sesli oku" (edge_tts.js) — anahtar gerekmez; TTS_PROVIDER=off ile kapatılabilir
 //   Hiçbiri olmazsa uygulama telefonun kendi sesine döner.
 //   Aynı metin ve ses için üretilen ses Firestore'da saklanır (tts_cache): herkes aynı analizi dinlediği için
-//   aylık ücretsiz kota (0,5 milyon karakter) çok daha geç dolar. Aylık kullanım tts_usage/{YYYY-MM}.
+//   aylık ücretsiz kotalar çok daha geç dolar. Aylık kullanım tts_usage/{YYYY-MM}, tts_usage/google_{YYYY-MM}.
 
 import crypto from 'node:crypto';
 import { AppError } from './logic.js';
@@ -110,6 +112,30 @@ export function elevenCacheKey(text, voiceId, model = ELEVEN_MODEL, mood = 'warm
   return crypto.createHash('sha1').update(`eleven|${voiceId}|${model}|${moodOf(mood)}|${text.trim()}`).digest('hex');
 }
 
+// ---- vSport Spiker (Google Cloud Chirp 3 HD, ücretsiz kota) ----
+
+export const GOOGLE_VOICE = 'tr-TR-Chirp3-HD-Fenrir';
+export const GOOGLE_MONTHLY_LIMIT = 950000; // ücretsiz kotanın (1.000.000) biraz altı
+/** Havaya göre anlatım hızı (Chirp 3 HD ton ayarı almaz; hız alır). */
+export const GOOGLE_RATES = { warm: 1.0, calm: 0.96, excited: 1.1, serious: 0.94 };
+
+export function googleBody(text, voice = GOOGLE_VOICE, mood = 'warm') {
+  const lang = /^[a-z]{2,3}-[A-Z]{2}/.exec(voice)?.[0] ?? 'tr-TR';
+  return {
+    input: { text: text.trim() },
+    voice: { languageCode: lang, name: voice },
+    audioConfig: { audioEncoding: 'MP3', speakingRate: GOOGLE_RATES[moodOf(mood)] },
+  };
+}
+
+export function googleCacheKey(text, voice = GOOGLE_VOICE, mood = 'warm') {
+  return crypto.createHash('sha1').update(`google|${voice}|${moodOf(mood)}|${text.trim()}`).digest('hex');
+}
+
+const pacificMonth = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit' });
+/** Google faturası ayı Pasifik saatine göre başlatır; sayaç da aynı ayı kullanır. */
+export const billingMonth = (ms) => pacificMonth.format(new Date(ms));
+
 export function createTts({
   db,
   FieldValue,
@@ -121,12 +147,16 @@ export function createTts({
   elevenModel = process.env.ELEVENLABS_MODEL || ELEVEN_MODEL,
   elevenFormat = process.env.ELEVENLABS_FORMAT || ELEVEN_FORMAT,
   elevenLimit = Number(process.env.ELEVENLABS_MONTHLY_LIMIT) || ELEVEN_MONTHLY_LIMIT,
+  googleKey = process.env.GOOGLE_TTS_API_KEY,
+  googleVoice = process.env.GOOGLE_TTS_VOICE || GOOGLE_VOICE,
+  googleLimit = Number(process.env.GOOGLE_TTS_MONTHLY_LIMIT) || GOOGLE_MONTHLY_LIMIT,
   edgeImpl = edgeSynthesize,
   fetchImpl = globalThis.fetch,
   now = () => Date.now(),
 }) {
   const azure = Boolean(key && region);
   const eleven = Boolean(elevenKey && elevenVoice);
+  const google = Boolean(googleKey);
   const memory = new Map(); // son kullanılanlar bellekte
   const remember = (k, v) => {
     memory.delete(k);
@@ -151,59 +181,102 @@ export function createTts({
     remember(k, audio);
   }
 
-  // Aynı metin için eşzamanlı istekler tek üretimi bekler (aynı ses iki kez ücretlendirilmez)
+  /** Spiker sağlayıcıları (sırayla). synth: base64 MP3 ya da null. */
+  const providers = [];
+  if (eleven) {
+    providers.push({
+      id: 'elevenlabs',
+      key: (text, mood) => elevenCacheKey(text, elevenVoice, elevenModel, mood),
+      usage: () => `tts_usage/eleven_${new Date(now()).toISOString().slice(0, 7)}`,
+      limit: elevenLimit,
+      async synth(text, mood) {
+        const res = await fetchImpl(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(elevenVoice)}?output_format=${elevenFormat}`, {
+          method: 'POST',
+          headers: { 'xi-api-key': elevenKey, 'Content-Type': 'application/json', Accept: 'audio/mpeg' },
+          body: JSON.stringify(elevenBody(text, elevenModel, mood)),
+          signal: AbortSignal.timeout(30000),
+        });
+        if (!res.ok) {
+          console.error('[tts] elevenlabs:', res.status, (await res.text?.().catch(() => '')) ?? '');
+          return null;
+        }
+        const bytes = Buffer.from(await res.arrayBuffer());
+        return bytes.length ? bytes.toString('base64') : null;
+      },
+    });
+  }
+  if (google) {
+    providers.push({
+      id: 'google',
+      key: (text, mood) => googleCacheKey(text, googleVoice, mood),
+      usage: () => `tts_usage/google_${billingMonth(now())}`,
+      limit: googleLimit,
+      async synth(text, mood) {
+        const res = await fetchImpl('https://texttospeech.googleapis.com/v1/text:synthesize', {
+          method: 'POST',
+          headers: { 'X-Goog-Api-Key': googleKey, 'Content-Type': 'application/json' },
+          body: JSON.stringify(googleBody(text, googleVoice, mood)),
+          signal: AbortSignal.timeout(30000),
+        });
+        if (!res.ok) {
+          console.error('[tts] google:', res.status, (await res.text?.().catch(() => '')) ?? '');
+          return null;
+        }
+        const audio = (await res.json())?.audioContent;
+        return typeof audio === 'string' && audio.length ? audio : null;
+      },
+    });
+  }
+
+  // Aynı metin için eşzamanlı istekler tek üretimi bekler (aynı ses iki kez sayılmaz)
   const pending = new Map();
-  function spiker(text, moodKey) {
-    const k = elevenCacheKey(text, elevenVoice, elevenModel, moodKey);
-    if (!pending.has(k)) pending.set(k, spikerFresh(k, text, moodKey).finally(() => pending.delete(k)));
+  function fromProvider(p, text, moodKey) {
+    const k = p.key(text, moodKey);
+    if (!pending.has(k)) pending.set(k, fresh(p, k, text, moodKey).finally(() => pending.delete(k)));
     return pending.get(k);
   }
 
-  /** vSport Spiker sesi (ElevenLabs). Aylık sınır dolduysa ya da hizmet yanıt vermezse null (yedeğe düşülür). */
-  async function spikerFresh(k, text, moodKey) {
+  /** Tek sağlayıcıdan spiker sesi. Aylık sınır dolduysa ya da hizmet yanıt vermezse null (sıradakine geçilir). */
+  async function fresh(p, k, text, moodKey) {
     const hit = await cached(k);
     if (hit) return { audio: hit, cached: true };
-    const month = new Date(now()).toISOString().slice(0, 7);
-    const usageRef = db.doc(`tts_usage/eleven_${month}`);
+    const usageRef = db.doc(p.usage());
     const used = (await usageRef.get()).get?.('chars') ?? 0;
-    if (used + text.length > elevenLimit) {
-      console.warn('[tts] spiker: aylık sınır doldu, yedek sese geçiliyor');
+    if (used + text.length > p.limit) {
+      console.warn(`[tts] ${p.id}: aylık sınır doldu, sıradaki sese geçiliyor`);
       return null;
     }
     try {
-      const res = await fetchImpl(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(elevenVoice)}?output_format=${elevenFormat}`, {
-        method: 'POST',
-        headers: { 'xi-api-key': elevenKey, 'Content-Type': 'application/json', Accept: 'audio/mpeg' },
-        body: JSON.stringify(elevenBody(text, elevenModel, moodKey)),
-        signal: AbortSignal.timeout(30000),
-      });
-      if (!res.ok) {
-        console.error('[tts] spiker:', res.status, (await res.text?.().catch(() => '')) ?? '');
-        return null;
-      }
-      const bytes = Buffer.from(await res.arrayBuffer());
-      if (!bytes.length) return null;
+      const audio = await p.synth(text, moodKey);
+      if (!audio) return null;
       await usageRef.set({ chars: FieldValue.increment(text.length) }, { merge: true });
-      const audio = bytes.toString('base64');
-      await store(k, audio, { voice: 'spiker', provider: 'elevenlabs', mood: moodKey, chars: text.length });
+      await store(k, audio, { voice: 'spiker', provider: p.id, mood: moodKey, chars: text.length });
       return { audio, cached: false };
     } catch (e) {
-      console.error('[tts] spiker:', e?.message ?? e);
+      console.error(`[tts] ${p.id}:`, e?.message ?? e);
       return null;
     }
   }
 
+  async function spiker(text, moodKey) {
+    for (const p of providers) {
+      const r = await fromProvider(p, text, moodKey);
+      if (r) return r;
+    }
+    return null;
+  }
+
   return {
-    enabled: azure || edge || eleven,
-    spiker: eleven,
+    enabled: azure || edge || providers.length > 0,
+    spiker: providers.length > 0,
 
     async speak({ text, voice = 'female', mood = 'warm' }) {
-      if (!azure && !edge && !eleven) throw new AppError('unavailable', 'İnsansı ses şu an kullanılamıyor.');
+      if (!azure && !edge && !providers.length) throw new AppError('unavailable', 'İnsansı ses şu an kullanılamıyor.');
       if (typeof text !== 'string' || !text.trim()) throw new AppError('invalid-argument', 'Metin boş.');
       if (text.length > MAX_CHARS) throw new AppError('invalid-argument', `Metin en fazla ${MAX_CHARS} karakter olabilir.`);
       const voiceKey = VOICES[voice] ? voice : 'female';
       const moodKey = moodOf(mood);
-      if (voiceKey === 'spiker' && eleven) {
+      if (voiceKey === 'spiker' && providers.length) {
         const r = await spiker(text, moodKey);
         if (r) return { audio: r.audio, format: 'mp3', cached: r.cached, voice: 'spiker' };
         if (!azure && !edge) throw new AppError('unavailable', 'İnsansı ses şu an üretilemedi; telefon sesi kullanılacak.');
