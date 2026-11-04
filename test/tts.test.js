@@ -134,3 +134,90 @@ test('speak: hava hem önbellek anahtarını hem Edge çağrısını belirler', 
   await tts.speak({ text: 'Gol!', mood: 'saçma' }); // warm'a düşer, önceki warm ile aynı anahtar
   assert.deepEqual(seen, ['excited', 'warm']);
 });
+
+import { elevenBody, elevenCacheKey, ELEVEN_MOODS } from '../tts.js';
+
+function memDb() {
+  const store = new Map();
+  return {
+    store,
+    doc: (path) => ({
+      get: async () => ({ exists: store.has(path), get: (f) => store.get(path)?.[f] }),
+      set: async (v) => store.set(path, { ...(store.get(path) ?? {}), ...v }),
+    }),
+  };
+}
+const FV = { increment: (n) => n, serverTimestamp: () => 0 };
+
+test('spiker: ElevenLabs gövdesi havaya göre; dil zorlaması yalnızca v2.5/v3 modellerinde', () => {
+  const b = elevenBody(' Gol! ', 'eleven_multilingual_v2', 'excited');
+  assert.equal(b.text, 'Gol!');
+  assert.equal(b.model_id, 'eleven_multilingual_v2');
+  assert.equal(b.voice_settings.stability, ELEVEN_MOODS.excited.stability);
+  assert.equal(b.voice_settings.use_speaker_boost, true);
+  assert.equal('language_code' in b, false);
+  assert.equal(elevenBody('a', 'eleven_flash_v2_5').language_code, 'tr');
+  assert.deepEqual(elevenBody('a', 'eleven_multilingual_v2', 'tanımsız').voice_settings, { ...ELEVEN_MOODS.warm, use_speaker_boost: true });
+  assert.notEqual(elevenCacheKey('a', 'v1'), elevenCacheKey('a', 'v2'));
+  assert.notEqual(elevenCacheKey('a', 'v1'), cacheKey('a', 'spiker'));
+});
+
+test('spiker: ElevenLabs ile bir kez üretir, eşzamanlı istekler tek çağrıyı bekler, sonra önbellekten', async () => {
+  const db = memDb();
+  const urls = [];
+  const tts = createTts({
+    db,
+    FieldValue: FV,
+    key: '',
+    region: '',
+    edge: false,
+    elevenKey: 'xi',
+    elevenVoice: 'VOICE123',
+    fetchImpl: async (url, opts) => {
+      urls.push(url);
+      assert.equal(opts.headers['xi-api-key'], 'xi');
+      assert.equal(JSON.parse(opts.body).model_id, 'eleven_multilingual_v2');
+      return { ok: true, arrayBuffer: async () => new TextEncoder().encode('spiker-mp3').buffer };
+    },
+  });
+  assert.equal(tts.enabled, true);
+  assert.equal(tts.spiker, true);
+  const [a, b] = await Promise.all([tts.speak({ text: 'Merhaba.', voice: 'spiker' }), tts.speak({ text: 'Merhaba.', voice: 'spiker' })]);
+  const c = await tts.speak({ text: 'Merhaba.', voice: 'spiker' });
+  assert.equal(urls.length, 1);
+  assert.match(urls[0], /api\.elevenlabs\.io\/v1\/text-to-speech\/VOICE123\?output_format=mp3_44100_64/);
+  assert.equal(Buffer.from(a.audio, 'base64').toString(), 'spiker-mp3');
+  assert.equal(b.audio, a.audio);
+  assert.equal(c.cached, true);
+  assert.equal(db.store.get(`tts_usage/eleven_${new Date().toISOString().slice(0, 7)}`).chars, 'Merhaba.'.length);
+});
+
+test('spiker: ElevenLabs hata verirse ya da aylık sınır dolarsa Ahmet spiker ayarıyla Edge yedeği', async () => {
+  const db = memDb();
+  const seen = [];
+  const tts = createTts({
+    db,
+    FieldValue: FV,
+    key: '',
+    region: '',
+    elevenKey: 'xi',
+    elevenVoice: 'V',
+    elevenLimit: 5,
+    fetchImpl: async () => ({ ok: false, status: 500, text: async () => 'hata' }),
+    edgeImpl: async (text, voice) => (seen.push(voice), Buffer.from('edge')),
+  });
+  const r1 = await tts.speak({ text: 'Kısa', voice: 'spiker' }); // ElevenLabs 500 → Edge
+  const r2 = await tts.speak({ text: 'Uzun bir metin.', voice: 'spiker' }); // sınır aşılıyor → Edge
+  assert.equal(Buffer.from(r1.audio, 'base64').toString(), 'edge');
+  assert.equal(Buffer.from(r2.audio, 'base64').toString(), 'edge');
+  assert.deepEqual(seen, ['spiker', 'spiker']);
+  assert.match(buildSsml('Gol.', 'spiker'), /AhmetNeural.*rate="\+2%" pitch="-4%"/s);
+  assert.deepEqual(edgeProsody('spiker', 'warm'), { rate: '+2%', pitch: '-8Hz' });
+});
+
+test('spiker: ElevenLabs anahtarı yoksa doğrudan Microsoft yedeği (eski sunucu davranışı)', async () => {
+  const tts = createTts({ db: memDb(), FieldValue: FV, key: '', region: '', elevenKey: '', elevenVoice: '', edgeImpl: async (t, v) => Buffer.from(v) });
+  assert.equal(tts.spiker, false);
+  const r = await tts.speak({ text: 'Merhaba.', voice: 'spiker' });
+  assert.equal(Buffer.from(r.audio, 'base64').toString(), 'spiker');
+});
