@@ -1,13 +1,19 @@
 // AI günlük kuponlar. Her gün (Türkiye saatiyle 09:00'dan sonra) günün başlamamış maçlarından AI kendisi kurar:
-//   banko   : 3 maç, en yüksek gerçekleşme ihtimali
-//   ideal   : 3 maç, ihtimal ile oran dengesi (piyasa oranı AI ihtimaline göre değerliyse öne alınır)
-//   surpriz : 3 maç, yüksek oran; AI ihtimali piyasanın verdiğinden yüksek olan seçimler
-//   iykg    : 4 maç, ilk yarıda karşılıklı gol (İY KG Var) ihtimali en yüksek maçlar
-//   iyms    : 3 kupon × 2 maç, ilk yarı / maç sonu dönüşü (1/2 ya da 2/1) ihtimali en yüksek maçlar
+//   banko   : 2 maç, her biri en az %80 ihtimalli güvenli seçimler (çifte şans, 1.5 üst, 3.5 alt, güçlü favori)
+//   gunun   : 3 maç, %68-86 ihtimalli, oranı 1,22-1,90 arası seçimler (günün kuponu)
+//   gol     : 2 maç, gol pazarları (1.5 üst, 2.5 üst, KG var, İY 0.5 üst) güçlü olan maçlar
+//   surpriz : 2 maç, %47-66 ihtimalli, oranı 1,60 ve üstü seçimler
+// Bir maç günün yalnızca bir kuponuna girer; her seçim farklı maçtan (bağımsız).
+//
+// 2023-26 geriye dönük testi (18 Avrupa ligi, ~20 bin maç, gerçek oranlarla, günlük kurulum):
+//   eski düzen (3'lü Banko/İdeal/Sürpriz + 4'lü İY KG Var + 2'li İY/MS dönüş × 3): kuponların %12,7'si tuttu
+//   (İY KG Var %0, İY/MS %0,2; piyasa verisi yokken toplam %8,2)
+//   yeni düzen: kuponların %56'sı tuttu (Banko %83, Günün %51, Gol %72, Sürpriz %23); piyasa verisi yokken %54.
+// Kuponun tutma ihtimali (seçim ihtimallerinin çarpımı) uygulamada açıkça gösterilir.
 //
 // Oranlar: dış kaynaktan toplanan fiyatlar (market.js → odds/{matchKey}.providers), sağlayıcılar arası ortanca.
 // Kaynakta yalnızca maç sonucu (1-X-2) ve gol çizgisi (alt/üst) vardır; çifte şans 1-X-2 fiyatlarından türetilir.
-// Kaynakta karşılığı olmayan seçimlerde (KG, ilk yarı, İY/MS, başka çizgi) oran AI ihtimalinden hesaplanır ve
+// Kaynakta karşılığı olmayan seçimlerde (KG, ilk yarı, başka çizgi) oran AI ihtimalinden hesaplanır ve
 // "AI oranı" diye işaretlenir. Sağlayıcı adı ya da bağlantısı uygulamaya gönderilmez.
 //
 // Kupon yayınlandıktan sonra seçimler değişmez (karne şeffaf); oranlar ise maç başlayana kadar izlenir: her okumada
@@ -15,6 +21,7 @@
 //
 // Kayıt (yalnızca sunucu): ai_coupons/{gün} = { day, version, builtAt, pool, coupons: [...] }
 // Sonuç: günlük tahmin kayıtlarındaki maç sonucundan (daily_preds → result) okunurken hesaplanır.
+// Eski sürümle (1) kurulmuş günlerin kuponları olduğu gibi gösterilir (ideal, iykg, iyms türleri).
 
 import { markets } from './content.js';
 import { halfModel } from './special.js';
@@ -22,19 +29,26 @@ import { settleMarket } from './settle.js';
 import { trDay } from './progress.js';
 import { AppError } from './errors.js';
 
-export const AI_COUPON_VERSION = 1;
+export const AI_COUPON_VERSION = 2;
 const MIN = 60e3;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 
-/** Kupon türleri (uygulamadaki sıra). */
+/** Kupon türleri (uygulamadaki sıra). hit: geriye dönük testte tutma oranı (uygulamada bilgi olarak). */
 export const COUPON_KINDS = [
-  { id: 'banko', title: 'Banko', size: 3, count: 1, note: 'Gerçekleşme ihtimali en yüksek seçimler' },
+  { id: 'banko', title: 'Banko', size: 2, count: 1, note: 'En güvenli iki seçim (her biri en az %80)', hit: 83 },
+  { id: 'gunun', title: 'Günün kuponu', size: 3, count: 1, note: 'İhtimal ile oran dengesi en iyi üç seçim', hit: 51 },
+  { id: 'gol', title: 'Gol kuponu', size: 2, count: 1, note: 'Gollü geçmesi en olası iki maç', hit: 72 },
+  { id: 'surpriz', title: 'Sürpriz', size: 2, count: 1, note: 'Yüksek oranlı iki seçim; risk daha yüksek', hit: 23 },
+];
+
+/** Eski sürüm türleri (kayıtlı geçmiş kuponların başlığı için). */
+const LEGACY_KINDS = [
   { id: 'ideal', title: 'İdeal', size: 3, count: 1, note: 'İhtimal ile oran dengesi' },
-  { id: 'surpriz', title: 'Sürpriz', size: 3, count: 1, note: 'Yüksek oran; AI ihtimali piyasadan yüksek' },
   { id: 'iykg', title: 'İlk yarı KG Var', size: 4, count: 1, note: 'İlk yarıda iki takımın da gol atma ihtimali en yüksek maçlar' },
   { id: 'iyms', title: 'İY/MS dönüş', size: 2, count: 3, note: 'İlk yarıyı kaybeden maçı kazanır (1/2 · 2/1)' },
 ];
+const kindOf = (id) => COUPON_KINDS.find((k) => k.id === id) ?? LEGACY_KINDS.find((k) => k.id === id);
 
 /** Kuponlar bu saatten sonra kurulur (TR); bu saatten sonra maç az olsa da kurulur. */
 export const BUILD_FROM_HOUR = 9;
@@ -162,7 +176,7 @@ export function pickText(market, H, A) {
 
 /**
  * Bir maçın aday seçimleri (saf): AI ihtimali, oran (piyasa ya da AI), açılış oranı, piyasa ihtimali.
- * group: 'main' (Banko/İdeal/Sürpriz), 'iykg', 'iyms'.
+ * group: 'main' (Banko/Günün/Gol/Sürpriz), 'iykg', 'iyms' (eski türler; yeni kuponlarda kullanılmaz).
  */
 export function candidatesOf(entry, prices) {
   const lam = lambdasOf(entry);
@@ -211,11 +225,17 @@ export function candidatesOf(entry, prices) {
 // Kuponlar
 // -----------------------------------------------------------------------------------------------------------------
 
-/** Ana kuponların seçim kuralı: ihtimal ve oran aralığı, puan (büyük iyi). */
-const RULES = {
-  banko: { pMin: 0.66, pMax: 1, oMin: 1.25, oMax: 1.75, score: (c) => c.p + (c.source === 'market' ? 0.03 : 0) },
-  ideal: { pMin: 0.5, pMax: 0.72, oMin: 1.4, oMax: 2.4, score: (c) => (c.source === 'market' ? c.p * c.odds : 0.97) + c.p * 0.2 },
-  surpriz: { pMin: 0.25, pMax: 0.52, oMin: 2, oMax: 6.5, score: (c) => (c.source === 'market' ? c.p * c.odds : 0.9) + c.p * 0.1 },
+/** Gol kuponunda türlerin en düşük ihtimali. */
+const GOAL_MIN = { '1.5 Üst': 0.78, '2.5 Üst': 0.62, 'KG Var': 0.62, 'İY 0.5 Üst': 0.76 };
+const SAFE = new Set(['Çifte şans 1-X', 'Çifte şans X-2', 'Çifte şans 1-2', '1.5 Üst', '3.5 Alt', 'MS 1', 'MS 2', 'İY 0.5 Üst']);
+const BOLD = new Set(['MS 1', 'MS 2', '2.5 Üst', '2.5 Alt', 'KG Var', 'Çifte şans 1-2']);
+
+/** Kupon türlerinin seçim kuralı (ok) ve puanı (büyük iyi). Geriye dönük testle ayarlandı (dosya başı). */
+export const RULES = {
+  banko: { ok: (c) => c.group === 'main' && SAFE.has(c.market) && c.p >= 0.8 && c.p <= 0.95, score: (c) => c.p },
+  gunun: { ok: (c) => c.group === 'main' && !c.market.startsWith('İY') && c.p >= 0.68 && c.p < 0.86 && c.odds >= 1.22 && c.odds <= 1.9, score: (c) => c.p * Math.sqrt(c.odds) },
+  gol: { ok: (c) => c.market in GOAL_MIN && c.p >= GOAL_MIN[c.market] && c.p < 0.9, score: (c) => c.p * c.odds ** 0.6 },
+  surpriz: { ok: (c) => c.group === 'main' && BOLD.has(c.market) && c.p >= 0.47 && c.p < 0.66 && c.odds >= 1.6, score: (c) => c.p * c.odds },
 };
 
 const selectionOf = (m, c) => ({
@@ -236,7 +256,7 @@ const selectionOf = (m, c) => ({
 });
 
 const couponOf = (day, kind, n, selections) => {
-  const k = COUPON_KINDS.find((x) => x.id === kind);
+  const k = kindOf(kind);
   return {
     id: `${day}_${kind}${k.count > 1 ? `_${n + 1}` : ''}`,
     kind,
@@ -249,50 +269,27 @@ const couponOf = (day, kind, n, selections) => {
 };
 
 /**
- * Günün kuponları (saf). pool: [{ entry, candidates }] (başlamamış maçlar). Ana kuponlarda bir maç yalnız bir kupona
- * girer; İY KG Var ve İY/MS kuponları kendi aralarında maç tekrarlamaz.
+ * Günün kuponları (saf). pool: [{ entry, candidates }] (başlamamış maçlar). Bir maç günün yalnızca bir kuponuna
+ * girer; kupon tam dolmazsa (yeterli uygun maç yoksa) o tür o gün kurulmaz.
  */
 export function buildCoupons(day, pool) {
   const coupons = [];
   const used = new Set();
-  for (const kind of ['banko', 'ideal', 'surpriz']) {
-    const rule = RULES[kind];
-    const size = COUPON_KINDS.find((k) => k.id === kind).size;
+  for (const kind of COUPON_KINDS) {
+    const rule = RULES[kind.id];
     const best = [];
     for (const m of pool) {
       if (used.has(m.entry.key)) continue;
-      const ok = m.candidates.filter((c) => c.group === 'main' && c.p >= rule.pMin && c.p < rule.pMax && c.odds >= rule.oMin && c.odds <= rule.oMax);
+      const ok = m.candidates.filter(rule.ok);
       if (!ok.length) continue;
       const top = ok.reduce((a, b) => (rule.score(b) > rule.score(a) ? b : a));
       best.push({ m, c: top, s: rule.score(top) });
     }
     best.sort((a, b) => b.s - a.s || a.m.entry.kickoffMs - b.m.entry.kickoffMs);
-    const take = best.slice(0, size);
-    if (take.length < Math.min(size, 2)) continue;
+    const take = best.slice(0, kind.size);
+    if (take.length < kind.size) continue;
     for (const t of take) used.add(t.m.entry.key);
-    coupons.push(couponOf(day, kind, 0, take.sort((a, b) => a.m.entry.kickoffMs - b.m.entry.kickoffMs).map((t) => selectionOf(t.m, t.c))));
-  }
-  // İlk yarı KG Var: 4 maç
-  const kg = pool
-    .map((m) => ({ m, c: m.candidates.find((c) => c.market === 'İY KG Var') }))
-    .filter((x) => x.c && x.c.p >= 0.06)
-    .sort((a, b) => b.c.p - a.c.p)
-    .slice(0, 4);
-  if (kg.length >= 2) coupons.push(couponOf(day, 'iykg', 0, kg.sort((a, b) => a.m.entry.kickoffMs - b.m.entry.kickoffMs).map((x) => selectionOf(x.m, x.c))));
-  // İY/MS dönüş: en olası 6 maç, ikişerli 3 kupon
-  const kgKeys = new Set(kg.map((x) => x.m.entry.key));
-  const rev = pool
-    .map((m) => {
-      const opts = m.candidates.filter((c) => c.group === 'iyms');
-      return opts.length ? { m, c: opts.reduce((a, b) => (b.p > a.p ? b : a)) } : null;
-    })
-    .filter((x) => x && x.c.p >= 0.02)
-    .sort((a, b) => (kgKeys.has(a.m.entry.key) ? 1 : 0) - (kgKeys.has(b.m.entry.key) ? 1 : 0) || b.c.p - a.c.p)
-    .slice(0, 6)
-    .sort((a, b) => b.c.p - a.c.p);
-  for (let i = 0; i + 1 < rev.length && i < 6; i += 2) {
-    const pair = [rev[i], rev[i + 1]].sort((a, b) => a.m.entry.kickoffMs - b.m.entry.kickoffMs);
-    coupons.push(couponOf(day, 'iyms', i / 2, pair.map((x) => selectionOf(x.m, x.c))));
+    coupons.push(couponOf(day, kind.id, 0, take.sort((a, b) => a.m.entry.kickoffMs - b.m.entry.kickoffMs).map((t) => selectionOf(t.m, t.c))));
   }
   return coupons;
 }
@@ -505,7 +502,13 @@ export class AiCouponService {
     if (!doc && d === today) doc = await this.build().catch(() => null);
     const ent = await this.access.entitlement(uid);
     const subscribed = ent.subscribed === true;
-    const base = { day: d, subscribed, kinds: COUPON_KINDS.map(({ id, title, size, count, note }) => ({ id, title, size, count, note })) };
+    // Türler: bugünkü düzen; eski sürümle kurulmuş günde o günün türleri (geçmiş kuponlar olduğu gibi gösterilir)
+    const kindIds = doc?.coupons?.length ? [...new Set(doc.coupons.map((c) => c.kind))] : COUPON_KINDS.map((k) => k.id);
+    const base = {
+      day: d,
+      subscribed,
+      kinds: kindIds.map(kindOf).filter(Boolean).map(({ id, title, size, count, note, hit = null }) => ({ id, title, size, count, note, hit })),
+    };
     if (!doc?.coupons?.length) {
       const hour = trHour(now);
       return { ...base, builtAt: null, coupons: [], message: d === today && hour < BUILD_FROM_HOUR ? `Bugünün AI kuponları ${String(BUILD_FROM_HOUR).padStart(2, '0')}:00'da hazırlanır.` : 'Bu gün için AI kuponu yok.' };
@@ -541,7 +544,7 @@ export class AiCouponService {
   /** AI Karnesi için son günlerin kupon sonuçları: türe göre tutan / tutmayan. */
   async record({ days = 7 } = {}) {
     const now = this.now();
-    const byKind = Object.fromEntries(COUPON_KINDS.map((k) => [k.id, { id: k.id, title: k.title, won: 0, lost: 0 }]));
+    const byKind = Object.fromEntries([...COUPON_KINDS, ...LEGACY_KINDS].map((k) => [k.id, { id: k.id, title: k.title, won: 0, lost: 0 }]));
     for (let i = 0; i < days; i++) {
       const d = trDay(now - i * DAY);
       const doc = await this._doc(d).catch(() => null);
@@ -555,7 +558,8 @@ export class AiCouponService {
         else if (st === 'lost') k.lost++;
       }
     }
-    const kinds = Object.values(byKind);
+    // Eski türler yalnızca son günlerde kuponu varsa listelenir
+    const kinds = Object.values(byKind).filter((k) => COUPON_KINDS.some((x) => x.id === k.id) || k.won + k.lost > 0);
     const won = kinds.reduce((a, k) => a + k.won, 0);
     const lost = kinds.reduce((a, k) => a + k.lost, 0);
     return { days, won, lost, rate: won + lost ? Math.round((won / (won + lost)) * 100) : null, kinds };

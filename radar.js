@@ -1,4 +1,5 @@
-// Canlı Radar: canlı maçlarda baskıyı ölçer ve gol (ya da korner) ihtimali yükselen takım için sinyal üretir.
+// Canlı Radar: canlı maçlarda baskıyı ölçer ve gol ihtimali yükselen takım için sinyal üretir. (Korner sinyali
+// kaldırıldı: sinyaller yalnızca gol beklentisine dayanır. Eski korner kayıtları görünmeye devam eder.)
 // Saf fonksiyonlar (test edilebilir); maçları tarayan, kaydeden ve bildirim gönderen kısım radar_service.js'tedir.
 //
 // Ölçülenler (takım başına, son 5 ve son 10 dakika + maç geneli):
@@ -18,8 +19,10 @@ import { LIVE } from './engine/live_model.js';
 export const RADAR = Object.freeze({
   window: 10, // baskı penceresi (dk)
   short: 5, // kısa pencere: baskı sürüyor mu
-  goalMinutes: 20, // Gol Sireni / Geri Dönüş hedef süresi
-  openMinutes: 15, // Karşılıklı Baskı hedef süresi
+  // Gol Sireni / Geri Dönüş hedef süresi. 20 dk'da tek takımın golü baskı altında bile çoğu zaman %40'ın altında
+  // kalıyordu (sinyallerin çoğu "tutmadı" bitiyordu); 30 dk'da güçlü baskıda %50'nin üstüne çıkar.
+  goalMinutes: 30,
+  openMinutes: 20, // Karşılıklı Baskı hedef süresi (maçta gol)
   cornerMinutes: 10, // Korner Baskısı hedef süresi
   lateFrom: 70, // Son Dakika Baskısı bu dakikadan sonra (hedef: maç sonuna kadar)
   firstMinute: 12, // ilk dakikalarda pencere dolmadığı için sinyal yok
@@ -27,6 +30,13 @@ export const RADAR = Object.freeze({
   cooldown: 12, // aynı takım için iki sinyal arası en az (dk)
   maxPerMatch: 6,
   levels: [55, 68, 80], // ★, ★★, ★★★ eşikleri (baskı endeksi)
+  // Sinyal yalnızca hedefin (öğrenilmiş düzeltmeyle) tahmini ihtimali bu eşiği geçerse verilir: az ama isabetli sinyal
+  minChance: { siren: 0.5, comeback: 0.5, late: 0.45, open: 0.55 },
+  // Oyuncu değişikliği etkisi (son [subMinutes] dk): hücum oyuncusu girdi → gol hızı ×; savunma oyuncusu girdi ×
+  subMinutes: 20,
+  subAttack: 1.12,
+  subFresh: 1.04,
+  subDefend: 0.9,
   // Gol Sireni kapıları: üçü birden
   minShots: 2,
   minXg: 0.25,
@@ -41,7 +51,8 @@ export const RADAR = Object.freeze({
   avgAway: 1.15,
 });
 
-export const SIGNAL_TYPES = ['siren', 'comeback', 'late', 'open', 'corner'];
+// Yeni sinyal türleri (korner yok). TYPE_INFO eski 'corner' kayıtları için duruyor.
+export const SIGNAL_TYPES = ['siren', 'comeback', 'late', 'open'];
 
 export const TYPE_INFO = {
   siren: { title: 'Gol Sireni', target: 'team_goal' },
@@ -121,6 +132,32 @@ export function playKind(text) {
   return null;
 }
 
+/** "Substitution, Takım. A replaces B." → { team, inName, outName } (değilse null). */
+export function parseSub(text) {
+  const m = /^substitution,\s*([^.]+)\.\s*(.+?)\s+replaces\s+(.+?)(?:\s+because of an injury)?\.?\s*$/i.exec(str(text));
+  return m ? { team: m[1].trim(), inName: m[2].trim(), outName: m[3].trim() } : null;
+}
+
+/** Mevki kısaltması/adı → 'F' (hücum) | 'M' (orta saha) | 'D' (savunma) | 'G' (kaleci) | null. */
+export function roleOf(position) {
+  const a = str(position?.abbreviation ?? position).toUpperCase();
+  const n = str(position?.name ?? position?.displayName).toLowerCase();
+  if (/^G(K)?$/.test(a) || /goalkeeper/.test(n)) return 'G';
+  if (/^(F|FW|ST|CF|LW|RW|LF|RF|SS|CF-L|CF-R|W)$/.test(a) || /forward|striker|winger/.test(n)) return 'F';
+  if (/^(D|DF|CB|LB|RB|LWB|RWB|CD|CD-L|CD-R|SW)$/.test(a) || /defender|back/.test(n)) return 'D';
+  if (/^(M|MF|CM|DM|AM|LM|RM|CDM|CAM|AM-L|AM-R|CM-L|CM-R)$/.test(a) || /midfield/.test(n)) return 'M';
+  return null;
+}
+
+/** Oyuncu değişikliğinin türü: 'attack' (hücum oyuncusu, hücum dışı biri yerine), 'fresh' (forvet yerine forvet), 'defend' (savunmacı, hücum/orta saha yerine), null. */
+export function subKind(sub) {
+  if (!sub) return null;
+  if (sub.inRole === 'F' && sub.outRole && sub.outRole !== 'F' && sub.outRole !== 'G') return 'attack';
+  if (sub.inRole === 'F' && sub.outRole === 'F') return 'fresh';
+  if (sub.inRole === 'D' && (sub.outRole === 'F' || sub.outRole === 'M')) return 'defend';
+  return null;
+}
+
 // ---------------------------------------------------------------------------------------------------
 // Maç özetinden radarın okuduğu durum
 // ---------------------------------------------------------------------------------------------------
@@ -183,10 +220,27 @@ export function readMatch(json, { h1: knownH1 = null } = {}) {
   if (!period) period = /FIRST_HALF|HALFTIME/.test(statusName) ? 1 : /SECOND_HALF/.test(statusName) ? 2 : 0;
   const halftime = statusName === 'STATUS_HALFTIME';
 
-  // Anlatım: şutlar (xG ile), goller, kornerler
+  // Kadro mevkileri (oyuncu değişikliğinin hücum mu savunma mı olduğunu anlamak için)
+  const roles = new Map();
+  for (const r of json?.rosters ?? []) {
+    for (const pl of r?.roster ?? []) {
+      const role = roleOf(pl?.position);
+      for (const nm of [pl?.athlete?.displayName, pl?.athlete?.shortName, pl?.athlete?.fullName]) if (str(nm)) roles.set(str(nm).toLowerCase(), role);
+    }
+  }
+  const roleByName = (name) => roles.get(str(name).toLowerCase()) ?? null;
+  // Anlatım: şutlar (xG ile), goller, kornerler; oyuncu değişiklikleri
   const raw = [];
+  const subsRaw = [];
   for (const c of json?.commentary ?? []) {
     const text = str(c?.text);
+    const sub = parseSub(text);
+    if (sub) {
+      const clockS = parseClock(c?.time?.displayValue ?? c?.time);
+      const sideS = sides.of(sub.team) ?? sides.ofId(c?.play?.team?.id);
+      if (clockS && sideS) subsRaw.push({ clock: clockS, side: sideS, inName: sub.inName, outName: sub.outName, inRole: roleByName(sub.inName), outRole: roleByName(sub.outName) });
+      continue;
+    }
     const kind = playKind(text);
     if (!kind) continue;
     const clock = parseClock(c?.time?.displayValue ?? c?.time);
@@ -215,6 +269,10 @@ export function readMatch(json, { h1: knownH1 = null } = {}) {
     .sort((a, b) => a.e - b.e);
   let e = halftime ? h1 : elapsedOf(clock, period, h1);
   if (e === null) e = 0;
+  const subs = subsRaw
+    .map((x) => ({ e: elapsedOf(x.clock, x.clock.base > 45 ? 2 : 1, h1), side: x.side, inName: x.inName, outName: x.outName, inRole: x.inRole, outRole: x.outRole }))
+    .map((x) => ({ ...x, kind: subKind(x) }))
+    .sort((a, b) => a.e - b.e);
 
   // Toplamlar: kutu istatistikleri
   const statOf = (teamId, name) => {
@@ -258,6 +316,7 @@ export function readMatch(json, { h1: knownH1 = null } = {}) {
     hasPlays: plays.some((p) => p.kind !== 'corner'),
     goals,
     reds,
+    subs,
   };
 }
 
@@ -406,7 +465,40 @@ export function teamRate(m, side, lambdas = null, view = null) {
   const ownRed = Math.min(2, m.reds?.[side] ?? 0);
   const oppRed = Math.min(2, m.reds?.[other(side)] ?? 0);
   const red = 0.7 ** ownRed * 1.3 ** oppRed;
-  return (per90 / 90) * state * red;
+  return (per90 / 90) * state * red * subsMult(m, side);
+}
+
+/**
+ * Son [subMinutes] dakikadaki oyuncu değişikliklerinin gol hızına etkisi: hücum oyuncusu (forvet) hücum dışı bir
+ * oyuncunun yerine girdiyse ×subAttack (en çok iki değişiklik), forvet yerine taze forvet ×subFresh, öndeyken
+ * savunma oyuncusu girdiyse ×subDefend. Yayımlanmış maç içi analizlerle uyumlu, küçük tutulmuş tahmini oranlar.
+ */
+export function subsMult(m, side) {
+  const recent = recentSubs(m, side);
+  const diff = (m.score?.[side] ?? 0) - (m.score?.[other(side)] ?? 0);
+  let k = 1;
+  const att = recent.filter((x) => x.kind === 'attack').length;
+  k *= RADAR.subAttack ** Math.min(2, att);
+  if (recent.some((x) => x.kind === 'fresh')) k *= RADAR.subFresh;
+  if (diff > 0 && recent.some((x) => x.kind === 'defend')) k *= RADAR.subDefend;
+  return k;
+}
+
+/** Takımın son [subMinutes] dakikadaki değişiklikleri. */
+export function recentSubs(m, side) {
+  return (m?.subs ?? []).filter((x) => x.side === side && Number.isFinite(x.e) && m.e - x.e >= 0 && m.e - x.e <= RADAR.subMinutes);
+}
+
+/** Değişikliklerin kısa açıklaması (sinyal notu): "Hücuma oyuncu girdi: X (63')". */
+export function subNotes(m, side) {
+  const out = [];
+  for (const x of recentSubs(m, side)) {
+    const min = `${Math.round(x.e <= 45 ? x.e : 45 + (x.e - (m.h1 ?? 47)))}'`;
+    if (x.kind === 'attack') out.push(`Hücuma oyuncu girdi: ${x.inName} (${min})`);
+    else if (x.kind === 'fresh') out.push(`Taze forvet: ${x.inName} (${min})`);
+    else if (x.kind === 'defend') out.push(`Savunmaya oyuncu girdi: ${x.inName} (${min})`);
+  }
+  return out.slice(0, 2);
 }
 
 /** [minutes] dk içinde gol ihtimali (0-1): hız zamanla artar (maç sonuna doğru daha çok gol). */
@@ -479,25 +571,11 @@ export function detectSignals(m, view, history = [], lambdas = null) {
           index: pr.index,
           stars,
           pressure: pr,
-          chance: { p: r2(chanceIn(rate, m.e, minutes, pressureMult(pr.index))), base: r2(chanceIn(rate, m.e, minutes)), minutes },
+          chance: { p: r2(chanceIn(rate, m.e, minutes, pressureMult(pr.index))), base: r2(chanceIn(rate / subsMult(m, side), m.e, minutes)), minutes },
           target: { kind: 'team_goal', side, minutes, deadline, untilEnd: late },
+          notes: subNotes(m, side),
         });
       }
-    }
-    // Korner Baskısı: kornerler ve şutlarla sahaya yerleşen takım
-    const cornerHeat = T.corners >= 2 || ((view.w5?.[side]?.corners ?? 0) >= 1 && T.shots >= 3);
-    if (cornerHeat && pr.index >= 45 && pr.share >= 0.6 && possOk && cooled(history, side, 'corner', m.e)) {
-      const idx = Math.min(100, pr.index + 10 * Math.min(3, T.corners));
-      out.push({
-        type: 'corner',
-        side,
-        e: m.e,
-        index: idx,
-        stars: Math.max(1, starsOf(idx)),
-        pressure: pr,
-        chance: null,
-        target: { kind: 'team_corner', side, minutes: RADAR.cornerMinutes, deadline: m.e + RADAR.cornerMinutes },
-      });
     }
   }
 

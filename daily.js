@@ -228,8 +228,12 @@ export function dailyEntry(match, content, now) {
     confidence: best.pct,
     bestRule: BEST_RULE,
     reason: reasonOf(content),
-    // Canlı güncelleme için modelin kendi gol beklentileri (dış veriyle birleştirilecek taban)
-    model: { lh: r4(content.model.lambdaHome), la: r4(content.model.lambdaAway), sigma: r4(content.model.sigma ?? 0) },
+    // Canlı güncelleme için modelin kendi gol beklentileri (dış veriyle birleştirilecek taban). İçerik dış veriyle
+    // birleştirilerek üretildiyse taban ayrıca saklıdır (iki kez birleştirilmesin).
+    model: (() => {
+      const b = content.model.base ?? content.model;
+      return { lh: r4(b.lambdaHome), la: r4(b.lambdaAway), sigma: r4(b.sigma ?? 0) };
+    })(),
     probs: content.ai?.probabilities ?? null,
     createdAt: now,
   };

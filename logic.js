@@ -15,6 +15,8 @@
 // Erişim: abonelik (subscription.js → AccessService). Jeton/token sistemi kaldırıldı.
 
 import { MatchSimulator } from './engine/service.js';
+import { matchProbabilities } from './engine/analysis.js';
+import { blendLambdas, marketWeight } from './engine/blend.js';
 import { TeamMemory } from './engine/memory.js';
 import { CONTENT_TYPES, RETIRED_TYPES, CONTENT_VERSION, buildAi, buildOdds, buildSim, buildReview, modelOf } from './content.js';
 import { storyForContent } from './story.js';
@@ -62,7 +64,14 @@ function within(promise, ms) {
 const validModel = (m) => Boolean(m) && Number.isFinite(m.lambdaHome) && Number.isFinite(m.lambdaAway);
 
 export class PaidContentService {
-  constructor({ store, espn, now = () => Date.now(), memoryFactory = () => new TeamMemory(), leagues = LEAGUES, track = null, access = null, capture = null, quickModel = null, askBudgetMs = 20e3 }) {
+  constructor({ store, espn, now = () => Date.now(), memoryFactory = () => new TeamMemory(), leagues = LEAGUES, track = null, access = null, capture = null, quickModel = null, askBudgetMs = 20e3, market = null, refreshMs = 30 * 60e3 }) {
+    /**
+     * Dış tahmin verisinin son görüntüsü (key → market.js snap | null). Verilirse AI içeriği (analiz, simülasyon,
+     * AI Yorumcu, Özel Yorum) günlük tahminle aynı birleşik gol beklentisinden üretilir; maç başlamadan önce piyasa
+     * görüşü belirgin değişirse içerik yeniden üretilir (en sık [refreshMs]'de bir).
+     */
+    this.market = market;
+    this.refreshMs = refreshMs;
     /**
      * Kişiye özel yorumun hızlı yolu: maçın günlük tahminindeki model (key → { lambdaHome, lambdaAway, sigma } | null).
      * Maçın tam içeriği [askBudgetMs] içinde hazır olmazsa bununla yanıt verilir (tam içerik arka planda hazırlanmaya devam eder).
@@ -128,9 +137,40 @@ export class PaidContentService {
       homeName: match.homeName,
       awayName: match.awayName,
       neutral: match.neutral === true,
+      kickoff: match.timestamp,
+      stage: match.stage ?? null,
       // Maç bittikten sonra üretiliyorsa yalnızca maç öncesi veriler kullanılır.
       now: asOf ?? this.now(),
     });
+  }
+
+  /** Maçın dış tahmin verisi (yalnızca maç başlamadan önce; sonradan üretilen içerik piyasayı kullanmaz). */
+  _snap(key, match) {
+    if (!this.market || this.now() >= match.timestamp) return null;
+    try {
+      return this.market(key) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Modelin analizini dış tahmin verisiyle birleştirir (günlük tahminle aynı kural: engine/blend.js). Analiz nesnesi
+   * kopyalanır; gol beklentileri, belirsizlik ve olasılıklar güncellenir. Taban (yalnızca model) değerler saklanır.
+   */
+  _final(analysis, snap) {
+    const base = { home: analysis.lambdaHome, away: analysis.lambdaAway, sigma: analysis.sigma ?? 0 };
+    const w = snap ? marketWeight(snap, { now: this.now() }) : 0;
+    const b = blendLambdas(base, snap?.lambdas ?? null, w);
+    const out = { ...analysis, base: { lambdaHome: base.home, lambdaAway: base.away, sigma: base.sigma }, marketWeight: b.weight, marketAt: b.weight > 0 ? snap.at : null };
+    if (b.weight > 0) {
+      const r3 = (x) => Math.round(x * 1000) / 1000;
+      out.lambdaHome = r3(b.home);
+      out.lambdaAway = r3(b.away);
+      out.sigma = r3(b.sigma);
+      out.probabilities = matchProbabilities(out.lambdaHome, out.lambdaAway, out.sigma);
+    }
+    return out;
   }
 
   /** İçerik maç başına bir kez üretilir ve saklanır; herkes aynı analizi ve aynı simülasyonu görür. */
@@ -149,11 +189,33 @@ export class PaidContentService {
     }
   }
 
+  /**
+   * Saklı içerik yeniden üretilmeli mi: maç başlamadıysa ve dış tahmin verisi içerik üretildikten sonra belirgin
+   * değiştiyse (sonuç tahmini ya da tahmini skor değişecekse veya gol beklentisi %4'ten fazla kaydıysa).
+   */
+  _stale(cached, match, key) {
+    if (this.now() >= match.timestamp) return false;
+    const base = cached?.model?.base;
+    const snap = this._snap(key, match);
+    if (!base || !snap || !Number.isFinite(snap.at)) return false;
+    if (Number.isFinite(cached.model.marketAt) && snap.at - cached.model.marketAt < this.refreshMs) return false;
+    const w = marketWeight(snap, { now: this.now() });
+    if (w <= 0) return false;
+    const b = blendLambdas({ home: base.lambdaHome, away: base.lambdaAway, sigma: base.sigma ?? 0 }, snap.lambdas, w);
+    const moved = Math.abs(Math.log(b.home / cached.model.lambdaHome)) > 0.04 || Math.abs(Math.log(b.away / cached.model.lambdaAway)) > 0.04;
+    if (moved) return true;
+    const pr = matchProbabilities(b.home, b.away, b.sigma);
+    const pick = pr.homeWin >= pr.draw && pr.homeWin >= pr.awayWin ? '1' : pr.awayWin >= pr.draw && pr.awayWin >= pr.homeWin ? '2' : 'X';
+    return pick !== cached.ai?.pick;
+  }
+
   async _contentFor(match, key, asOf) {
     const cached = await this.store.getContent(key);
-    if (cached && cached.version === CONTENT_VERSION) return cached;
+    // Maç başladıysa saklı içerik olduğu gibi kalır (eski sürüm olsa da: kullanıcının maç öncesi gördüğü analiz
+    // sonradan değişmez); başlamadıysa sürüm ve dış tahmin verisi denetlenir.
+    if (cached && (cached.version === CONTENT_VERSION || this.now() >= match.timestamp) && !this._stale(cached, match, key)) return cached;
 
-    const analysis = await this._analyze(match, asOf);
+    const analysis = this._final(await this._analyze(match, asOf), this._snap(key, match));
     const content = {
       version: CONTENT_VERSION,
       key,
@@ -170,7 +232,8 @@ export class PaidContentService {
       odds: buildOdds(analysis),
       sim: buildSim(analysis, { seed: key }),
     };
-    const saved = await this.store.saveContent(key, content);
+    // Yeniden üretim (maç başlamadan): eski içeriğin üzerine yazılır; ilk üretim: herkes aynı içeriği görsün diye create
+    const saved = cached && typeof this.store.replaceContent === 'function' ? await this.store.replaceContent(key, content) : await this.store.saveContent(key, content);
     // Tahmin karnesi: yalnızca maç başlamadan üretilen içerik kaydedilir (sonradan üretilen tahmin karneye girmez).
     if (saved.generatedBeforeKickoff && this.track) {
       const entry = pendingEntry({
@@ -182,7 +245,8 @@ export class PaidContentService {
         awayName: match.awayName,
         ai: saved.ai,
       });
-      await this.track.recordPending(entry).catch((e) => console.error('[track]', e?.message ?? e));
+      const write = cached && typeof this.track.updatePending === 'function' ? this.track.updatePending(entry) : this.track.recordPending(entry);
+      await write.catch((e) => console.error('[track]', e?.message ?? e));
     }
     return saved;
   }

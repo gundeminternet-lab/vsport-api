@@ -54,7 +54,11 @@ export function simulateScores({ lambdaHome, lambdaAway, sigma = 0, sims = STORY
  * Hikâye verisi. Girdi: { lambdaHome, lambdaAway, sigma, homeName, awayName, seed, sims }.
  * Bütün yüzdeler aynı simülasyondan gelir; ilk gol ihtimali golsüz biten maç oranına göre modelden bölünür.
  */
-export function buildStory({ lambdaHome, lambdaAway, sigma = 0, homeName: H, awayName: A, seed, sims = STORY_SIMS }) {
+/**
+ * predictedScore: AI analizinin tahmin ettiği skor ("2-1"). Verilirse kontrol listesindeki skor odur (analiz,
+ * simülasyon ve video aynı skoru söylesin); verilmezse örneklemde sonuç tahminiyle uyumlu en sık skor.
+ */
+export function buildStory({ lambdaHome, lambdaAway, sigma = 0, homeName: H, awayName: A, seed, sims = STORY_SIMS, predictedScore = null }) {
   const counts = simulateScores({ lambdaHome, lambdaAway, sigma, sims, seed });
   let home = 0;
   let draw = 0;
@@ -86,7 +90,8 @@ export function buildStory({ lambdaHome, lambdaAway, sigma = 0, homeName: H, awa
     const [h, a] = score.split('-').map(Number);
     return (h > a ? '1' : h < a ? '2' : 'X') === pick;
   };
-  const pickScore = sorted.find(([score]) => fitsPick(score)) ?? sorted[0];
+  const given = typeof predictedScore === 'string' && /^\d+-\d+$/.test(predictedScore) && fitsPick(predictedScore) ? predictedScore : null;
+  const pickScore = given ? [given, counts.get(given) ?? 0] : sorted.find(([score]) => fitsPick(score)) ?? sorted[0];
   const predicted = pickScore ? { score: pickScore[0], pct: pct(pickScore[1], sims) } : null;
 
   // İlk gol: golsüz biten maçlar dışında, gol hızlarının oranıyla bölünür (Poisson süreçlerinde ilk golün sahibi).
@@ -178,7 +183,7 @@ const cache = new Map();
 export function storyForContent(content) {
   const m = content?.model;
   if (!m || !Number.isFinite(m.lambdaHome) || !Number.isFinite(m.lambdaAway)) return null;
-  const key = `${content.key}|${m.lambdaHome}|${m.lambdaAway}|${m.sigma ?? 0}`;
+  const key = `${content.key}|${m.lambdaHome}|${m.lambdaAway}|${m.sigma ?? 0}|${content.ai?.topScore ?? ''}`;
   if (cache.has(key)) return cache.get(key);
   const story = buildStory({
     lambdaHome: m.lambdaHome,
@@ -187,6 +192,7 @@ export function storyForContent(content) {
     homeName: content.home?.name ?? 'Ev sahibi',
     awayName: content.away?.name ?? 'Deplasman',
     seed: content.key,
+    predictedScore: content.ai?.topScore ?? null,
   });
   if (cache.size > 300) cache.clear();
   cache.set(key, story);
@@ -230,8 +236,8 @@ export function surpriseOf(pctBefore) {
  * Maç sonu karnesi: aynı tohumla aynı 50.000 simülasyon yeniden kurulur; gerçek skorun kaç kez çıktığı,
  * skorlar arasındaki sırası, sonucun maç öncesi ihtimali ve kontrol listesinin sonucu.
  */
-export function reviewStory({ lambdaHome, lambdaAway, sigma = 0, homeName, awayName, seed, sims = STORY_SIMS, actual, firstGoal = null }) {
-  const story = buildStory({ lambdaHome, lambdaAway, sigma, homeName, awayName, seed, sims });
+export function reviewStory({ lambdaHome, lambdaAway, sigma = 0, homeName, awayName, seed, sims = STORY_SIMS, actual, firstGoal = null, predictedScore = null }) {
+  const story = buildStory({ lambdaHome, lambdaAway, sigma, homeName, awayName, seed, sims, predictedScore });
   const counts = simulateScores({ lambdaHome, lambdaAway, sigma, sims, seed });
   const score = `${actual.home}-${actual.away}`;
   const simCount = counts.get(score) ?? 0;

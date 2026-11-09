@@ -4,13 +4,15 @@
 //   odds : kazanabilecek bahis ihtimalleri (MS, çifte şans, KG, alt/üst, İY, en olası skorlar, adil oran)
 //   sim  : 60 saniyelik simülasyon; oyuncu/top konumları kare kare hazırlanır, telefon yalnızca çizer
 
-import { baseMatrix, mixtureNodes, scoreMatrix, scoresForOutcome } from './engine/analysis.js';
+import { baseMatrix, mixtureNodes, scoreMatrix } from './engine/analysis.js';
 import { simulateMatch, simulateToScore } from './engine/simulator.js';
-import { createRng, seedToInt } from './engine/rng.js';
+import { seedToInt } from './engine/rng.js';
 import { calibrate, calibrateGoals } from './engine/calibration.js';
 import { MODEL, LEAGUES } from './engine/config.js';
 import { buildChoreography } from './engine/animation/choreography.js';
 import { buildPlayers } from './engine/animation/players.js';
+import { coherentScore, compatibleHalf } from './engine/scenario.js';
+import { contextNotes, splitNotes } from './engine/context.js';
 
 // İçerik türleri. AI paketi (ai) maçın AI analizini, AI videosunu, simülasyonunu ve Özel Yorumlarını kapsar.
 // Erişim abonelikle (ya da deneme hakkıyla); jeton fiyatı yoktur. Bahis ihtimalleri (odds) artık sunulmuyor;
@@ -19,7 +21,9 @@ export const CONTENT_TYPES = ['ai', 'odds', 'sim'];
 export const RETIRED_TYPES = ['odds'];
 // 2: lig geneli güç modeli, belirsizlik katmanı, tahminle tutarlı skor ve simülasyon
 // 3: zengin anlatım dili (cümle çeşitliliği, seri/form yorumları, "Maçın anahtarı" bölümü)
-export const CONTENT_VERSION = 3;
+// 4: maç bağlamı (lig durumu, play-off, rotasyon, son 20 maç), isabetli şutlu lig gücü, dış tahmin verisiyle
+//    birleşik model (günlük tahminle aynı), tek senaryo (analiz, simülasyon, video ve Özel Yorum aynı skoru anlatır)
+export const CONTENT_VERSION = 4;
 
 const pct = (p) => Math.round(p * 100);
 const r2 = (x) => Math.round(x * 100) / 100;
@@ -167,8 +171,13 @@ export function halfTimeTable(lambdaHome, lambdaAway, sigma = 0, maxG = 6) {
   return { lh1, la1, scores, win, draw, lose, goalless, over05, over15, scenario, predicted };
 }
 
+/**
+ * Tahmin edilen skor: sonuç tahminiyle ve güçlü gol öngörüleriyle (2,5 alt/üst, KG) çelişmeyen en olası skor
+ * (engine/scenario.js). Analiz, simülasyon, AI Yorumcu ve Özel Yorum bu tek skoru kullanır.
+ */
 export function predictedScore(analysis) {
-  return scoresForOutcome(matrixOf(analysis), predictedOutcome(analysis))[0];
+  const { p } = markets(analysis.lambdaHome, analysis.lambdaAway, analysis.sigma ?? 0);
+  return coherentScore(matrixOf(analysis), { outcome: predictedOutcome(analysis), over25: p.over25, btts: p.kgVar });
 }
 
 export function predictedOutcome(analysis) {
@@ -286,6 +295,28 @@ export function modelOf(analysis) {
     awayLeague: f.awayLeague ?? null,
     newHome: f.newHome === true,
     newAway: f.newAway === true,
+    // Yalnızca modelin (dış tahmin verisiyle birleştirilmeden önceki) gol beklentileri: günlük tahmin piyasa
+    // güncellemelerini bunun üstüne kurar (iki kez birleştirilmesin diye)
+    base: analysis.base ? { lambdaHome: analysis.base.lambdaHome, lambdaAway: analysis.base.lambdaAway, sigma: analysis.base.sigma ?? 0 } : null,
+    marketWeight: fin(analysis.marketWeight) ?? 0,
+    marketAt: fin(analysis.marketAt),
+    // Maç bağlamı (engine/context.js): Özel Yorum ve AI Yorumcu da aynı gerekçeleri anlatsın
+    context: contextOf(analysis),
+  };
+}
+
+/** Saklanacak bağlam özeti (Firestore/JSON güvenli). */
+function contextOf(analysis) {
+  const c = analysis.context;
+  if (!c) return null;
+  const H = analysis.home.name;
+  const A = analysis.away.name;
+  return {
+    notes: contextNotes(c, H, A),
+    splits: splitNotes(c, H, A),
+    stage: c.stage?.kind ?? null,
+    stakes: { home: c.stakes?.home?.label ?? null, away: c.stakes?.away?.label ?? null },
+    factors: c.factors ? { home: c.factors.home.map((x) => Math.round(x * 1000) / 1000), away: c.factors.away.map((x) => Math.round(x * 1000) / 1000), total: Math.round(c.factors.total * 1000) / 1000 } : null,
   };
 }
 
@@ -411,6 +442,13 @@ export function buildAi(analysis, { editorComment = null, seed = null } = {}) {
     });
   }
 
+  // Maçın bağlamı: lig durumu (motivasyon), play-off/final, rotasyon ve yorgunluk (engine/context.js)
+  const ctxNotes = analysis.context ? contextNotes(analysis.context, H, A) : [];
+  if (ctxNotes.length) sections.push({ title: 'Maçın bağlamı', text: ctxNotes.join(' ') });
+  // Son 20 maç: gol attığı/yediği ortalamalar, iç saha/deplasman, lig/Avrupa ayrımı
+  const splitText = analysis.context ? splitNotes(analysis.context, H, A) : [];
+  if (splitText.length) sections.push({ title: 'Son 20 maç', text: splitText.join(' ') });
+
   // Aralarındaki maçlar
   const h = analysis.h2h;
   let h2hText;
@@ -495,6 +533,12 @@ export function buildAi(analysis, { editorComment = null, seed = null } = {}) {
   if (pr.draw >= 0.3) {
     factors.push({ w: pr.draw, text: say('kf.draw', ['Beraberlik ihtimali yüksek; iki takım da risk almak yerine puanı seçebilir.', 'Beraberlik güçlü bir senaryo; temkinli bir maç olabilir.']) });
   }
+  // Bağlamın en belirleyici maddesi (rotasyon, motivasyon farkı, play-off) maçın anahtarına da girer
+  const cf = analysis.factors?.context;
+  if (ctxNotes.length && cf) {
+    const swing = Math.abs(Math.log(cf.home[0] * cf.away[1])) + Math.abs(Math.log(cf.away[0] * cf.home[1])) + Math.abs(Math.log(cf.total));
+    if (swing >= 0.04) factors.push({ w: 0.25 + swing * 2, text: ctxNotes[ctxNotes.length - 1] });
+  }
   factors.sort((x, y) => y.w - x.w);
   const firstHome = Math.round((lH / (lH + lA)) * 100);
   const firstTeam = firstHome >= 50 ? H : A;
@@ -572,20 +616,18 @@ export const VALUES_PER_FRAME = 3 + 11 * 3 * 2 + 2;
  * (en olası skorlara öncelik verilerek) seçilir; böylece ekranda izlenen maç, AI'nın anlattığı hikâyeyle çelişmez
  * ve 6-0 gibi aşırı uçlar çıkmaz. Aynı tohum her zaman aynı skoru verir.
  */
-export function pickSimTarget(analysis, seed) {
-  const cands = scoresForOutcome(matrixOf(analysis), predictedOutcome(analysis));
-  const best = cands[0].p;
-  const plausible = cands.filter((c) => c.p >= best * 0.25);
-  const weights = plausible.map((c) => c.p ** 1.6);
-  const rng = createRng(`${seed}|hedef`);
-  return rng.pickWeighted(plausible, weights);
+export function pickSimTarget(analysis, seed) { // eslint-disable-line no-unused-vars
+  // Simülasyon tam olarak AI analizinin tahmin ettiği skorla biter (eskiden uyumlu skorlar arasından rastgele
+  // seçiliyordu; analiz 1-0 derken simülasyon 2-1 bitebiliyordu).
+  return predictedScore(analysis);
 }
 
 export function buildSim(analysis, { seed, durationSeconds = 60 } = {}) {
   const target = pickSimTarget(analysis, seed);
-  // Devre skoru Özel Yorum'daki tahmini ilk yarı skoruyla aynı olsun (final skoruyla uyumluysa)
-  const ht = halfTimeTable(analysis.lambdaHome, analysis.lambdaAway, analysis.sigma ?? 0).predicted;
-  const htTarget = ht.home <= target.home && ht.away <= target.away ? { home: ht.home, away: ht.away } : null;
+  // Devre skoru Özel Yorum'daki tahmini ilk yarı skoruyla aynı olsun (final skoruyla uyumluysa; değilse uyumlu en
+  // olası devre skoru)
+  const half = halfTimeTable(analysis.lambdaHome, analysis.lambdaAway, analysis.sigma ?? 0);
+  const htTarget = compatibleHalf(half.scores, target, half.predicted);
   const timeline = simulateToScore(analysis, { seed, target: { home: target.home, away: target.away }, htTarget });
   const choreo = buildChoreography(timeline, { durationSeconds });
   const form = (l) => (l >= 1.6 ? '4-3-3' : '4-4-2');

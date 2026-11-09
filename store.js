@@ -26,6 +26,11 @@ export function createStore(db, FieldValue) {
         throw e;
       }
     },
+    // Maç başlamadan yeniden üretilen içerik (dış tahmin verisi değişti): üzerine yazılır
+    async replaceContent(key, content) {
+      await db.doc(`match_content/${key}`).set(content);
+      return content;
+    },
     // ---- Canlı bildirim takibi (watched/{matchKey}) ----
     async listWatched(from, to) {
       const q = await db.collection('watched').where('kickoffAt', '>=', from).where('kickoffAt', '<=', to).limit(300).get();

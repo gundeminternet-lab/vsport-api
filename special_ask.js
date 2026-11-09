@@ -336,6 +336,9 @@ export function buildAsk({ market, choice, homeName: H, awayName: A, model, corn
   const forN = reasons.filter((r) => r.kind === 'for').length;
   const againstN = reasons.length - forN;
   if (!reasons.length) reasons.push({ kind: 'info', text: F.list[0].text, w: 0 });
+  // Maç bağlamı (lig durumu, play-off, rotasyon, yorgunluk): AI analiziyle aynı gerekçeler
+  const ctxNotes = Array.isArray(model?.context?.notes) ? model.context.notes.slice(0, 2) : [];
+  reasons.splice(Math.min(reasons.length, 4), 0, ...ctxNotes.map((text) => ({ kind: 'info', text, w: 0 })));
 
   const label = mine.short;
   const aiLabel = ai.o.short;

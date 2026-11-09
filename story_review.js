@@ -60,6 +60,7 @@ export class StoryReviewService {
       seed: content.key,
       actual: { home: match.homeGoals, away: match.awayGoals },
       firstGoal,
+      predictedScore: content.ai?.topScore ?? null,
     });
   }
 }

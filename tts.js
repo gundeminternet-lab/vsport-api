@@ -10,12 +10,14 @@
 //     2) Azure Konuşma hizmeti — AZURE_SPEECH_KEY ve AZURE_SPEECH_REGION tanımlıysa (resmi, aylık 0,5M karakter ücretsiz)
 //     3) Edge "Sesli oku" (edge_tts.js) — anahtar gerekmez; TTS_PROVIDER=off ile kapatılabilir
 //   Hiçbiri olmazsa uygulama telefonun kendi sesine döner.
+//   Metin sese çevrilmeden önce speech_text.js ile düzeltilir (MS, İY, KG, 2.5 gibi kısaltmalar Türkçe okunur).
 //   Aynı metin ve ses için üretilen ses Firestore'da saklanır (tts_cache): herkes aynı analizi dinlediği için
 //   aylık ücretsiz kotalar çok daha geç dolar. Aylık kullanım tts_usage/{YYYY-MM}, tts_usage/google_{YYYY-MM}.
 
 import crypto from 'node:crypto';
 import { AppError } from './logic.js';
 import { edgeSynthesize } from './edge_tts.js';
+import { speechText } from './speech_text.js';
 
 export const VOICES = {
   // vSport Spiker: ElevenLabs yoksa Ahmet sesi spiker ayarıyla (biraz hızlı, daha kalın)
@@ -270,10 +272,12 @@ export function createTts({
     enabled: azure || edge || providers.length > 0,
     spiker: providers.length > 0,
 
-    async speak({ text, voice = 'female', mood = 'warm' }) {
+    async speak({ text: raw, voice = 'female', mood = 'warm' }) {
       if (!azure && !edge && !providers.length) throw new AppError('unavailable', 'İnsansı ses şu an kullanılamıyor.');
-      if (typeof text !== 'string' || !text.trim()) throw new AppError('invalid-argument', 'Metin boş.');
-      if (text.length > MAX_CHARS) throw new AppError('invalid-argument', `Metin en fazla ${MAX_CHARS} karakter olabilir.`);
+      if (typeof raw !== 'string' || !raw.trim()) throw new AppError('invalid-argument', 'Metin boş.');
+      if (raw.length > MAX_CHARS) throw new AppError('invalid-argument', `Metin en fazla ${MAX_CHARS} karakter olabilir.`);
+      // Okunan metin: kısaltmalar açılır ("MS 1" milattan sonra diye okunmasın). Önbellek de bu metinle tutulur.
+      const text = speechText(raw);
       const voiceKey = VOICES[voice] ? voice : 'female';
       const moodKey = moodOf(mood);
       if (voiceKey === 'spiker' && providers.length) {

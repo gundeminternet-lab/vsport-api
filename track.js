@@ -132,6 +132,13 @@ export class TrackService {
     return this.store.createPending(entry);
   }
 
+  /** Maç başlamadan yeniden üretilen içeriğin tahmini: bekleyen kayıt güncellenir (karne son yayınlanan tahminle). */
+  async updatePending(entry) {
+    if (!entry) return false;
+    if (typeof this.store.savePending === 'function') return this.store.savePending(entry);
+    return this.store.createPending(entry);
+  }
+
   /**
    * Bitmiş maçların bekleyen tahminlerini sonuçlandırır. Dönen değer sonuçlanan kayıt sayısıdır.
    * Henüz bitmemiş ya da okunamayan kayıt yarım saat yeniden denenmez: listenin başında takılı kalan eski kayıtlar
@@ -228,6 +235,12 @@ export function createTrackStore(db) {
         if (e.code === 6 /* ALREADY_EXISTS */) return false;
         throw e;
       }
+    },
+    async savePending(entry) {
+      const done = await db.doc(`predictions/${entry.key}`).get();
+      if (done.exists) return false;
+      await db.doc(`prediction_pending/${entry.key}`).set(entry);
+      return true;
     },
     async listPendingBefore(cutoffMs, limit) {
       const q = await db.collection('prediction_pending').where('kickoffMs', '<=', cutoffMs).orderBy('kickoffMs').limit(limit).get();

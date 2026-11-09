@@ -33,6 +33,12 @@ import {
  * sahte sinyal), 0,6-1,5 arasında sınırlıdır. c: { n, hit, p } (p: beklenen tutma toplamı).
  */
 export const LEARN_PRIOR = 15;
+/**
+ * Öğrenme kaydının anahtarı. Hedef süresi değişince (20 → 30 dk, korner kaldırıldı) eski kayıtlar yeni hedefi
+ * temsil etmez: sürüm öneki ile yeni hedefin geçmişi sıfırdan birikir.
+ */
+export const CALIB_VERSION = 'v2';
+export const calibKey = (type, stars) => `${CALIB_VERSION}_${type}_${stars}`;
 export function learnedFactor(c) {
   if (!c || !(c.n > 0) || !(c.p > 0)) return 1;
   const k = (c.hit + LEARN_PRIOR) / (c.p + LEARN_PRIOR);
@@ -44,6 +50,7 @@ export const MAX_RULES = 10;
 export const MAX_TOKENS = 5;
 export const DAILY_LIMITS = [5, 10, 20, 40, 60, 0]; // 0: sınırsız
 export const DEFAULT_RULE = Object.freeze({ id: 'default', types: ['siren', 'comeback', 'late'], minStars: 2, leagues: [], teams: [] });
+// Kullanıcı kurallarında geçerli türler (korner sinyali kaldırıldı; eski kurallardaki 'corner' temizlenir)
 export const DEFAULT_ALARMS = Object.freeze({
   enabled: true,
   quiet: { on: true, from: '00:00', to: '08:00' },
@@ -296,11 +303,16 @@ export class RadarService {
       if (st.lambdas === undefined) st.lambdas = this.lambdasFor ? await this.lambdasFor(job.key).catch(() => null) : null;
       const history = [...this._signals.values()].filter((s) => s.key === job.key);
       const found = detectSignals(m, view, history, st.lambdas);
-      // Aynı takıma aynı anda gol ve korner sinyali verilmez (bildirim yağmuru olmasın)
-      const goalSides = new Set([...found.filter((f) => f.type !== 'corner'), ...history.filter((h) => h.status === 'open' && h.type !== 'corner')].map((f) => f.side));
+      // Az ama isabetli: yalnızca hedefin (radarın kendi geçmişinden öğrenilmiş düzeltmeyle) tahmini ihtimali türün
+      // eşiğini geçen sinyaller verilir. Eşiğin altında kalan baskı yalnızca Canlı Baskı Tablosunda görünür.
       for (const f of found) {
-        if (f.type === 'corner' && goalSides.has(f.side)) continue;
-        await this._create(job, st, m, view, f);
+        const chance = await this._learnedChance(f);
+        const min = RADAR.minChance[f.type] ?? 0;
+        if (Number.isFinite(chance?.p) && chance.p < min) {
+          this.stats.gated = (this.stats.gated ?? 0) + 1;
+          continue;
+        }
+        await this._create(job, st, m, view, { ...f, chance });
       }
     }
     return { live, data };
@@ -334,7 +346,9 @@ export class RadarService {
       index: f.index,
       label: STAR_LABELS[f.stars],
       pressure: f.pressure,
-      chance: await this._learnedChance(f),
+      chance: f.chance?.raw !== undefined ? f.chance : await this._learnedChance(f),
+      // Sinyalin ek gerekçeleri (oyuncu değişikliği: "Hücuma oyuncu girdi: X (63')")
+      notes: Array.isArray(f.notes) ? f.notes : [],
       // Süre sonu saati: ilk yarıdaki sinyalde saat + süre (uzatma, sonuçta süreye eklenir), sonra oynanan dakikadan
       target: { ...f.target, deadlineLabel: f.target.untilEnd ? 'MS' : f.e <= 45 ? `${Math.round(f.target.deadline)}'` : clockOf(f.target.deadline, h1) },
       view: { source: view.source, w5: view.w5, w10: view.w10, total: view.total },
@@ -569,8 +583,8 @@ export class RadarService {
       value = {};
     }
     // Tür+yıldız yeterli veri yoksa türün bütün yıldızları birlikte
-    const same = value[`${f.type}_${f.stars}`];
-    const all = Object.entries(value).filter(([k]) => k.startsWith(`${f.type}_`)).reduce((a, [, v]) => ({ n: a.n + v.n, hit: a.hit + v.hit, p: a.p + v.p }), { n: 0, hit: 0, p: 0 });
+    const same = value[calibKey(f.type, f.stars)];
+    const all = Object.entries(value).filter(([k]) => k.startsWith(calibKey(f.type, ''))).reduce((a, [, v]) => ({ n: a.n + v.n, hit: a.hit + v.hit, p: a.p + v.p }), { n: 0, hit: 0, p: 0 });
     const k = learnedFactor(same && same.n >= 20 ? same : all);
     const adj = (v) => Math.round(Math.min(0.95, Math.max(0.03, v * k)) * 100) / 100;
     // Baskısız ihtimal de aynı katsayıyla: "baskı olmasaydı" karşılaştırması tutarlı kalır
@@ -804,7 +818,7 @@ export function createRadarStore(db, FieldValue) {
           byStars: { [sig.stars]: { n: inc(1), hit: inc(hit ? 1 : 0) } },
           byType: { [sig.type]: { n: inc(1), hit: inc(hit ? 1 : 0) } },
           // Öğrenme: sinyal anında ham modelin verdiği ihtimal (tutma oranıyla kıyaslanır, bkz. learnedFactor)
-          calib: { [`${sig.type}_${sig.stars}`]: { n: inc(1), hit: inc(hit ? 1 : 0), p: inc(Number(sig.chance?.raw ?? sig.chance?.p ?? 0)) } },
+          calib: { [calibKey(sig.type, sig.stars)]: { n: inc(1), hit: inc(hit ? 1 : 0), p: inc(Number(sig.chance?.raw ?? sig.chance?.p ?? 0)) } },
         },
         { merge: true },
       );

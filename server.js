@@ -111,7 +111,8 @@ const capture = new CaptureLocks({
   store: createCaptureStore(db, FieldValue),
   isExempt: async (uid) => (await db.doc(`users/${uid}`).get()).get('role') === 'admin',
 });
-const paidService = new PaidContentService({ store, espn, track: trackService, access, capture });
+// AI içeriği günlük tahminle aynı birleşik modelden üretilir (dış tahmin verisi: market.js; aşağıda kuruluyor)
+const paidService = new PaidContentService({ store, espn, track: trackService, access, capture, market: (key) => market?.latest(key) ?? null });
 // Günlük toplu tahminler: kendi liglerimizin bugünkü ve yarınki maçları, maç başlamadan hesaplanır
 const daily = new DailyPredictionService({
   paid: paidService,
@@ -126,7 +127,11 @@ const daily = new DailyPredictionService({
   capture,
 });
 // Kişiye özel yorum: tam içerik gecikirse günlük tahmindeki modelle hemen yanıt verilir
-paidService.quickModel = (key) => daily.baseModel(key);
+// (güncel birleşik model: dış tahmin verisiyle güncellendiyse o, yoksa maç öncesi tahmin)
+paidService.quickModel = async (key) => {
+  const f = await daily.finalLambdas(key);
+  return f ? { lambdaHome: f.home, lambdaAway: f.away, sigma: f.sigma ?? 0 } : daily.baseModel(key);
+};
 // Dış tahmin verisi (yalnızca sunucuda model girdisi; uygulamada gösterilmez). MARKET_DATA=off ile kapatılır.
 const market =
   process.env.MARKET_DATA === 'off'
