@@ -72,10 +72,11 @@ function service({ now, fixtures, marketLatest = null }) {
 
 test('ağırlık: veri kalitesine göre azalır, eski veri kullanılmaz', () => {
   const s = snapFor(1.6, 1.0);
-  assert.equal(marketWeight(s, { now: NOW }), 0.5);
-  assert.equal(marketWeight({ ...s, x12: { ...s.x12, n: 1 } }, { now: NOW }), 0.4);
-  assert.equal(marketWeight({ ...s, x12: { ...s.x12, spread: 0.1 } }, { now: NOW }), 0.25);
-  assert.equal(marketWeight(s, { now: NOW + 13 * H }), 0.25);
+  // Ağırlık 0.8 (geriye dönük test: piyasa görüşü arttıkça isabet artıyor); tek kaynak ×0.85, ayrışma ve eskilik ×0.5
+  assert.equal(marketWeight(s, { now: NOW }), 0.8);
+  assert.ok(Math.abs(marketWeight({ ...s, x12: { ...s.x12, n: 1 } }, { now: NOW }) - 0.68) < 1e-9);
+  assert.equal(marketWeight({ ...s, x12: { ...s.x12, spread: 0.1 } }, { now: NOW }), 0.4);
+  assert.equal(marketWeight(s, { now: NOW + 13 * H }), 0.4);
   assert.equal(marketWeight(s, { now: NOW + 25 * H }), 0);
   assert.equal(marketWeight(null, { now: NOW }), 0);
   assert.equal(marketWeight({ ...s, lambdas: null }, { now: NOW }), 0);
@@ -109,7 +110,7 @@ test('canlı güncelleme: piyasa ev sahibini güçlü görünce tahmin ona doğr
   assert.equal(live.rev, 1);
   assert.ok(live.lambdas.home > 1.35 && live.lambdas.away < 1.1);
   assert.ok(live.probs.home > 45);
-  assert.equal(live.weight, 0.5);
+  assert.equal(live.weight, 0.8);
   // Aynı veriyle ikinci kez: değişiklik yok
   assert.equal(liveUpdate({ ...entry, live }, strong, NOW + MIN), null);
   // Başlamaya bir dakikadan az: kilitli
@@ -153,7 +154,8 @@ test('servis: yeni tahmin hemen güncel veriyle başlar; liste ilk tahmini, gün
   assert.equal(it.rev, 1);
   assert.ok(it.updatedAt);
   assert.equal(it.locked, false);
-  assert.equal(it.confidenceFrom, st.rows.get(key).confidence);
+  // Güncel öne çıkan tahminin ilk yüzdesi (piyasa güçlü olunca öne çıkan tür değişebilir)
+  assert.equal(it.confidenceFrom, st.rows.get(key).markets.find((x) => x.id === it.best).pct);
   const ms = it.markets.find((x) => x.id === 'ms');
   assert.deepEqual(ms.from, { pick: 'MS 1', pct: 45 });
   assert.ok(ms.pct > 45);

@@ -221,3 +221,101 @@ test('spiker: ElevenLabs anahtarı yoksa doğrudan Microsoft yedeği (eski sunuc
   const r = await tts.speak({ text: 'Merhaba.', voice: 'spiker' });
   assert.equal(Buffer.from(r.audio, 'base64').toString(), 'spiker');
 });
+
+import { googleBody, googleCacheKey, billingMonth, GOOGLE_RATES } from '../tts.js';
+
+test('spiker: Google Chirp gövdesi havaya göre hız alır; ay Pasifik saatine göre', () => {
+  const b = googleBody(' Gol! ', 'tr-TR-Chirp3-HD-Fenrir', 'excited');
+  assert.deepEqual(b, {
+    input: { text: 'Gol!' },
+    voice: { languageCode: 'tr-TR', name: 'tr-TR-Chirp3-HD-Fenrir' },
+    audioConfig: { audioEncoding: 'MP3', speakingRate: GOOGLE_RATES.excited },
+  });
+  assert.equal(googleBody('a', 'tr-TR-Chirp3-HD-Orus', 'tanımsız').audioConfig.speakingRate, 1);
+  assert.notEqual(googleCacheKey('a', 'tr-TR-Chirp3-HD-Fenrir'), googleCacheKey('a', 'tr-TR-Chirp3-HD-Orus'));
+  assert.notEqual(googleCacheKey('a'), elevenCacheKey('a', 'v1'));
+  assert.equal(billingMonth(Date.parse('2026-12-01T05:00:00Z')), '2026-11'); // Pasifik'te hâlâ kasım
+  assert.equal(billingMonth(Date.parse('2026-12-01T09:00:00Z')), '2026-12');
+});
+
+test('spiker: ElevenLabs yoksa Google ile bir kez üretir, sayar ve önbelleğe alır', async () => {
+  const db = memDb();
+  const calls = [];
+  const tts = createTts({
+    db,
+    FieldValue: FV,
+    key: '',
+    region: '',
+    edge: false,
+    elevenKey: '',
+    elevenVoice: '',
+    googleKey: 'gk',
+    now: () => Date.parse('2026-11-04T12:00:00Z'),
+    fetchImpl: async (url, opts) => {
+      calls.push(url);
+      assert.equal(opts.headers['X-Goog-Api-Key'], 'gk');
+      assert.equal(JSON.parse(opts.body).voice.name, 'tr-TR-Chirp3-HD-Fenrir');
+      return { ok: true, json: async () => ({ audioContent: Buffer.from('chirp').toString('base64') }) };
+    },
+  });
+  assert.equal(tts.spiker, true);
+  const [a, b] = await Promise.all([tts.speak({ text: 'Gol geldi.', voice: 'spiker' }), tts.speak({ text: 'Gol geldi.', voice: 'spiker' })]);
+  const c = await tts.speak({ text: 'Gol geldi.', voice: 'spiker' });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0], 'https://texttospeech.googleapis.com/v1/text:synthesize');
+  assert.equal(Buffer.from(a.audio, 'base64').toString(), 'chirp');
+  assert.equal(b.audio, a.audio);
+  assert.equal(c.cached, true);
+  assert.equal(db.store.get('tts_usage/google_2026-11').chars, 'Gol geldi.'.length);
+  assert.equal([...db.store.values()].find((v) => v.audio)?.provider, 'google');
+});
+
+test('spiker: sıra ElevenLabs → Google → Edge; sınır dolunca ücretsiz kotada durur', async () => {
+  const db = memDb();
+  const seen = [];
+  const edgeSeen = [];
+  const tts = createTts({
+    db,
+    FieldValue: FV,
+    key: '',
+    region: '',
+    elevenKey: 'xi',
+    elevenVoice: 'V',
+    googleKey: 'gk',
+    googleLimit: 12,
+    fetchImpl: async (url) => {
+      seen.push(url.includes('elevenlabs') ? 'eleven' : 'google');
+      if (url.includes('elevenlabs')) return { ok: false, status: 401, text: async () => 'kota' };
+      return { ok: true, json: async () => ({ audioContent: Buffer.from('chirp').toString('base64') }) };
+    },
+    edgeImpl: async (text, voice) => (edgeSeen.push(voice), Buffer.from('edge')),
+  });
+  const r1 = await tts.speak({ text: 'Kısa metin.', voice: 'spiker' }); // 11 karakter: Eleven 401 → Google
+  const r2 = await tts.speak({ text: 'İkinci metin.', voice: 'spiker' }); // Google sınırı aşılıyor → Edge
+  assert.equal(Buffer.from(r1.audio, 'base64').toString(), 'chirp');
+  assert.equal(Buffer.from(r2.audio, 'base64').toString(), 'edge');
+  assert.deepEqual(seen, ['eleven', 'google', 'eleven']);
+  assert.deepEqual(edgeSeen, ['spiker']);
+});
+
+test('spiker: Google hata ya da boş ses dönerse sayaç artmaz, yedeğe düşülür', async () => {
+  const db = memDb();
+  let n = 0;
+  const tts = createTts({
+    db,
+    FieldValue: FV,
+    key: '',
+    region: '',
+    elevenKey: '',
+    elevenVoice: '',
+    googleKey: 'gk',
+    fetchImpl: async () => (++n === 1 ? { ok: false, status: 403, text: async () => 'billing' } : { ok: true, json: async () => ({}) }),
+    edgeImpl: async () => Buffer.from('edge'),
+  });
+  assert.equal(Buffer.from((await tts.speak({ text: 'Bir.', voice: 'spiker' })).audio, 'base64').toString(), 'edge');
+  assert.equal(Buffer.from((await tts.speak({ text: 'İki.', voice: 'spiker' })).audio, 'base64').toString(), 'edge');
+  assert.equal([...db.store.keys()].some((k) => k.startsWith('tts_usage/google_')), false);
+  // Spiker dışındaki sesler Google'a hiç gitmez
+  await tts.speak({ text: 'Üç.', voice: 'female' });
+  assert.equal(n, 2);
+});

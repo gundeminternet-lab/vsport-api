@@ -17,6 +17,11 @@ import {
   shotXg,
   snapWindow,
   starsOf,
+  SIGNAL_TYPES,
+  subsMult,
+  subKind,
+  parseSub,
+  roleOf,
 } from '../radar.js';
 import { RadarService, alarmMatches, cleanRules, clockOf, inQuiet, learnedFactor, localTime } from '../radar_service.js';
 import { RADAR_CHANNEL, channelFor } from '../notify.js';
@@ -146,7 +151,7 @@ test('topa sahip olma + şut + xG birlikte yüksekse Gol Sireni çalar (yalnızc
   assert.equal(siren.side, 'home');
   assert.equal(siren.stars, 3);
   assert.equal(siren.target.kind, 'team_goal');
-  assert.equal(siren.target.deadline, 56);
+  assert.equal(siren.target.deadline, 66, 'hedef süresi 30 dk');
   assert.ok(siren.chance.p > siren.chance.base, 'baskı gol ihtimalini artırır');
   assert.ok(!sigs.some((s) => s.side === 'away'));
   const d = describeSig(siren, m.teams, m.score);
@@ -464,8 +469,8 @@ test('servis: abone olmayan süren sinyalin takımlarını görmez, haftalık ha
   assert.equal((await t.radar.feed({ uid: 'x', guest: true })).active.find((x) => x.id === s.id).locked, true);
 
   // Süre dolunca sinyal geçmişe düşer ve herkese açılır
-  t.advance(25 * 60e3);
-  t.set(summary({ clock: "62'", period: 2, commentary: [] }));
+  t.advance(36 * 60e3);
+  t.set(summary({ clock: "70'", period: 2, commentary: [] }));
   await t.radar.tick();
   const after = await t.radar.feed({ uid: 'x', guest: true });
   const done = after.recent.find((x) => x.id === s.id);
@@ -484,14 +489,14 @@ test('servis: alarm ayarları doğrulanır, jeton kaydı abonelik bitişini sakl
   await assert.rejects(() => t.radar.saveAlarms({ uid: 'pro', quiet: { on: true, from: '25:00', to: '08:00' } }), /Sessiz/);
   const saved = await t.radar.saveAlarms({ uid: 'pro', dailyLimit: 0, rules: [{ types: ['siren', 'corner'], minStars: 1 }] });
   assert.equal(saved.dailyLimit, 0);
-  assert.deepEqual(saved.rules[0].types, ['siren', 'corner']);
+  assert.deepEqual(saved.rules[0].types, ['siren'], 'korner sinyali kaldırıldı: eski kuraldaki korner temizlenir');
   await t.radar.registerToken({ uid: 'pro', token: TOKEN(9), tz: 180 });
   const doc = t.store.alarmDocs.get('pro');
   assert.deepEqual(doc.tokens, [TOKEN(9)]);
   assert.ok(doc.subUntil > Date.UTC(2026, 9, 29));
   await assert.rejects(() => t.radar.registerToken({ uid: 'pro', token: 'kısa' }), /jeton/);
   await assert.rejects(() => t.radar.getAlarms({ uid: 'm', guest: true }), (e) => e.code === 'unauthenticated');
-  // Sınırsız ve korner dahil kural: yeni turda bildirim gider
+  // Sınırsız kural: yeni turda bildirim gider
   await t.radar.tick();
   assert.ok(t.pushes.length >= 1);
   assert.deepEqual(t.pushes[0].tokens, [TOKEN(9)]);
@@ -554,7 +559,7 @@ test('öğrenme: radar kendi sonuçlarından gösterilen gol ihtimalini düzelti
 
   const now = Date.UTC(2026, 10, 2, 18);
   const day = new Date(now + 3 * 3600e3).toISOString().slice(0, 10);
-  const store = { getStats: async () => [{ day, calib: { siren_2: { n: 120, hit: 30, p: 60 }, siren_1: { n: 5, hit: 5, p: 2 } } }] };
+  const store = { getStats: async () => [{ day, calib: { v2_siren_2: { n: 120, hit: 30, p: 60 }, v2_siren_1: { n: 5, hit: 5, p: 2 }, siren_2: { n: 900, hit: 900, p: 100 } } }] };
   const svc = new RadarService({ store, espn: null, access: null, plan: null, now: () => now, log: { warn() {}, error() {} } });
   const c2 = await svc._learnedChance({ type: 'siren', stars: 2, chance: { p: 0.5, base: 0.3, minutes: 20 } });
   assert.equal(c2.raw, 0.5);
@@ -565,4 +570,49 @@ test('öğrenme: radar kendi sonuçlarından gösterilen gol ihtimalini düzelti
   // Veri olmayan tür değişmez
   const c3 = await svc._learnedChance({ type: 'corner', stars: 1, chance: { p: 0.4, base: 0.3, minutes: 10 } });
   assert.equal(c3.p, 0.4);
+});
+
+
+// ---------------------------------------------------------------------------------------------------
+// Korner sinyali yok; oyuncu değişikliği; olasılık eşiği
+// ---------------------------------------------------------------------------------------------------
+test('korner sinyali üretilmez (yalnızca gol beklentisi sinyalleri)', () => {
+  const corners = [c("30'", `Corner,  ${H}. Conceded by Defans.`), c("31'", `Corner,  ${H}. Conceded by Defans.`), c("33'", `Corner,  ${H}. Conceded by Defans.`), ...PRESS];
+  const m = readMatch(summary({ commentary: corners }));
+  const sigs = detectSignals(m, buildView(m, []), [], { home: 1.5, away: 1.1 });
+  assert.ok(!sigs.some((x) => x.type === 'corner'));
+  assert.ok(!SIGNAL_TYPES.includes('corner'));
+});
+
+test('oyuncu değişikliği: hücuma forvet girdiyse gol ihtimali artar ve sinyalde not edilir', () => {
+  const rosters = [
+    { homeAway: 'home', roster: [{ athlete: { displayName: 'Golcü Ali' }, position: { abbreviation: 'F' } }, { athlete: { displayName: 'Orta Veli' }, position: { abbreviation: 'M' } }] },
+    { homeAway: 'away', roster: [{ athlete: { displayName: 'Stoper Can' }, position: { abbreviation: 'D' } }, { athlete: { displayName: 'Forvet Ece' }, position: { abbreviation: 'F' } }] },
+  ];
+  const sub = c("31'", `Substitution, ${H}. Golcü Ali replaces Orta Veli.`);
+  const base = readMatch(summary({ commentary: PRESS }));
+  const m = readMatch({ ...summary({ commentary: [sub, ...PRESS] }), rosters });
+  assert.equal(m.subs.length, 1);
+  assert.deepEqual([m.subs[0].side, m.subs[0].kind, m.subs[0].inRole, m.subs[0].outRole], ['home', 'attack', 'F', 'M']);
+  assert.ok(subsMult(m, 'home') > 1.1 && subsMult(m, 'away') === 1);
+  const withSub = detectSignals(m, buildView(m, []), [], { home: 1.5, away: 1.1 }).find((x) => x.type === 'siren');
+  const without = detectSignals(base, buildView(base, []), [], { home: 1.5, away: 1.1 }).find((x) => x.type === 'siren');
+  assert.ok(withSub.chance.p > without.chance.p, `${withSub.chance.p} > ${without.chance.p}`);
+  assert.match(withSub.notes[0], /Hücuma oyuncu girdi: Golcü Ali \(31'\)/);
+  // Öndeyken savunmaya oyuncu: hız düşer
+  assert.equal(subKind({ inRole: 'D', outRole: 'F' }), 'defend');
+  assert.equal(subKind({ inRole: 'F', outRole: 'F' }), 'fresh');
+  assert.equal(parseSub('Substitution, X FC. A B replaces C D because of an injury.').outName, 'C D');
+  assert.equal(roleOf({ abbreviation: 'CF' }), 'F');
+  assert.equal(roleOf({ name: 'Goalkeeper' }), 'G');
+});
+
+test('olasılık eşiği: öğrenilmiş ihtimali eşiğin altında kalan sinyal verilmez', async () => {
+  const t = setup();
+  // Radarın geçmişi aşırı iyimser: model 100 bekledi, 20 tuttu → ihtimaller düşer, sinyal eşiği geçemez
+  t.store.getStats = async () => [{ day: '2026-10-29', calib: { v2_siren_3: { n: 400, hit: 20, p: 200 }, v2_siren_2: { n: 400, hit: 20, p: 200 } } }];
+  await t.radar.tick();
+  assert.equal([...t.store.signals.values()].filter((s) => s.type === 'siren').length, 0);
+  assert.equal(t.pushes.length, 0);
+  assert.ok(t.radar.stats.gated >= 1);
 });

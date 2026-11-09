@@ -80,31 +80,32 @@ test('adaylar: bütün türler; piyasa oranı yoksa AI oranı = 1/ihtimal', () =
   assert.ok(p('İY/MS 2/1') < 0.2);
 });
 
-test('günün kuponları: Banko / İdeal / Sürpriz 3 maç, İY KG Var 4 maç, İY/MS 3 kupon × 2 maç', () => {
+test('günün kuponları: Banko 2, Günün 3, Gol 2, Sürpriz 2 maç; maç tekrarlanmaz; kurallar', () => {
   const pool = entries.map((e, i) => ({ entry: e, candidates: candidatesOf(e, i % 2 ? pricesOf(providerDoc(1.6 + i * 0.2, 3.8, 5 - i * 0.2)) : null) }));
   const coupons = buildCoupons(DAYKEY, pool);
   const by = (k) => coupons.filter((c) => c.kind === k);
-  assert.equal(by('banko').length, 1);
-  assert.equal(by('ideal').length, 1);
-  assert.equal(by('surpriz').length, 1);
-  assert.equal(by('iykg').length, 1);
-  assert.equal(by('iyms').length, 3);
-  assert.equal(by('banko')[0].selections.length, 3);
-  assert.equal(by('iykg')[0].selections.length, 4);
-  for (const c of by('iyms')) {
-    assert.equal(c.selections.length, 2);
-    for (const s of c.selections) assert.match(s.market, /^İY\/MS (1\/2|2\/1)$/);
+  assert.deepEqual(COUPON_KINDS.map((k) => k.id), ['banko', 'gunun', 'gol', 'surpriz']);
+  for (const k of COUPON_KINDS) {
+    assert.ok(by(k.id).length <= 1, k.id);
+    if (by(k.id).length) assert.equal(by(k.id)[0].selections.length, k.size, k.id);
   }
-  for (const s of by('iykg')[0].selections) assert.equal(s.market, 'İY KG Var');
-  // Ana kuponlarda maç tekrarlanmaz; İY/MS kuponları da kendi arasında
-  const main = ['banko', 'ideal', 'surpriz'].flatMap((k) => by(k)[0].selections.map((s) => s.key));
-  assert.equal(new Set(main).size, main.length);
-  const rev = by('iyms').flatMap((c) => c.selections.map((s) => s.key));
-  assert.equal(new Set(rev).size, rev.length);
-  // Banko ihtimali en yüksek, Sürpriz oranı en yüksek
-  assert.ok(by('banko')[0].chance > by('ideal')[0].chance && by('ideal')[0].chance > by('surpriz')[0].chance);
-  assert.ok(by('surpriz')[0].totalOdds > by('banko')[0].totalOdds);
-  for (const s of by('banko')[0].selections) assert.ok(s.p >= 0.66);
+  assert.equal(by('banko').length, 1);
+  assert.equal(by('gunun').length, 1);
+  // Bir maç günün yalnızca bir kuponunda
+  const keys = coupons.flatMap((c) => c.selections.map((s) => s.key));
+  assert.equal(new Set(keys).size, keys.length);
+  // Kurallar: Banko seçimleri en az %80 ve güvenli türlerden; Günün seçimleri %68-86; Gol kuponu gol türlerinden
+  for (const s of by('banko')[0].selections) {
+    assert.ok(s.p >= 0.8 && s.p <= 0.95, `${s.market} ${s.p}`);
+    assert.match(s.market, /^(Çifte şans|1\.5 Üst|3\.5 Alt|MS [12]|İY 0\.5 Üst)/);
+  }
+  for (const s of by('gunun')[0].selections) assert.ok(s.p >= 0.68 && s.p < 0.86 && s.odds >= 1.22 && s.odds <= 1.9);
+  for (const c of by('gol')) for (const s of c.selections) assert.match(s.market, /^(1\.5 Üst|2\.5 Üst|KG Var|İY 0\.5 Üst)$/);
+  for (const c of by('surpriz')) for (const s of c.selections) assert.ok(s.p >= 0.47 && s.p < 0.66 && s.odds >= 1.6);
+  // Banko en yüksek ihtimal; eski düzendeki düşük ihtimalli türler (İY KG Var, İY/MS) yok
+  for (const c of coupons) if (c.kind !== 'banko') assert.ok(by('banko')[0].chance > c.chance, c.kind);
+  assert.ok(by('banko')[0].chance >= 0.6);
+  assert.ok(coupons.every((c) => !c.selections.some((s) => /^İY (KG|\/MS)|^İY\/MS/.test(s.market))));
   for (const c of coupons) {
     const prod = Math.round(c.selections.reduce((a, s) => a * s.odds, 1) * 100) / 100;
     assert.equal(c.totalOdds, prod);
@@ -113,7 +114,13 @@ test('günün kuponları: Banko / İdeal / Sürpriz 3 maç, İY KG Var 4 maç, �
       assert.ok(!/(Ev\d+ Spor|Dep\d+ Spor)('|’)/.test(s.label));
     }
   }
-  assert.deepEqual(COUPON_KINDS.map((k) => k.id), ['banko', 'ideal', 'surpriz', 'iykg', 'iyms']);
+});
+
+test('uygun maç yetmezse tür o gün kurulmaz (eksik kupon yayınlanmaz)', () => {
+  const pool = entries.slice(0, 2).map((e) => ({ entry: e, candidates: candidatesOf(e, null) }));
+  const coupons = buildCoupons(DAYKEY, pool);
+  for (const c of coupons) assert.equal(c.selections.length, COUPON_KINDS.find((k) => k.id === c.kind).size);
+  assert.ok(!coupons.some((c) => c.kind === 'gunun'), '3 maçlık kupon 2 maçla kurulmaz');
 });
 
 test('ilk yarı KG var sonucu ve kupon durumu', () => {
@@ -191,7 +198,7 @@ test('servis: 09:00 öncesi kurulmaz; sonra bir kez kurulur; abone tümünü, ab
   assert.match(early.message, /09:00/);
   now = Date.UTC(2026, 10, 3, 7, 0, 0); // 10:00 TR
   const n = await svc.tick();
-  assert.ok(n >= 7, `kupon sayısı ${n}`);
+  assert.ok(n >= 3 && n <= 4, `kupon sayısı ${n}`);
   assert.equal(await svc.tick(), 0, 'ikinci kez kurulmaz');
   const pro = await svc.list({ uid: 'pro' });
   assert.equal(pro.subscribed, true);
@@ -199,7 +206,8 @@ test('servis: 09:00 öncesi kurulmaz; sonra bir kez kurulur; abone tümünü, ab
   assert.ok(pro.coupons.some((c) => c.selections.some((s) => s.source === 'market')));
   const free = await svc.list({ uid: 'free' });
   assert.ok(free.coupons.every((c) => !c.open && c.selections.every((s) => s.market === undefined)));
-  assert.ok(svc.focusKeys().size >= 6);
+  assert.ok(svc.focusKeys().size >= 7);
+  assert.ok(pro.kinds.every((k) => Number.isFinite(k.hit)), 'türlerin geçmiş isabeti bilgi olarak gider');
   await assert.rejects(svc.list({ uid: 'pro', day: '2026-12-01' }), (e) => e.code === 'invalid-argument');
   await assert.rejects(svc.list({ uid: '' }), (e) => e.code === 'permission-denied');
 });
