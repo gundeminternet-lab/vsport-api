@@ -7,6 +7,7 @@ import { fitRatings } from './ratings.js';
 import { LEAGUES, MODEL } from './config.js';
 import { simulateMatch, simulateMany } from './simulator.js';
 import { playTimeline } from './playback.js';
+import { buildContext, EUROPE_COMPS } from './context.js';
 
 // Avrupa sezonu: Temmuz'dan itibaren yeni sezon (2026-27 sezonu için ESPN "2026" kullanır)
 export function currentSeason(now = new Date()) {
@@ -188,9 +189,35 @@ export class MatchSimulator {
     return { cross: { home, away, kind }, leagues: { home: hl, away: al } };
   }
 
+  /**
+   * Maçın ±5 gününde iki takımın oynadığı diğer maçlar (Avrupa kupaları ve takımların ligleri): rotasyon/yorgunluk
+   * için. Gün hizalı aralık kullanılır (aynı günün bütün maçları aynı önbelleği paylaşır). Alınamazsa boş liste.
+   */
+  async _fixturesAround(kickoff, leagues) {
+    if (typeof this.espn.getFixtures !== 'function' || !Number.isFinite(kickoff)) return [];
+    const day = Math.floor(kickoff / DAY) * DAY;
+    const from = new Date(day - 5 * DAY);
+    const to = new Date(day + 5 * DAY);
+    const comps = [...new Set([...EUROPE_COMPS, ...leagues.filter(Boolean)])];
+    const lists = await Promise.all(comps.map((c) => this.espn.getFixtures(c, from, to).then((xs) => xs.map((x) => ({ ...x, league: x.league ?? c }))).catch(() => [])));
+    return lists.flat();
+  }
+
+  /** Maç bağlamı (engine/context.js). Veri alınamazsa eldekiyle; hiç yoksa null. */
+  async _context({ league, stage, kickoff, homeId, awayId, homeTable, awayTable, homeLeague, awayLeague, homeMatches, awayMatches }) {
+    try {
+      const fx = await this._fixturesAround(kickoff, [league, homeLeague, awayLeague]);
+      const of = (id) => fx.filter((m) => String(m.homeId) === id || String(m.awayId) === id);
+      return buildContext({ league, stage, kickoff, homeId, awayId, homeTable, awayTable, homeLeague, awayLeague, homeFixtures: of(homeId), awayFixtures: of(awayId), homeMatches, awayMatches });
+    } catch {
+      return null;
+    }
+  }
+
   // Maç öncesi analiz. awayLeague farklıysa (ör. Avrupa maçı) lig gücü oranı uygulanır.
   // now: analizde yalnızca bu andan ÖNCEKİ maçlar kullanılır (biten maçın tahminini sonradan dürüstçe üretmek için).
-  async prepare({ league, homeId, awayId, homeName, awayName, awayLeague = league, elo = null, neutral = false, now = Date.now() }) {
+  // kickoff / stage: maçın başlama zamanı ve ESPN maç notu (play-off, final, eleme turu): bağlam modeli için.
+  async prepare({ league, homeId, awayId, homeName, awayName, awayLeague = league, elo = null, neutral = false, now = Date.now(), kickoff = null, stage = null }) {
     await this.memory.init();
     const warnings = [];
     homeId = String(homeId);
@@ -211,6 +238,7 @@ export class MatchSimulator {
     // Alınamazsa eski yönteme (takım geçmişi) dönülür.
     let ratings = awayLeague === league ? await this._ratings(league, now, warnings) : null;
     let cross = null;
+    let crossLeagues = null;
     let homeMatches = this.memory.getMatches(homeId);
     let awayMatches = this.memory.getMatches(awayId);
     if (!ratings && awayLeague === league && !DOMESTIC.test(league)) {
@@ -220,6 +248,7 @@ export class MatchSimulator {
       });
       if (x?.ratings) ratings = x.ratings;
       if (x?.cross) cross = x.cross;
+      if (x?.leagues) crossLeagues = x.leagues;
       // Form ve gol ortalamaları kupa maçlarıyla sınırlı kalmasın: takımın kendi ligindeki maçları da eklenir
       const lists = { home: x?.cross?.home?.ratings?.matchList ?? x?.ratings?.matchList, away: x?.cross?.away?.ratings?.matchList ?? x?.ratings?.matchList };
       const merge = (own, list, id, lg) => {
@@ -232,11 +261,29 @@ export class MatchSimulator {
       awayMatches = merge(awayMatches, lists.away, awayId, x?.leagues?.away);
     }
 
+    // Bağlam: takımların lig tabloları (kupada/Avrupa'da kendi ligleri), fikstür yükü, aşama
+    const leagues = { home: crossLeagues?.home ?? (DOMESTIC.test(league) ? league : null), away: crossLeagues?.away ?? (DOMESTIC.test(awayLeague) ? awayLeague : null) };
+    const tableOf = async (lg, fallback) => (lg && lg !== league ? await this._table(lg, []) : fallback);
+    const context = await this._context({
+      league,
+      stage,
+      kickoff: Number.isFinite(kickoff) ? kickoff : now,
+      homeId,
+      awayId,
+      homeTable: await tableOf(leagues.home, homeTable),
+      awayTable: await tableOf(leagues.away, awayTable),
+      homeLeague: leagues.home,
+      awayLeague: leagues.away,
+      homeMatches,
+      awayMatches,
+    });
+
     const analysis = analyzeMatch({
       home: { id: homeId, name: homeName },
       away: { id: awayId, name: awayName },
       homeMatches,
       awayMatches,
+      context,
       h2hMatches: this.memory.getHeadToHead(homeId, awayId),
       homeTable,
       awayTable,

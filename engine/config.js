@@ -107,6 +107,9 @@ export const MODEL = {
   // Alt basamakta yeni takım üst ligden düşmüşse güçlü merkez (çıkan/düşen ayrımı geriye dönük testte belirgin fark etti)
   ratingRelegatedTeam: { att: 1.1, def: 0.9 },
   ratingMinWeightNew: 0,
+  // Lig gücünde isabetli şutun payı (engine/ratings.js): 0.5 = yarı gol, yarı isabetli şut. 1 = yalnızca gol.
+  sotBlend: 0.5,
+  sotMinShare: 0.8,
   // Kupada listedeki hiçbir ligde bulunamayan takım: ülkenin en alt basamağından bu kat zayıf (amatör/bölgesel lig)
   unknownTierGap: 1.3,
   // Kıta turnuvasında listede olmayan ligin takımı: o ligin üst sıralarında (turnuvaya katılmış) varsayılır
@@ -134,7 +137,9 @@ export const MODEL = {
   // görüşü tek başına çoğu modelden iyidir, ikisinin birleşimi her ikisinden de iyidir). Veri zayıfsa ağırlık azalır:
   // tek kaynak (× singleSource), kaynaklar ayrışıyor (spread > spreadMax → ×0.5), λ çözümü zorlandı (fitErrorMax →
   // ×0.5), veri eski (staleHours → ×0.5; iki katından eskiyse kullanılmaz).
-  marketBlend: { weight: 0.5, max: 0.65, singleSource: 0.8, spreadMax: 0.06, fitErrorMax: 0.03, staleHours: 12 },
+  // 2023-26 doğrulaması (18 lig, ~20 bin maç): piyasa görüşünün payı arttıkça maç sonucu log kaybı düzenli iniyor
+  // (0 → 1.0158, 0.5 → 1.0017, 0.8 → 0.9969, 0.9 → 0.9959); 2,5 alt/üst ve KG'de de aynı. Ağırlık 0.8.
+  marketBlend: { weight: 0.8, max: 0.9, singleSource: 0.85, spreadMax: 0.06, fitErrorMax: 0.03, staleHours: 12 },
 };
 
 export const SIM = {

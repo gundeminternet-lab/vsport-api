@@ -4,6 +4,7 @@
 import { calibrate, calibrateGoals } from './calibration.js';
 import { MODEL, LEAGUES } from './config.js';
 import { ratingLambdas, crossRatingLambdas } from './ratings.js';
+import { applyContext } from './context.js';
 
 const DAY = 86400000;
 export const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
@@ -295,6 +296,8 @@ export function analyzeMatch({
   cross = null,
   neutral = false,
   uncertainty = true, // false: belirsizlik katmanı kapalı (karşılaştırma/deney için)
+  // Maç bağlamı (engine/context.js → buildContext): lig durumu, turnuva aşaması, rotasyon. Çarpanları λ'ya uygulanır.
+  context = null,
   now = Date.now(),
 }) {
   const lgH = homeTable?.leagueAvgGoals ?? MODEL.defaultLeagueAvg;
@@ -390,6 +393,16 @@ export function analyzeMatch({
   // Aynı lig: toplam gol ligin ortalamasına çekilir, güç farkı biraz açılır (geriye dönük testle ayarlı)
   if (rl && !cross) [lambdaHome, lambdaAway] = shapeLambdas(lambdaHome, lambdaAway, rl.base);
 
+  // Maç bağlamı: lig durumu (motivasyon), play-off/final, rotasyon ve yorgunluk
+  if (context?.factors) {
+    [lambdaHome, lambdaAway] = applyContext(lambdaHome, lambdaAway, context);
+    factors.context = {
+      home: context.factors.home.map((x) => round(x, 3)),
+      away: context.factors.away.map((x) => round(x, 3)),
+      total: round(context.factors.total, 3),
+    };
+  }
+
   lambdaHome = clamp(lambdaHome, MODEL.lambdaMin, MODEL.lambdaMax);
   lambdaAway = clamp(lambdaAway, MODEL.lambdaMin, MODEL.lambdaMax);
 
@@ -418,6 +431,7 @@ export function analyzeMatch({
     probabilities,
     h2h,
     factors,
+    context,
     insights,
     dataQuality: {
       homeMatches: rl ? Math.round(rl.effHome) : pH.matchesUsed,

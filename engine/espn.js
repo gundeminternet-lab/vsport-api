@@ -77,6 +77,17 @@ export function parseStandings(json) {
   };
 }
 
+const SHOT_STATS = ['shotsOnTarget', 'totalShots'];
+
+/** Yarışmacının şut istatistikleri ({ sot, shots }); yoksa null. */
+export function shotStats(competitor) {
+  const list = Array.isArray(competitor?.statistics) ? competitor.statistics : [];
+  const get = (name) => num(list.find((x) => x?.name === name)?.displayValue ?? list.find((x) => x?.name === name)?.value);
+  const sot = get('shotsOnTarget');
+  const shots = get('totalShots');
+  return Number.isFinite(sot) && sot >= 0 && sot <= 40 ? { sot, shots: Number.isFinite(shots) ? shots : null } : null;
+}
+
 // Takım programı / günlük fikstür yanıtlarını ortak biçime çevirir.
 export function parseEvents(json, { league = null, includeUpcoming = false } = {}) {
   const out = [];
@@ -105,10 +116,18 @@ export function parseEvents(json, { league = null, includeUpcoming = false } = {
     };
     // Tarafsız saha (final, turnuva maçı): ev sahibi avantajı uygulanmaz
     if (comp.neutralSite === true) base.neutral = true;
+    // Maç notu: "Championship Play-Off Semi-Final 1st Leg", "Relegation Playoff", "Final" (bağlam modeli okur)
+    const note = comp.notes?.find?.((n) => n?.headline)?.headline;
+    if (note) base.stage = String(note);
     const hg = num(home.score);
     const ag = num(away.score);
     if (completed && Number.isFinite(hg) && Number.isFinite(ag)) {
-      out.push({ ...base, homeGoals: hg, awayGoals: ag, completed: true });
+      const done = { ...base, homeGoals: hg, awayGoals: ag, completed: true };
+      // Şut / isabetli şut (skor tablosu verirse): lig gücü modeli gol ile isabetli şutu birlikte kullanır
+      const hs = shotStats(home);
+      const as = shotStats(away);
+      if (hs && as) Object.assign(done, { homeSot: hs.sot, awaySot: as.sot, homeShots: hs.shots, awayShots: as.shots });
+      out.push(done);
     } else if (includeUpcoming && !completed) {
       out.push({ ...base, completed: false });
     }
@@ -147,7 +166,15 @@ export function slimScoreboard(json) {
                 date: comp.date,
                 status: status(comp.status),
                 neutralSite: comp.neutralSite === true ? true : undefined,
-                competitors: (comp.competitors ?? []).map((c) => ({ id: c.id, homeAway: c.homeAway, score: c.score, team: team(c.team) })),
+                notes: comp.notes?.find?.((n) => n?.headline) ? [{ headline: comp.notes.find((n) => n?.headline).headline }] : undefined,
+                competitors: (comp.competitors ?? []).map((c) => ({
+                  id: c.id,
+                  homeAway: c.homeAway,
+                  score: c.score,
+                  team: team(c.team),
+                  // Yalnızca şut istatistikleri saklanır (lig gücü modeli için)
+                  statistics: Array.isArray(c.statistics) ? c.statistics.filter((x) => SHOT_STATS.includes(x?.name)).map((x) => ({ name: x.name, displayValue: x.displayValue ?? x.value })) : undefined,
+                })),
               },
             ]
           : [],
