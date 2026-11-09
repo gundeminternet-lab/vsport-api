@@ -2,11 +2,13 @@
 // maç yeniden aranmaz; soru niyeti anlaşılır ve aynı rakamlardan kısa, sayıya dayalı bir yanıt üretilir.
 // Sohbet geçmişi sunucuda tutulmaz: istemci aynı maçı yeniden gönderir.
 //
-// Niyetler: review (tahmin tuttu mu), whatif (ya şöyle olursa), why (neden), score (skor), goals (gol sayısı),
-// second (ikinci yarı), winner (kim kazanır), importance (önem).
+// Niyetler: review (tahmin tuttu mu), whatif (ya şöyle olursa), why (neden), pick (en güvenli seçim / AI seçimleri),
+// score (skor), goals (gol sayısı), second (ikinci yarı), winner (kim kazanır), importance (önem), context (motivasyon,
+// rotasyon, düşme/şampiyonluk, takvim), form (son maçlar, son 20, iç saha/deplasman), risk (tahmini ne bozar).
 // Bunlardan biri yoksa (ya da korner, İY/MS, KG gibi Özel Yorum konusu varsa) mevcut tam yanıt kullanılır.
 
-import { HT_SHARE, halfTimeTable, markets } from './content.js';
+import { HT_SHARE, halfTimeTable, markets, riskScenarios } from './content.js';
+import { aiPicks } from './coupon_rules.js';
 import { scoreMatrix } from './engine/analysis.js';
 import { MODEL, LEAGUES } from './engine/config.js';
 
@@ -30,6 +32,8 @@ const RULES = [
   ['review', /\b(tuttu|tutmadi|nasil bitti|degerlendir\w*|isabet\w*)\b/],
   ['whatif', /\b(atarsa|bulursa|olursa|yerse|gelirse)\b/],
   ['why', /\b(neden|niye|nedeni|sebep|sebebi)\b/],
+  // AI seçimleri: "banko ne", "ne oynanır", "en güvenli tahmin", "kupon"
+  ['pick', /\b(banko\w*|ne oyna\w*|oynanir|oneri\w*|oner\w*|tavsiye\w*|kupon\w*|guvenli\w*|en saglam|en iyi tahmin|hangi tahmin|secim\w*)\b/],
   // İlk yarı soruları ("ilk yarı kim önde", "devreyi kim alır"); skor/gol içerenler Özel Yorum'a (htscore) gider
   ['first', /(\bilk yari\w*|\bilk devre\w*|\bdevre arasi\w*|\bdevreyi\b|\biy\b)/],
   ['score', /\b(skor|kac kac|kacar|en olasi skor|tahmini skor)\b/],
@@ -37,6 +41,9 @@ const RULES = [
   ['second', /\b(ikinci yari|2 yari|2\. yari|ikinci devre|ikinci yarida)\b/],
   ['winner', /\b(kazanir|kazanacak|galip|kim onde|kim kazanir|sonuc ne|beraber|berabere)\b/],
   ['importance', /\b(onem|onemli|derbi|onem derecesi|ne kadar onemli)\b/],
+  ['context', /\b(motivasyon\w*|rotasyon\w*|dinlen\w*|yorgun\w*|dusme\w*|sampiyon\w*|avrupa\w*|kupa\w*|play ?off\w*|hedef\w*|takvim\w*|fikstur\w*|baglam\w*)\b/],
+  ['form', /\b(form\w*|son mac\w*|son 20|son yirmi|evinde|ic saha\w*|deplasmanda|seri\w*|gol ortalama\w*)\b/],
+  ['risk', /\b(risk\w*|ne bozar|bozar\w*|tehlike\w*|kotu senaryo)\b/],
 ];
 
 /** Sorunun niyeti. Tanınmıyorsa 'general'. */
@@ -49,6 +56,10 @@ export function intentOf(question) {
 
 /** Her niyetin altında önerilen takip soruları (istemcide düğme olarak gösterilir). */
 export const SUGGESTIONS = {
+  pick: ['Tahmini ne bozar?', 'Kim kazanır?', 'Kaç gol?'],
+  context: ['Form durumu?', 'Kim kazanır?', 'En güvenli seçim?'],
+  form: ['Motivasyon durumu?', 'Kaç gol?', 'Kim kazanır?'],
+  risk: ['En güvenli seçim?', 'Ev sahibi gol atarsa?', 'Deplasman gol atarsa?'],
   winner: ['Skor tahmini?', 'Kaç gol?', 'Neden?'],
   score: ['Kim kazanır?', 'Kaç gol?'],
   goals: ['İkinci yarı?', 'Kim kazanır?'],
@@ -56,16 +67,16 @@ export const SUGGESTIONS = {
   why: ['Maçın önemi?', 'Kim kazanır?'],
   importance: ['Neden?', 'Kim kazanır?'],
   first: ['İkinci yarı?', 'Kim kazanır?', 'Kaç gol?'],
-  general: ['Kim kazanır?', 'Skor tahmini?', 'Kaç gol?', 'Korner beklentisi?'],
+  general: ['Kim kazanır?', 'En güvenli seçim?', 'Kaç gol?', 'Korner beklentisi?'],
   review: ['Skor tahmini?', 'Kaç gol?'],
   whatif: ['Deplasman gol atarsa?', 'Kim kazanır?'],
 };
 
 /** Tam analizden sonra önerilecek sorular: maçın durumuna göre. */
 export function suggestionsFor(state) {
-  if (state === 'post') return ['Tahmin tuttu mu?', 'Neden?', 'Skor tahmini?'];
+  if (state === 'post') return ['Tahmin tuttu mu?', 'AI seçimleri tuttu mu?', 'Neden?'];
   if (state === 'live') return ['Kim kazanır?', 'Ev sahibi gol atarsa?', 'Deplasman gol atarsa?'];
-  return ['Kim kazanır?', 'Skor tahmini?', 'Ev sahibi gol atarsa?', 'Korner beklentisi?'];
+  return ['Kim kazanır?', 'En güvenli seçim?', 'Tahmini ne bozar?', 'Korner beklentisi?'];
 }
 
 /**
@@ -89,6 +100,11 @@ export function followUpAnswer({ intent, question = '', H, A, model, content, im
 
   switch (intent) {
     case 'review': {
+      // "AI seçimleri tuttu mu?": seçimlerin karnesi
+      if (/(secim|banko|kupon)/.test(norm(question))) {
+        if (state !== 'post') return { answer: pickAnswer({ H, A, model, content, state, live, homeGoals, awayGoals }), suggestions: SUGGESTIONS.pick };
+        return { answer: pickAnswer({ H, A, model, content, state, live, homeGoals, awayGoals }), suggestions: SUGGESTIONS.review };
+      }
       if (state !== 'post' || !Number.isFinite(homeGoals) || !Number.isFinite(awayGoals)) {
         return { answer: 'Maç henüz bitmedi; tahminin değerlendirmesini maç bitince yapabilirim.', suggestions: SUGGESTIONS.winner };
       }
@@ -185,6 +201,31 @@ export function followUpAnswer({ intent, question = '', H, A, model, content, im
     }
     case 'why': {
       return { answer: whyAnswer({ H, A, model, content, importance }), suggestions: SUGGESTIONS.why };
+    }
+    case 'pick':
+      return { answer: pickAnswer({ H, A, model, content, state, live, homeGoals, awayGoals }), suggestions: SUGGESTIONS.pick };
+    case 'context': {
+      const notes = model.context?.notes ?? [];
+      const imp = importance ? ` Maçın önemi ${importance.label.toLowerCase()} (${importance.score}/100).` : '';
+      return {
+        answer: notes.length
+          ? `${notes.join(' ')}${imp}`
+          : `Bu maç için öne çıkan bir motivasyon, rotasyon ya da yoğun takvim etkisi görünmüyor; tahmin takımların güç ve form verilerine dayanıyor.${imp}`,
+        suggestions: SUGGESTIONS.context,
+      };
+    }
+    case 'form':
+      return { answer: formAnswer({ H, A, model }), suggestions: SUGGESTIONS.form };
+    case 'risk': {
+      if (state === 'post') return { answer: 'Maç bitti; tahminin nasıl sonuçlandığını "Tahmin tuttu mu?" diye sorabilirsin.', suggestions: SUGGESTIONS.review };
+      if (state === 'live') {
+        return {
+          answer: 'Maç sürüyor; senaryo sorusu sorabilirsin: örneğin "ev sahibi gol atarsa?" ya da "1-1 olursa?". Olasılıklar o anki skor ve dakikaya göre yeniden hesaplanır.',
+          suggestions: SUGGESTIONS.whatif,
+        };
+      }
+      const saved = (content.ai?.sections ?? []).find((x) => x.title === 'Tahmini ne bozar?')?.text;
+      return { answer: saved ?? riskAnswer({ H, A, model, content }), suggestions: SUGGESTIONS.risk };
     }
     case 'importance':
       return {
@@ -351,6 +392,20 @@ export function whyAnswer({ H, A, model, content, importance }) {
       text: `son ${h2h.n} karşılaşmada ${H} ${h2h.homeWins}, ${A} ${h2h.awayWins} galibiyet`,
     });
   }
+  // Maç bağlamı (lig durumu, rotasyon, play-off, yorgunluk): tahmini belirgin etkilediyse nedenlerden biridir
+  const ctx = model.context;
+  if (ctx?.notes?.length && ctx.factors?.home && ctx.factors?.away) {
+    const fh = ctx.factors.home;
+    const fa = ctx.factors.away;
+    const ratio = (fh[0] * fa[1]) / (fa[0] * fh[1]);
+    const swing = Math.abs(Math.log(ratio)) + Math.abs(Math.log(ctx.factors.total || 1));
+    if (swing >= 0.03) {
+      // Liste içinde: sondaki nokta atılır; takım adıyla başlamıyorsa ilk harf küçülür
+      let text = ctx.notes[ctx.notes.length - 1].replace(/\.\s*$/, '');
+      if (!text.startsWith(H) && !text.startsWith(A)) text = text.charAt(0).toLocaleLowerCase('tr-TR') + text.slice(1);
+      items.push({ side: ratio > 1.02 ? 1 : ratio < 0.98 ? -1 : 0, w: 0.2 + swing * 3, text });
+    }
+  }
   const dir = ai.pick === '1' ? 1 : ai.pick === '2' ? -1 : 0;
   const support = items.filter((x) => (dir === 0 ? x.side === 0 || x.w < 0.3 : x.side === dir)).sort((a, b) => b.w - a.w).slice(0, 3);
   const against = dir === 0 ? null : items.filter((x) => x.side === -dir && x.w >= 0.3).sort((a, b) => b.w - a.w)[0];
@@ -363,4 +418,81 @@ export function whyAnswer({ H, A, model, content, importance }) {
   if (against) parts.push(`Karşı yönde: ${against.text}; bu yüzden tahmin kesin değil.`);
   if (reason) parts.push(reason);
   return parts.join(' ');
+}
+
+/** Maçın AI seçimleri: içerikte varsa onlar (maç öncesi hesaplandı), yoksa modelden aynı kurallarla. */
+export function picksOf({ H, A, model, content }) {
+  const saved = content?.ai?.picks;
+  if (Array.isArray(saved) && saved.length) return saved;
+  const { p } = markets(model.lambdaHome, model.lambdaAway, model.sigma ?? 0);
+  return aiPicks(p, H, A);
+}
+
+/** Seçimin maç sonucuna göre durumu: true tuttu, false tutmadı, null bilinmiyor (ilk yarı seçimleri). */
+export function pickHit(market, h, a) {
+  let x;
+  if ((x = /^MS ([1X2])$/.exec(market))) return (h > a ? '1' : h < a ? '2' : 'X') === x[1];
+  if ((x = /^Çifte şans ([1X2])-([1X2])$/.exec(market))) {
+    const r = h > a ? '1' : h < a ? '2' : 'X';
+    return r === x[1] || r === x[2];
+  }
+  if ((x = /^(\d\.5) (Üst|Alt)$/.exec(market))) return x[2] === 'Üst' ? h + a > Number(x[1]) : h + a < Number(x[1]);
+  if (market === 'KG Var') return h > 0 && a > 0;
+  if (market === 'KG Yok') return !(h > 0 && a > 0);
+  return null;
+}
+
+function pickAnswer({ H, A, model, content, state, live, homeGoals, awayGoals }) {
+  const picks = picksOf({ H, A, model, content });
+  if (!picks.length) return 'Bu maçta kurallarıma uyan güçlü bir seçim çıkmadı; ihtimaller birbirine yakın. Böyle maçlarda temkinli olmak gerekir.';
+  if (state === 'post' && Number.isFinite(homeGoals) && Number.isFinite(awayGoals)) {
+    const rows = picks.map((k) => {
+      const hit = pickHit(k.market, homeGoals, awayGoals);
+      return `${k.title}: ${k.label} (%${k.pct}) ${hit === true ? 'tuttu' : hit === false ? 'tutmadı' : 'sonucu ilk yarı skoruna bağlı'}.`;
+    });
+    const won = picks.filter((k) => pickHit(k.market, homeGoals, awayGoals) === true).length;
+    const decided = picks.filter((k) => pickHit(k.market, homeGoals, awayGoals) !== null).length;
+    return `Maç ${homeGoals}-${awayGoals} bitti. Maç öncesi AI seçimleri: ${rows.join(' ')} Karar verilen ${decided} seçimden ${won} tanesi tuttu.`;
+  }
+  const list = picks.map((k) => `${k.title}: ${k.label} (%${k.pct}).`).join(' ');
+  if (state === 'live' && live) {
+    return `Maç sürüyor (${live.home}-${live.away}). Bu seçimler maç öncesi hesaplandı: ${list} Canlı olasılıklar için "Kim kazanır?" diye sorabilirsin.`;
+  }
+  const safest = [...picks].sort((x, y) => y.pct - x.pct)[0];
+  return `Bu maç için AI seçimleri: ${list} En güvenlisi: ${safest.label} (%${safest.pct}). Seçimler günlük AI kuponlarıyla aynı kurallarla yapılır; istatistiksel tahmindir, garanti değildir.`;
+}
+
+function formAnswer({ H, A, model }) {
+  const parts = [];
+  const line = (T, form, pts, n) => (n >= 3 && Number.isFinite(pts) ? `${T} son ${n} maçta ${pts} puan topladı (${form || '-'}).` : null);
+  const h = line(H, model.homeForm, model.homeFormPoints, model.homeFormMatches ?? 0);
+  const a = line(A, model.awayForm, model.awayFormPoints, model.awayFormMatches ?? 0);
+  if (h) parts.push(h);
+  if (a) parts.push(a);
+  const splits = model.context?.splits ?? [];
+  if (splits.length) parts.push(...splits);
+  else if (Number.isFinite(model.homeGf) && Number.isFinite(model.awayGf)) {
+    parts.push(`Sezon ortalaması: ${H} maçta ${tr1(model.homeGf)} gol atıp ${tr1(model.homeGa)} yiyor; ${A} ${tr1(model.awayGf)} atıp ${tr1(model.awayGa)} yiyor.`);
+  }
+  return parts.length ? parts.join(' ') : 'Bu maç için yeterli form verisi yok.';
+}
+
+function riskAnswer({ H, A, model, content }) {
+  const pr = content.ai.probabilities;
+  const analysis = { lambdaHome: model.lambdaHome, lambdaAway: model.lambdaAway, sigma: model.sigma ?? 0, probabilities: { homeWin: pr.home / 100, draw: pr.draw / 100, awayWin: pr.away / 100 } };
+  let r;
+  try {
+    r = riskScenarios(analysis);
+  } catch {
+    return 'Erken bir gol bu maçın dengesini en çok değiştiren şey olur; senaryo sormak için "ev sahibi gol atarsa?" yazabilirsin.';
+  }
+  const pick = content.ai.pick;
+  if (pick === 'X') {
+    return `Beraberlik tahminini en çok erken gol bozar: ${H} 25. dakikada öne geçerse beraberlik ihtimali %${pct(r.homeFirst.pX)}, ${A} öne geçerse %${pct(r.awayFirst.pX)} olur. İlk yarı golsüz biterse beraberlik %${pct(r.nilHt.pX)}.`;
+  }
+  const home = pick === '1';
+  const F = home ? H : A;
+  const U = home ? A : H;
+  const win = (x) => pct(home ? x.p1 : x.p2);
+  return `${U} 25. dakikada golü bulursa ${F} için kazanma ihtimali %${win(r.base)} seviyesinden %${win(home ? r.awayFirst : r.homeFirst)} seviyesine iner. İlk yarı golsüz biterse beraberlik ihtimali %${pct(r.nilHt.pX)} olur; ilk golü ${F} atarsa kazanma ihtimali %${win(home ? r.homeFirst : r.awayFirst)}.`;
 }

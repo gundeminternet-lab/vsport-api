@@ -10,7 +10,7 @@ import { phraser, streakOf } from './content.js';
 import { importanceOf } from './importance.js';
 import { SPECIAL_TOPICS } from './special.js';
 import { ASSISTANT_DAILY_LIMIT, dayKeyTr } from './subscription.js';
-import { intentOf, followUpAnswer, reviewOf, swingText, suggestionsFor } from './chat.js';
+import { intentOf, followUpAnswer, reviewOf, swingText, suggestionsFor, picksOf, pickHit } from './chat.js';
 import { Narrator } from './narrator.js';
 import { liveForecast } from './engine/live_model.js';
 
@@ -225,6 +225,19 @@ export function buildAssistantReply({ match, content, model, specials, importanc
     mood: importance.score >= 65 ? 'excited' : 'calm',
   });
 
+  // 3b) Maçın bağlamı: lig durumu ve motivasyon, play-off/final, rotasyon ve yorgunluk (engine/context.js)
+  const ctxNotes = model.context?.notes ?? [];
+  if (ctxNotes.length) {
+    scenes.push({
+      kind: 'section',
+      title: 'Maçın bağlamı',
+      icon: 'flag_circle',
+      body: ctxNotes.join(' '),
+      speech: `${say('as.ctx', ['Rakamların ötesinde bu maçın bir de bağlamı var.', 'Tabloya ve takvime bakınca durum şöyle.'])} ${sayable(ctxNotes.join(' '))}`,
+      mood: 'calm',
+    });
+  }
+
   // 4) Kıyas
   const rows = [];
   const add = (label, h, a) => Number.isFinite(h) && Number.isFinite(a) && rows.push([label, Math.round(h * 100) / 100, Math.round(a * 100) / 100]);
@@ -242,6 +255,17 @@ export function buildAssistantReply({ match, content, model, specials, importanc
         `İstatistiklere bakınca ${H} maç başına ${tr1(lh)}, ${A} ${tr1(la)} gol beklentisiyle sahaya çıkıyor.`,
         `Rakamları yan yana koydum. Model ${H} için ${tr1(lh)}, ${A} için ${tr1(la)} gol öngörüyor.`,
       ]),
+      mood: 'calm',
+    });
+  }
+  const splitNotes = model.context?.splits ?? [];
+  if (splitNotes.length) {
+    scenes.push({
+      kind: 'section',
+      title: 'Son 20 maç',
+      icon: 'query_stats',
+      body: splitNotes.join(' '),
+      speech: `${say('as.l20', ['Son yirmi maçın gol ortalamalarına bakalım.', 'Bir de son yirmi maçın karnesi var.'])} ${sayable(splitNotes.join(' '))}`,
       mood: 'calm',
     });
   }
@@ -308,6 +332,52 @@ export function buildAssistantReply({ match, content, model, specials, importanc
       speech: `Tahmini final skoru ${spokenScore(ai.topScore)}. Veri güveni ${ai.confidence}.`,
       mood: 'warm',
     });
+    // Maçın senaryosu (analiz ve simülasyonla aynı devre ve final skoru) ve tahmini ne bozar
+    const sec = (t) => (ai.sections ?? []).find((x) => x.title === t)?.text ?? null;
+    const flow = sec('Maçın senaryosu');
+    if (ai.scenario && flow) {
+      scenes.push({
+        kind: 'forecast',
+        title: 'Maçın senaryosu',
+        icon: 'route',
+        kicker: 'Beklenen akış',
+        big: ai.scenario.ft.replace('-', ' - '),
+        chips: [
+          ['Devre', ai.scenario.ht],
+          ['İlk yarıda gol', `%${ai.scenario.htGoal}`],
+        ],
+        speech: sayable(flow),
+        mood: 'warm',
+      });
+    }
+    const risk = sec('Tahmini ne bozar?');
+    if (risk) scenes.push({ kind: 'section', title: 'Tahmini ne bozar?', icon: 'warning', body: risk, speech: sayable(risk), mood: 'serious' });
+  }
+
+  // 7b) AI seçimleri (günlük kuponlarla aynı kurallar). Maç bittiyse karnesiyle.
+  const picks = picksOf({ H, A, model, content });
+  if (picks.length && state !== 'live') {
+    const done = state === 'post' && Number.isFinite(match.homeGoals) && Number.isFinite(match.awayGoals);
+    const mark = (k) => {
+      if (!done) return '';
+      const hit = pickHit(k.market, match.homeGoals, match.awayGoals);
+      return hit === true ? ' ✓' : hit === false ? ' ✗' : '';
+    };
+    scenes.push({
+      kind: 'forecast',
+      title: done ? 'AI seçimlerinin karnesi' : 'AI seçimleri',
+      icon: 'star',
+      kicker: done ? 'MAÇ ÖNCESİ SEÇİMLER' : 'Kuponlarla aynı kurallar',
+      big: picks[0].label,
+      chips: picks.map((k) => [k.title, `${k.label} · %${k.pct}${mark(k)}`]),
+      speech: done
+        ? `Maç öncesi seçimlerime bakalım. ${picks.map((k) => `${k.title}: ${k.label}, ${(() => {
+            const hit = pickHit(k.market, match.homeGoals, match.awayGoals);
+            return hit === true ? 'tuttu' : hit === false ? 'tutmadı' : 'ilk yarı skoruna bağlı';
+          })()}.`).join(' ')}`
+        : `${say('as.picks', ['Bu maç için seçimlerim şöyle.', 'Gelelim seçimlerime.'])} ${picks.map((k) => `${k.title}: ${k.label}, yüzde ${k.pct}.`).join(' ')}`,
+      mood: done ? 'calm' : 'excited',
+    });
   }
 
   // 8) Özel Yorum başlıkları: sorulan konu önce gelir. Bunlar maç öncesi tahminlerdir: maç başladıysa ya da bittiyse
@@ -369,6 +439,15 @@ const spokenScore = (s) => {
   const [a, b] = String(s).split('-').map(Number);
   return spokenPair(a, b);
 };
+
+/** Ekran metnini sese uygun yapar: yüzde işareti, skorlar ("1-0" → "bir sıfır"), ondalık çiftler ("1.4-1.2"). */
+export function sayable(text) {
+  return String(text ?? '')
+    .replace(/\((\d+)G (\d+)B (\d+)M\)/g, '($1 galibiyet, $2 beraberlik, $3 mağlubiyet)')
+    .replace(/%\s?(\d+)/g, 'yüzde $1')
+    .replace(/(\d+(?:[.,]\d+)?)\s*-\s*(\d+(?:[.,]\d+)?)/g, (m, a, b) => (/^\d+$/.test(a) && /^\d+$/.test(b) ? spokenPair(Number(a), Number(b)) : `${a} karşı ${b}`))
+    .replace(/(\d)\.(\d)/g, '$1,$2');
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Servis
@@ -523,6 +602,10 @@ export function narrationFacts({ match, state, live, content, model, importance 
     beklenenGol: `${r1(model.lambdaHome)} / ${r1(model.lambdaAway)}`,
     önem: `${importance.label} ${importance.score}/100`,
   };
+  const picks = Array.isArray(content.ai.picks) ? content.ai.picks : [];
+  if (picks.length) facts.aiSeçimleri = picks.map((k) => `${k.title}: ${k.label} %${k.pct}`).join(' · ');
+  if (content.ai.scenario) facts.senaryo = `devre ${content.ai.scenario.ht}, final ${content.ai.scenario.ft}`;
+  if (model.context?.notes?.length) facts.bağlam = model.context.notes.join(' ');
   if (live) {
     facts.canlı = `${live.home}-${live.away}, ${live.minute}. dakika`;
     const lp = live.probs;

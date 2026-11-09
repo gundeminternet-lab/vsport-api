@@ -4,7 +4,9 @@
 //   odds : kazanabilecek bahis ihtimalleri (MS, çifte şans, KG, alt/üst, İY, en olası skorlar, adil oran)
 //   sim  : 60 saniyelik simülasyon; oyuncu/top konumları kare kare hazırlanır, telefon yalnızca çizer
 
-import { baseMatrix, mixtureNodes, scoreMatrix } from './engine/analysis.js';
+import { baseMatrix, mixtureNodes, scoreMatrix, matchProbabilities } from './engine/analysis.js';
+import { liveForecast } from './engine/live_model.js';
+import { aiPicks } from './coupon_rules.js';
 import { simulateMatch, simulateToScore } from './engine/simulator.js';
 import { seedToInt } from './engine/rng.js';
 import { calibrate, calibrateGoals } from './engine/calibration.js';
@@ -23,7 +25,9 @@ export const RETIRED_TYPES = ['odds'];
 // 3: zengin anlatım dili (cümle çeşitliliği, seri/form yorumları, "Maçın anahtarı" bölümü)
 // 4: maç bağlamı (lig durumu, play-off, rotasyon, son 20 maç), isabetli şutlu lig gücü, dış tahmin verisiyle
 //    birleşik model (günlük tahminle aynı), tek senaryo (analiz, simülasyon, video ve Özel Yorum aynı skoru anlatır)
-export const CONTENT_VERSION = 4;
+// 5: "Maçın senaryosu" (devre ve final skoru: simülasyonun oynattığı akış), "Tahmini ne bozar?" (erken gol ve golsüz
+//    ilk yarı senaryoları canlı modelden), "AI seçimleri" (kuponlarla aynı kurallar), "Model ve oranlar"
+export const CONTENT_VERSION = 5;
 
 const pct = (p) => Math.round(p * 100);
 const r2 = (x) => Math.round(x * 100) / 100;
@@ -555,6 +559,31 @@ export function buildAi(analysis, { editorComment = null, seed = null } = {}) {
   if (!keyTexts.length) keyTexts.push(say('kf.none', ['Maçı küçük detaylar belirleyebilir: duran toplar ve ilk gol kritik olacak.', 'Net bir fark görünmüyor; kilit detaylar duran toplarda ve ilk golde saklı.']));
   sections.push({ title: 'Maçın anahtarı', text: `${keyTexts.join(' ')} ${firstGoal}` });
 
+  // Maçın senaryosu: analizin skoru ve simülasyonun oynattığı devre skoru (buildSim ile aynı seçim: tek senaryo)
+  const scenario = scenarioOf(analysis);
+  const second = scenario.ft.home + scenario.ft.away - scenario.ht.home - scenario.ht.away;
+  const flowVars = { ht: scenario.ht.score, ft: scenario.ft.score, o: pct(scenario.htGoal), n: second };
+  const flowKey = second === 0 ? 'sc.keep' : second === 1 ? 'sc.one' : 'sc.open';
+  const FLOW = {
+    'sc.keep': [
+      'Beklenen akış: devre {ht} kapanır (ilk yarıda gol ihtimali %{o}), ikinci yarıda skor korunur ve maç {ft} biter.',
+      'Senaryo şöyle: ilk yarı {ht} biter (ilk 45 dakikada gol %{o}); ikinci yarıda tabela değişmez, final {ft}.',
+    ],
+    'sc.one': [
+      'Beklenen akış: devre {ht} kapanır (ilk yarıda gol ihtimali %{o}). Maçı ikinci yarıda gelen tek gol belirler ve maç {ft} biter.',
+      'Senaryo şöyle: ilk yarı {ht} biter (ilk 45 dakikada gol %{o}); ikinci yarıda gelen gol skoru {ft} yapar.',
+    ],
+    'sc.open': [
+      'Beklenen akış: devre {ht} kapanır (ilk yarıda gol ihtimali %{o}). İkinci yarıda oyun açılır, {n} gol daha gelir ve maç {ft} biter.',
+      'Senaryo şöyle: ilk yarı {ht} biter (ilk 45 dakikada gol %{o}); ikinci yarıda tempo yükselir, {n} gol daha gelir, final {ft}.',
+    ],
+  };
+  sections.push({ title: 'Maçın senaryosu', text: `${say(flowKey, FLOW[flowKey], flowVars)} AI simülasyonu maçı bu akışla oynatır.` });
+
+  // Tahmini ne bozar? Erken gol ve golsüz ilk yarı senaryoları canlı modelden (maç içi olasılıklarla aynı hesap)
+  const risk = riskText(analysis, say, H, A);
+  if (risk) sections.push({ title: 'Tahmini ne bozar?', text: risk });
+
   // Öne çıkan tercih
   const odds = buildOdds(analysis);
   const best = odds.highlights[0];
@@ -574,6 +603,19 @@ export function buildAi(analysis, { editorComment = null, seed = null } = {}) {
         : say('pick.none', ['Belirgin bir öngörü yok; tahmin edilen skor {s}.', 'Net bir öne çıkan nokta yok, yine de tahmin edilen skor {s}.'], { s: odds.predictedScore }),
   });
 
+  // AI seçimleri: günlük AI kuponlarıyla aynı kurallar (coupon_rules.js); her tür için en iyi tek seçim
+  const picks = aiPicks(p, H, A);
+  if (picks.length) {
+    sections.push({
+      title: 'AI seçimleri',
+      text: `${picks.map((k) => `${k.title}: ${k.label} (%${k.pct}).`).join(' ')} Seçimler günlük AI kuponlarıyla aynı kurallarla yapılır.`,
+    });
+  }
+
+  // Model ve oranlar: tahmin, AI modelinin kendi görüşü ile oranların birleşimidir; belirgin ayrışma varsa söylenir
+  const mvo = modelVsOdds(analysis, H, A);
+  if (mvo?.text) sections.push({ title: 'Model ve oranlar', text: mvo.text });
+
   const conf = analysis.dataQuality.confidence;
   const confNote =
     conf === 'yüksek'
@@ -585,7 +627,7 @@ export function buildAi(analysis, { editorComment = null, seed = null } = {}) {
     title: 'Veri güveni',
     text:
       `Analiz ${analysis.dataQuality.homeMatches} + ${analysis.dataQuality.awayMatches} geçmiş maça ve ${analysis.dataQuality.h2hMatches} ikili karşılaşmaya dayanıyor. ` +
-      `Güven: ${conf}. ${confNote}`,
+      `Güven: ${conf}. ${confNote}${mvo?.agree ? ' AI modeli ile oranlar aynı yönü gösteriyor.' : ''}`,
   });
 
   return {
@@ -594,7 +636,111 @@ export function buildAi(analysis, { editorComment = null, seed = null } = {}) {
     topScore: odds.predictedScore,
     confidence: conf,
     sections,
+    // Uygulamadaki AI Yorumcu ve AI Asistan için: maçın AI seçimleri ve tek senaryonun devre/final skoru
+    picks,
+    scenario: { ht: scenario.ht.score, ft: scenario.ft.score, htGoal: pct(scenario.htGoal) },
     editorComment,
+  };
+}
+
+/**
+ * Tek senaryo: analizin final skoru ve onunla uyumlu devre skoru (buildSim aynı seçimi yapar). ht/ft: { home, away,
+ * score }; htGoal: ilk yarıda gol ihtimali.
+ */
+export function scenarioOf(analysis) {
+  const ft = predictedScore(analysis);
+  const half = halfTimeTable(analysis.lambdaHome, analysis.lambdaAway, analysis.sigma ?? 0);
+  const ht = compatibleHalf(half.scores, ft, half.predicted) ?? { home: Math.min(half.predicted.home, ft.home), away: Math.min(half.predicted.away, ft.away) };
+  return {
+    ft: { home: ft.home, away: ft.away, score: `${ft.home}-${ft.away}` },
+    ht: { home: ht.home, away: ht.away, score: `${ht.home}-${ht.away}` },
+    htGoal: half.over05,
+  };
+}
+
+/**
+ * "Tahmini ne bozar?": erken gol (25. dakika) ve golsüz ilk yarı senaryolarında olasılıklar (engine/live_model.js).
+ * Sayılar "seviyesinden … seviyesine" kalıbıyla yazılır (sayılara ek getirilmez).
+ */
+export function riskScenarios(analysis) {
+  const m = { lambdaHome: analysis.lambdaHome, lambdaAway: analysis.lambdaAway, sigma: analysis.sigma ?? 0 };
+  const start = liveForecast(m, { minute: 0, home: 0, away: 0 });
+  // Canlı modelin başlangıcı analizdeki olasılıklardan birkaç puan ayrışabilir: senaryolar analizin rakamlarına
+  // kaydırılır (okuyucu "Genel bakış"taki rakamdan yola çıksın)
+  const pr = analysis.probabilities ?? { homeWin: start.p1, draw: start.pX, awayWin: start.p2 };
+  const shift = { p1: pr.homeWin - start.p1, pX: pr.draw - start.pX, p2: pr.awayWin - start.p2 };
+  const clamp01 = (x) => Math.min(0.99, Math.max(0.01, x));
+  const at = (live) => {
+    const r = liveForecast(m, live);
+    return { p1: clamp01(r.p1 + shift.p1), pX: clamp01(r.pX + shift.pX), p2: clamp01(r.p2 + shift.p2) };
+  };
+  return {
+    base: { p1: pr.homeWin, pX: pr.draw, p2: pr.awayWin },
+    homeFirst: at({ minute: 25, home: 1, away: 0 }),
+    awayFirst: at({ minute: 25, home: 0, away: 1 }),
+    nilHt: at({ minute: 45, period: 1, halftime: true, home: 0, away: 0 }),
+  };
+}
+
+function riskText(analysis, say, H, A) {
+  let r;
+  try {
+    r = riskScenarios(analysis);
+  } catch {
+    return null;
+  }
+  const pick = predictedOutcome(analysis);
+  const lv = (x) => `%${pct(x)}`;
+  if (pick === 'X') {
+    return say(
+      'risk.x',
+      [
+        'Erken gol beraberlik senaryosunu bozar: {H} 25. dakikada öne geçerse beraberlik ihtimali {d0} seviyesinden {dh} seviyesine iner, {A} öne geçerse {da} olur. İlk yarı golsüz biterse beraberlik ihtimali {dn} seviyesine çıkar.',
+        'Beraberlik tahminini en çok ilk gol sarsar: {H} 25. dakikada golü bulursa beraberlik {d0} seviyesinden {dh} seviyesine düşer, {A} bulursa {da}. Devre golsüz kapanırsa beraberlik {dn} olur.',
+      ],
+      { H, A, d0: lv(r.base.pX), dh: lv(r.homeFirst.pX), da: lv(r.awayFirst.pX), dn: lv(r.nilHt.pX) },
+    );
+  }
+  const home = pick === '1';
+  const F = home ? H : A;
+  const U = home ? A : H;
+  const win = (x) => (home ? x.p1 : x.p2);
+  const underFirst = home ? r.awayFirst : r.homeFirst;
+  const favFirst = home ? r.homeFirst : r.awayFirst;
+  return say(
+    'risk.fav',
+    [
+      '{U} 25. dakikada golü bulursa {F} için kazanma ihtimali {b} seviyesinden {e} seviyesine iner. İlk yarı golsüz biterse beraberlik ihtimali {d0} seviyesinden {dn} seviyesine çıkar. İlk golü {F} atarsa kazanma ihtimali {l} olur.',
+      'Tahmini en çok erken bir {U} golü sarsar: 25. dakikada gelirse {F} için kazanma ihtimali {b} seviyesinden {e} seviyesine düşer. Devre golsüz kapanırsa beraberlik {d0} seviyesinden {dn} seviyesine yükselir; ilk golü {F} bulursa kazanma ihtimali {l} olur.',
+    ],
+    { U, F, b: lv(win(r.base)), e: lv(win(underFirst)), d0: lv(r.base.pX), dn: lv(r.nilHt.pX), l: lv(win(favFirst)) },
+  );
+}
+
+/**
+ * Model ve oranlar: AI modelinin kendi olasılıkları (analysis.base) ile oranlarla birleşmiş son olasılıklar. Belirgin
+ * ayrışma (6 puan ya da farklı tercih) varsa metin döner; değilse agree: true.
+ */
+export function modelVsOdds(analysis, H, A) {
+  const b = analysis.base;
+  if (!b || !((analysis.marketWeight ?? 0) > 0) || !Number.isFinite(b.lambdaHome) || !Number.isFinite(b.lambdaAway)) return null;
+  const pb = matchProbabilities(b.lambdaHome, b.lambdaAway, b.sigma ?? 0);
+  const pr = analysis.probabilities;
+  const argmax = (x) => (x.homeWin >= x.draw && x.homeWin >= x.awayWin ? '1' : x.awayWin >= x.draw && x.awayWin >= x.homeWin ? '2' : 'X');
+  const gap = Math.max(Math.abs(pr.homeWin - pb.homeWin), Math.abs(pr.draw - pb.draw), Math.abs(pr.awayWin - pb.awayWin));
+  if (gap < 0.06 && argmax(pb) === argmax(pr)) return { agree: true, text: null };
+  // Modelin oranlardan en çok yukarıda gördüğü sonuç
+  const ups = [
+    [pb.homeWin - pr.homeWin, `AI modeli ${H} tarafını oranların gösterdiğinden daha güçlü görüyor.`],
+    [pb.draw - pr.draw, 'AI modeli beraberliği oranların gösterdiğinden daha olası görüyor.'],
+    [pb.awayWin - pr.awayWin, `AI modeli ${A} tarafını oranların gösterdiğinden daha güçlü görüyor.`],
+  ].sort((x, y) => y[0] - x[0]);
+  const lean = ups[0][1];
+  return {
+    agree: false,
+    text:
+      `AI'ın kendi istatistik modeli ${H} %${pct(pb.homeWin)}, beraberlik %${pct(pb.draw)}, ${A} %${pct(pb.awayWin)} veriyor. ` +
+      `Oranlar da hesaba katılınca son tahmin ${H} %${pct(pr.homeWin)}, beraberlik %${pct(pr.draw)}, ${A} %${pct(pr.awayWin)} oldu. ${lean}`,
   };
 }
 
@@ -626,8 +772,9 @@ export function buildSim(analysis, { seed, durationSeconds = 60 } = {}) {
   const target = pickSimTarget(analysis, seed);
   // Devre skoru Özel Yorum'daki tahmini ilk yarı skoruyla aynı olsun (final skoruyla uyumluysa; değilse uyumlu en
   // olası devre skoru)
-  const half = halfTimeTable(analysis.lambdaHome, analysis.lambdaAway, analysis.sigma ?? 0);
-  const htTarget = compatibleHalf(half.scores, target, half.predicted);
+  // (AI analizindeki "Maçın senaryosu" ile aynı devre skoru: scenarioOf)
+  const sc = scenarioOf(analysis);
+  const htTarget = { home: sc.ht.home, away: sc.ht.away };
   const timeline = simulateToScore(analysis, { seed, target: { home: target.home, away: target.away }, htTarget });
   const choreo = buildChoreography(timeline, { durationSeconds });
   const form = (l) => (l >= 1.6 ? '4-3-3' : '4-4-2');
