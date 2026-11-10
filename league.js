@@ -50,7 +50,8 @@ export function previousWeekId(nowMs) {
 }
 
 /** Firestore'a yazan kısım. db: Admin Firestore, FieldValue: firebase-admin/firestore. */
-export function createLeagueStore(db, FieldValue, progress = null) {
+/** onScored: doğru tahmin sonrası (oyun kredisi ödülü); hata puanlamayı bozmaz. */
+export function createLeagueStore(db, FieldValue, progress = null, onScored = null) {
   return {
     /** Biten maçın tahminlerini puanlar. Maç başladıktan sonra değiştirilen tahminler 0 puan alır (geçersiz). */
     async scoreMatch({ key, homeGoals, awayGoals, kickoffMs }) {
@@ -85,16 +86,23 @@ export function createLeagueStore(db, FieldValue, progress = null) {
           scored++;
         }
         await batch.commit();
-        // Seviye/rozet ilerlemesi (başarısız olsa da puanlama geçerli kalır)
-        if (progress) {
+        // Seviye/rozet ilerlemesi ve oyun kredisi (başarısız olsa da puanlama geçerli kalır)
+        if (progress || onScored) {
           for (const doc of q.docs) {
             const p = doc.data();
             const at = p.updatedAt?.toMillis?.() ?? 0;
             if (!at || at >= kickoffMs) continue;
             const { points, exact } = scorePrediction(p, { home: homeGoals, away: awayGoals });
-            try {
-              await progress.add(doc.id, { predictions: 1, exact: exact ? 1 : 0, leaguePoints: points, xp: 5 + points * 10 });
-            } catch {}
+            if (progress) {
+              try {
+                await progress.add(doc.id, { predictions: 1, exact: exact ? 1 : 0, leaguePoints: points, xp: 5 + points * 10 });
+              } catch {}
+            }
+            if (onScored && points > 0) {
+              try {
+                await onScored({ uid: doc.id, points, exact });
+              } catch {}
+            }
           }
         }
         if (q.size < 200) break;

@@ -134,7 +134,16 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
           duelNext: (d) => game.duelNext(d),
           duelStart: (d) => game.duelStart(d),
           duelFinish: (d) => game.duelFinish(d),
+          duelMoment: (d) => game.duelMoment(d),
           duelBoard: (d) => game.duelBoard(d),
+          // İlerleme: Sezon Yolu, takvim, albüm, takas görevleri, genetik raporu, canlı form
+          roadClaim: (d) => game.progress.roadClaim(d),
+          calendarClaim: (d) => game.progress.calendarClaim(d),
+          albumState: (d) => game.progress.album(d),
+          albumClaim: (d) => game.progress.albumClaim(d),
+          exchangeSubmit: (d) => game.progress.exchangeSubmit(d),
+          geneScout: (d) => game.geneScout(d),
+          liveForm: (d) => game.liveForm(d),
           gameClaimChest: (d) => game.claimChest(d),
           // Kulüp: kuruluş, arma, tesis yükseltme, taraftar geliri, antrenman
           clubCreate: (d) => game.club.create(d),

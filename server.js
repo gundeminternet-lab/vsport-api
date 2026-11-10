@@ -278,7 +278,8 @@ http.createServer(api).listen(port, () => console.log(`vSport API ${port} portun
 
 // ---- Canlı maç bildirimleri ----
 const messaging = getMessaging();
-const league = createLeagueStore(db, FieldValue, progress);
+// Doğru skor tahmini oyunda kredi kazandırır (günlük sınırlı)
+const league = createLeagueStore(db, FieldValue, progress, (r) => game.progress.predictionReward(r));
 const polls = createPollStore(db, FieldValue, Timestamp);
 const settler = new CouponSettler({ store: createSettleStore(db, FieldValue), espn });
 let lastSettle = 0;
