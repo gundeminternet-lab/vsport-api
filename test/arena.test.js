@@ -2,6 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { ENERGY } from '../game/energy.js';
 import { GameService } from '../game/service.js';
 import { slotsOf, FORMATIONS } from '../game/squad.js';
 import { animFormation, duelLambdas, adaptTactic, playDuel, packOf, TACTIC_EDGE } from '../game/match.js';
@@ -108,7 +109,9 @@ test('kapışma: başlat → ilk yarı, devre arasında taktik → ikinci yarı 
   assert.equal(start.me.kit, 3);
   assert.equal(start.opponent.lineup.length, 11);
   assert.ok(start.halftime.hint.length > 10);
-  assert.equal(start.left, DUEL.daily - 1);
+  // Enerji: 100 − 20 = 80 → 4 maçlık
+  assert.equal(start.energy.value, ENERGY.max - ENERGY.cost.normal);
+  assert.equal(start.left, Math.floor((ENERGY.max - ENERGY.cost.normal) / ENERGY.cost.normal));
   assert.equal((await s.state({ uid: 'u1' })).duel.pending.duelId, start.duelId);
   await assert.rejects(s.duelFinish({ uid: 'u1', duelId: 'yok', tactic: 'kontra' }), /bulunamadı/);
 
@@ -126,7 +129,7 @@ test('kapışma: başlat → ilk yarı, devre arasında taktik → ikinci yarı 
 
   const st = await s.state({ uid: 'u1' });
   assert.equal(st.duel.pending, null);
-  assert.equal(st.duels.left, DUEL.daily - 1);
+  assert.equal(st.energy.value, ENERGY.max - ENERGY.cost.normal);
   assert.equal(st.duel.week.played, 1);
   assert.equal(st.duel.career.w + st.duel.career.d + st.duel.career.l, 1);
   assert.equal(st.duels.last[0].mode, 'normal');
@@ -139,7 +142,7 @@ test('kapışma: başlat → ilk yarı, devre arasında taktik → ikinci yarı 
   assert.ok(board.resetsAt > NOW && board.resetsAt - NOW <= 7 * 86400e3);
 });
 
-test('kapışma: yarım kalan kapışma yenisi başlarken biter; günde 3 hak; eski kapışma 30 dakika sonra kendiliğinden biter', async () => {
+test('kapışma: yarım kalan kapışma yenisi başlarken biter; günlük sınır yok, enerji biter; enerji zamanla dolar; eski kapışma 30 dakika sonra kendiliğinden biter', async () => {
   let now = NOW;
   const { s } = svc({ now: () => now });
   const { sq } = await squadReady(s, 'u1');
@@ -149,12 +152,23 @@ test('kapışma: yarım kalan kapışma yenisi başlarken biter; günde 3 hak; e
   assert.notEqual(a.duelId, b.duelId);
   await s.duelFinish({ uid: 'u1', duelId: b.duelId });
   await s.duelStart({ uid: 'u1', squadId: sq.id, tactic: 'kontra' });
-  await assert.rejects(s.duelStart({ uid: 'u1', squadId: sq.id, tactic: 'kontra' }), /hakların bitti/);
+  // 3 maçtan sonra 4. ve 5. maç da oynanır (günlük sınır yok); 100 enerji = 5 normal maç
+  const c4 = await s.duelStart({ uid: 'u1', squadId: sq.id, tactic: 'kontra' });
+  const c5 = await s.duelStart({ uid: 'u1', squadId: sq.id, tactic: 'kontra' });
+  assert.equal(c5.energy.value, 0);
+  assert.ok(c4.resolved && c5.resolved);
+  await assert.rejects(s.duelStart({ uid: 'u1', squadId: sq.id, tactic: 'kontra' }), /Enerjin yetmiyor \(0\/20\)/);
   now += 31 * 60e3;
   const st = await s.state({ uid: 'u1' });
   assert.equal(st.duel.pending, null, 'unutulan kapışma bitti');
-  assert.equal(st.duel.week.played, 3);
-  assert.equal(st.duels.last.length, 3);
+  assert.equal(st.duel.week.played, 5);
+  assert.equal(st.duels.last.length, 5);
+  // 31 dakikada 5 enerji doldu (6 dakikada 1)
+  assert.equal(st.energy.value, 5);
+  assert.ok(st.energy.nextInMs > 0 && st.energy.nextInMs <= 6 * 60e3);
+  now += 15 * 6 * 60e3;
+  assert.equal((await s.state({ uid: 'u1' })).energy.value, 20);
+  await s.duelStart({ uid: 'u1', squadId: sq.id, tactic: 'dengeli' });
 });
 
 test('Günün Meydan Okuması: günde bir kez, büyük ödül; görevler ve sandık', async () => {
@@ -173,8 +187,8 @@ test('Günün Meydan Okuması: günde bir kez, büyük ödül; görevler ve sand
   assert.equal(fin.reward, { W: BOSS.win, D: BOSS.draw, L: BOSS.loss }[fin.result]);
   assert.equal(fin.bossDone, true);
   await assert.rejects(s.duelStart({ uid: 'u1', squadId: sq.id, mode: 'boss' }), /bugün oynandı/);
-  // Normal haklar ayrı
-  assert.equal((await s.state({ uid: 'u1' })).duels.left, DUEL.daily);
+  // Meydan okuma enerji harcamaz
+  assert.equal((await s.state({ uid: 'u1' })).energy.value, ENERGY.max);
 
   // Görev: meydan okuma → 100 kredi; sandık bütün görevler alınınca
   await s.claimMission({ uid: 'u1', id: 'boss' });

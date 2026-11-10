@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { ENERGY } from '../game/energy.js';
 import { groupOf, parseRoster, teamCards, playerRating, tierOf, fold, PlayerPool } from '../game/pool.js';
 import { evaluate, validateSquad, autoBuild, slotsOf, FORMATIONS } from '../game/squad.js';
 import { buildQuestions, STATIC_QUESTIONS } from '../game/quiz.js';
@@ -295,7 +296,7 @@ async function squadReady(s, uid) {
   return { w, slots: Object.fromEntries(slotsOf('4-3-3').map((x, i) => [x.key, ids[i]])) };
 }
 
-test('kadro: kaydet (kimya ve güç sunucuda), en çok 3, satışta kadrodaki kart korunur; kapışma günde 3', async () => {
+test('kadro: kaydet (kimya ve güç sunucuda), en çok 3, satışta kadrodaki kart korunur; maçlar enerjiyle', async () => {
   const { s, store } = svc();
   const { w, slots } = await squadReady(s, 'u1');
   const sq = await s.saveSquad({ uid: 'u1', name: 'Towtspor', formation: '4-3-3', slots });
@@ -313,14 +314,16 @@ test('kadro: kaydet (kimya ve güç sunucuda), en çok 3, satışta kadrodaki ka
   assert.equal(sold.sold, 1);
   assert.ok(sold.credits >= 100);
 
-  for (let i = 0; i < DUEL.daily; i++) {
+  // Günlük sınır yok: enerji (100) 5 maça yeter
+  const n = Math.floor(ENERGY.max / ENERGY.cost.normal);
+  for (let i = 0; i < n; i++) {
     const d = await s.duel({ uid: 'u1', squadId: sq.id });
     assert.ok(['W', 'D', 'L'].includes(d.result));
     assert.ok([DUEL.win, DUEL.draw, DUEL.loss].includes(d.reward));
     assert.equal(d.opponent.bot, true, 'başka kullanıcı yoksa havuzdan rakip');
   }
-  await assert.rejects(s.duel({ uid: 'u1', squadId: sq.id }), /hakların bitti/);
-  assert.equal((await s.state({ uid: 'u1' })).duels.last.length, DUEL.daily);
+  await assert.rejects(s.duel({ uid: 'u1', squadId: sq.id }), /Enerjin yetmiyor/);
+  assert.equal((await s.state({ uid: 'u1' })).duels.last.length, n);
   // İkinci kullanıcı ilk kullanıcının kadrosuyla eşleşebilir
   const { slots: slots2 } = await squadReady(s, 'u2');
   const sq2 = await s.saveSquad({ uid: 'u2', name: 'Rakipspor', formation: '4-3-3', slots: slots2 });
