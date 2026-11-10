@@ -209,10 +209,14 @@ test('sıradaki maç: rakip önceden belirlenir, maçta aynı rakip çıkar; kul
   assert.equal(n1.opponent.power, n2.opponent.power);
   assert.ok(n1.opponent.kits?.home, 'rakibin forması');
   assert.ok(n1.opponent.crest, 'rakibin arması');
-  assert.equal(n1.venue.name, 'Kuzey Yıldızı Stadyumu');
+  // Maç ev sahibinin stadyumunda: iç sahada kulübün stadyumu, deplasmanda rakibin
+  assert.equal(n1.venue.name, n1.home ? 'Kuzey Yıldızı Stadyumu' : `${n1.opponent.name} Arena`);
+  assert.equal(n1.stadium.host, n1.home ? 'me' : 'opp');
   assert.deepEqual(n1.rewards, [DUEL.win, DUEL.draw, DUEL.loss]);
   const start = await s.duelStart({ uid: 'u1', squadId: sq.id, tactic: 'dengeli', kit: 'away' });
   assert.equal(start.opponent.name, n1.opponent.name);
+  assert.equal(start.home, n1.home, 'maç öncesinde gösterilen saha');
+  assert.equal(start.venue, n1.venue.name);
   assert.deepEqual(start.me.kits, kits);
   assert.equal(start.me.wear, 'away');
   assert.deepEqual(start.me.crest, crest);

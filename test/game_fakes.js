@@ -160,7 +160,7 @@ export function memoryGameStore({ users = {} } = {}) {
       const b = s.duelBoards.get(week) ?? new Map();
       const e = { ...(b.get(uid) ?? {}) };
       for (const [k, v] of Object.entries(delta)) e[k] = Number(e[k] ?? 0) + v;
-      b.set(uid, { ...e, username: user.username ?? null, photoURL: user.photoURL ?? null });
+      b.set(uid, { ...e, username: user.username ?? null, photoURL: user.photoURL ?? null, ...(user.div != null ? { div: user.div } : {}) });
       s.duelBoards.set(week, b);
     },
     async duelBoardTop(week, limit = 50) {
@@ -175,6 +175,14 @@ export function memoryGameStore({ users = {} } = {}) {
     },
     async duelBoardRank(week, points) {
       return [...(s.duelBoards.get(week) ?? new Map()).values()].filter((e) => e.points > points).length + 1;
+    },
+    async uidByUsername(name) {
+      const key = String(name ?? '').replaceAll('@', '').trim().toLowerCase();
+      return Object.entries(s.users).find(([, u]) => String(u?.username ?? '').toLowerCase() === key)?.[0] ?? null;
+    },
+    async getDuelPoolEntry(uid) {
+      const x = s.duelPool.get(uid);
+      return x ? { uid, ...clone(x) } : null;
     },
     async upsertDuelPool(uid, summary) {
       s.duelPool.set(uid, clone(summary));

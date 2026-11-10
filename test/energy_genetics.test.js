@@ -9,6 +9,7 @@ import { memoryGameStore, syntheticPool } from './game_fakes.js';
 import { ENERGY, addEnergy, energyNow, energyPrice, energyTimes, energyView, matchesLeft, spendEnergy } from '../game/energy.js';
 import { BODY, GROWTH, TRAITS, ageFactor, geneticsOf, geneticsView, trainFactor, traitStats } from '../game/genetics.js';
 import { PACKS, PITY } from '../game/economy.js';
+import { maskedGenetics } from '../game/fog.js';
 import { matchEvents } from '../game/office.js';
 import { potentialOf } from '../game/staff.js';
 
@@ -171,7 +172,7 @@ test('genetik oyunda: hızlı gelişen daha çok gelişim puanı alır; kırılg
   const fast = list.find((x) => x.g.growth.id === 'hizli' && !x.g.traits.length).pid;
   const slow = list.find((x) => x.g.growth.id === 'gec' && !x.g.traits.length).pid;
   const [c1, c2] = w.cards.filter((c) => c.g === 'OS' && c.r < 75).slice(0, 2);
-  await store.updateCard('u1', c1.id, { pid: fast, a: 25, r: 60, pot: 80 });
+  await store.updateCard('u1', c1.id, { pid: fast, a: 25, r: 60, pot: 80, gx: 15 });
   await store.updateCard('u1', c2.id, { pid: slow, a: 25, r: 60, pot: 80 });
   const t1 = await s.club.train({ uid: 'u1', cardId: c1.id, drill: 'teknik' });
   const t2 = await s.club.train({ uid: 'u1', cardId: c2.id, drill: 'teknik' });
@@ -192,14 +193,16 @@ test('genetik oyunda: hızlı gelişen daha çok gelişim puanı alır; kırılg
   assert.equal(Array.from({ length: 400 }, (_, i) => matchEvents({ seed: `d${i}`, lineup: lineupL }).discipline).filter(Boolean).length, 0);
 });
 
-test('altyapı: gencin genetiği görünür ve A takıma alınınca kartta aynı kalır', async () => {
+test('altyapı: gencin genetiğinin akademinin gördüğü kısmı açık; A takıma alınınca kartta aynı kalır', async () => {
   const { s } = svc();
   await ready(s);
   const sc = await s.manager.youthScout({ uid: 'u1' });
   const y = sc.found[0];
-  assert.ok(y.gen && y.gen.grade);
+  assert.ok(y.gen && y.gen.growth, 'gelişim hızı akademide görünür');
+  assert.equal(y.gen.grade, null, 'not ancak hepsi açılınca');
   assert.ok(y.gk.startsWith('youth-'));
   const pr = await s.manager.youthPromote({ uid: 'u1', id: y.id });
   assert.equal(pr.card.pid, y.gk);
-  assert.deepEqual(geneticsView({ ...pr.card }), y.gen);
+  assert.equal(pr.card.gx, y.gen.gx);
+  assert.deepEqual(maskedGenetics({ ...pr.card }), y.gen);
 });
