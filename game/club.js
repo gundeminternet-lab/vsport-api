@@ -4,17 +4,21 @@
 //
 //   game_profiles/{uid}.club   { name, short, fans, crest: { shape, primary, secondary, symbol, pattern }, foundedAt,
 //                                kits: { home, away, gk } (her biri { pattern, shirt, second, shorts, socks }),
-//                                levels: { stadium, training, academy, fanshop }, build: { facility, to, startedAt, endsAt } | null,
+//                                levels: { stadium, training, academy, fanshop, parking, food, megastore }, build: { facility, to, startedAt, endsAt } | null,
 //                                shopDay }
 //   Kulüp kimliği (ad, kısaltma, arma, taraftar grubu, formalar) kuruluşta belirlenir ve sonra değişmez.
 //   club_names/{ad}            { uid }   kulüp adı tekil
 //   game_profiles/{uid}/cards/{id}.dev   { xp, plus, base }   oyuncu gelişimi (puan kazandıkça r ve özellikler artar)
 //   game_profiles/{uid}/daily/{gün}.training   o gün yapılan antrenman sayısı
+//   club.staff   { kl, def, os, fv, fit, scout }   teknik ekip seviyeleri (0-5; staff.js)
+//   Antrenmanda oyuncu potansiyelini (staff.js → potentialOf) aşamaz; grubun antrenörü gelişimi ve sınırı artırır.
 
 import { AppError } from '../errors.js';
+import { geneticsView, trainFactor, traitStats } from './genetics.js';
 import { trDay } from '../progress.js';
 import { tierOf } from './pool.js';
 import { slotsOf, teamPower, validateSquad } from './squad.js';
+import { GROUP_STAFF, STAFF, STAFF_IDS, STAFF_MAX, potentialOf, staffCost, staffEffects, staffLevels, staffText } from './staff.js';
 
 export const CLUB = {
   nameMin: 3,
@@ -37,6 +41,10 @@ export const FACILITIES = {
   training: { id: 'training', name: 'Antrenman Sahası', maxLevel: 10, base: 300 },
   academy: { id: 'academy', name: 'Altyapı Akademisi', maxLevel: 10, base: 350 },
   fanshop: { id: 'fanshop', name: 'Taraftar Mağazası', maxLevel: 10, base: 250 },
+  // Maç günü gelirleri (office.js → matchdayIncome): ev maçlarında seyirciden gelir
+  parking: { id: 'parking', name: 'Otopark', maxLevel: 10, base: 200 },
+  food: { id: 'food', name: 'Yeme-İçme Alanı', maxLevel: 10, base: 220 },
+  megastore: { id: 'megastore', name: 'Forma Mağazası', maxLevel: 10, base: 260 },
 };
 export const FACILITY_IDS = Object.keys(FACILITIES);
 
@@ -50,11 +58,15 @@ export const buildMs = (level) => (BUILD_MINUTES[level] ?? 180) * 60e3;
 export function effectsOf(levels = {}) {
   const lv = (f) => Math.max(1, Math.min(FACILITIES[f].maxLevel, Number(levels[f] ?? 1)));
   const st = lv('stadium'), tr = lv('training'), ac = lv('academy'), fs = lv('fanshop');
+  const pk = lv('parking'), fd = lv('food'), ms = lv('megastore');
   return {
     stadium: { capacity: 5000 + (st - 1) * 6000, incomePct: (st - 1) * 8 },
     training: { sessions: 3 + Math.floor((tr - 1) / 2), xpPct: (tr - 1) * 10 },
     academy: { cap: 3 + ac },
     fanshop: { daily: 40 + (fs - 1) * 30 },
+    parking: { spaces: 400 + (pk - 1) * 400 },
+    food: { stalls: 4 + (fd - 1) * 3, perHead: Math.round((0.008 + 0.003 * (fd - 1)) * 1000) / 1000 },
+    megastore: { sharePct: Math.round((0.4 + 0.15 * (ms - 1)) * 100) / 100 },
   };
 }
 
@@ -68,6 +80,12 @@ export function effectText(facility, level) {
       return `Günde ${e.sessions} antrenman · gelişim +%${e.xpPct}`;
     case 'academy':
       return `Oyuncu başına en çok +${e.cap} güç`;
+    case 'parking':
+      return `${e.spaces.toLocaleString('tr-TR')} araçlık otopark · maç günü geliri`;
+    case 'food':
+      return `${e.stalls} büfe · seyirci başı harcama artar`;
+    case 'megastore':
+      return `Seyircinin %${e.sharePct} kadarı forma alır`;
     default:
       return `Günlük ${e.daily} kredi taraftar geliri`;
   }
@@ -236,6 +254,9 @@ export class ClubService {
     const now = this.now();
     const levels = Object.fromEntries(FACILITY_IDS.map((f) => [f, Number(c.levels?.[f] ?? 1)]));
     const eff = effectsOf(levels);
+    const staff = staffLevels(c);
+    const se = staffEffects(staff);
+    const sessions = eff.training.sessions + se.sessions;
     const today = trDay(now);
     return {
       name: c.name,
@@ -265,13 +286,26 @@ export class ClubService {
         };
       }),
       training: {
-        left: Math.max(0, eff.training.sessions - trainingToday),
-        daily: eff.training.sessions,
+        left: Math.max(0, sessions - trainingToday),
+        daily: sessions,
         xpPct: eff.training.xpPct,
         cap: eff.academy.cap,
+        // Mevki grubuna göre: antrenörün ek gelişim yüzdesi ve gelişim sınırı
+        groupXpPct: se.xpPct,
+        groupCap: Object.fromEntries(Object.keys(GROUP_STAFF).map((g) => [g, eff.academy.cap + se.capBonus[g]])),
         baseXp: TRAIN.baseXp,
         drills: Object.values(DRILLS).map((d) => ({ id: d.id, name: d.name, xp: d.xp, extraCost: d.extraCost ?? 1 })),
       },
+      staff: STAFF_IDS.map((id) => ({
+        id,
+        name: STAFF[id].name,
+        group: STAFF[id].g,
+        level: staff[id],
+        maxLevel: STAFF_MAX,
+        effect: staffText(id, staff[id]),
+        next: staff[id] < STAFF_MAX ? staffText(id, staff[id] + 1) : null,
+        cost: staff[id] < STAFF_MAX ? staffCost(staff[id]) : null,
+      })),
       shop: { daily: eff.fanshop.daily, ready: c.shopDay !== today },
       incomePct: eff.stadium.incomePct,
     };
@@ -384,45 +418,74 @@ export class ClubService {
     const day = trDay(this.now());
     const [daily, cards] = await Promise.all([this.store.getDaily(uid, day), this.store.listCards(uid)]);
     const eff = effectsOf(p.club.levels);
+    const se = staffEffects(staffLevels(p.club));
+    const sessions = eff.training.sessions + se.sessions;
     const used = Number(daily?.training ?? 0);
-    if (used >= eff.training.sessions) throw new AppError('resource-exhausted', `Bugünkü ${eff.training.sessions} antrenman hakkın bitti; Antrenman Sahası'nı geliştirerek hak artar.`);
+    if (used >= sessions) throw new AppError('resource-exhausted', `Bugünkü ${sessions} antrenman hakkın bitti; Antrenman Sahası'nı ya da kondisyoneri geliştirerek hak artar.`);
     const card = cards.find((c) => c.id === cardId);
     if (!card) throw new AppError('not-found', 'Oyuncu bulunamadı.');
     const dev = { xp: Number(card.dev?.xp ?? 0), plus: Number(card.dev?.plus ?? 0), base: Number(card.dev?.base ?? card.r) };
-    if (dev.plus >= eff.academy.cap || card.r >= 99) {
-      throw new AppError('failed-precondition', `${card.s ?? card.n} gelişim sınırında (+${eff.academy.cap}); Altyapı Akademisi'ni geliştirerek sınır yükselir.`);
+    // Gelişim sınırı: akademi + mevki grubunun antrenörü; oyuncu potansiyelini aşamaz
+    const cap = eff.academy.cap + (se.capBonus[card.g] ?? 0);
+    const pot = potentialOf(card);
+    if (card.r >= pot) throw new AppError('failed-precondition', `${card.s ?? card.n} potansiyeline ulaştı (${pot}).`);
+    if (dev.plus >= cap || card.r >= 99) {
+      throw new AppError('failed-precondition', `${card.s ?? card.n} gelişim sınırında (+${cap}); Altyapı Akademisi'ni ya da ${STAFF[GROUP_STAFF[card.g] ?? 'os'].name.toLocaleLowerCase('tr')}nü geliştirerek sınır yükselir.`);
     }
     const cost = trainCost(card.r, drill);
     const balance = await this.store.changeCredits(uid, -cost, { earn: false });
     await this.store.incrementDaily(uid, day, 'training', 1);
-    const gain = Math.round(TRAIN.baseXp * d.xp * (1 + eff.training.xpPct / 100));
+    // Genetik: gelişim hızı × yaş × (antrenman doğuştan yeteneğe uyuyorsa +%10)
+    const tf = trainFactor(card, card.g === 'KL' ? d.keeper : d.field);
+    const gain = Math.round(TRAIN.baseXp * d.xp * (1 + (eff.training.xpPct + (se.xpPct[card.g] ?? 0)) / 100) * tf.k);
     let xp = dev.xp + gain;
     let r = Number(card.r);
     let plus = dev.plus;
     const st = Array.isArray(card.st) ? [...card.st] : [];
     const raised = [];
-    while (xp >= xpNeed(r) && plus < eff.academy.cap && r < 99) {
+    while (xp >= xpNeed(r) && plus < cap && r < 99 && r < pot) {
       xp -= xpNeed(r);
       r++;
       plus++;
       for (const i of card.g === 'KL' ? d.keeper : d.field) {
         if (i < st.length) st[i] = Math.min(99, Number(st[i]) + 1);
       }
+      // Doğuştan yetenek: ilgili özellik her seviyede fazladan +1
+      for (const i of traitStats(card, tf.gen)) {
+        if (i < st.length) st[i] = Math.min(99, Number(st[i]) + 1);
+      }
       raised.push(r);
     }
-    if (plus >= eff.academy.cap) xp = 0;
-    const patch = { r, st, tier: tierOf(r), dev: { xp, plus, base: dev.base } };
+    if (plus >= cap || r >= pot) xp = 0;
+    const patch = { r, st, tier: tierOf(r), pot, dev: { xp, plus, base: dev.base } };
     await this.store.updateCard(uid, cardId, patch);
     // Güç arttıysa oyuncunun bulunduğu kadroların gücü yenilenir
     if (raised.length) await this._refreshSquads(uid, p, cards.map((c) => (c.id === cardId ? { ...c, ...patch } : c)));
     return {
-      card: { id: cardId, r, st, tier: tierOf(r), dev: patch.dev, need: xpNeed(r) },
+      card: { id: cardId, r, st, tier: tierOf(r), pot, dev: patch.dev, need: xpNeed(r) },
       gain,
+      // Genetik etkisi (uygulama kart üstünde gösterir)
+      genetics: { ...geneticsView(card), factor: tf.k, fits: tf.fits, age: tf.age.text },
       levelUp: raised.length,
       cost,
       balance,
-      left: Math.max(0, eff.training.sessions - used - 1),
+      left: Math.max(0, sessions - used - 1),
     };
+  }
+
+  /** Teknik ekip: bir antrenörü işe al ya da bir seviye geliştir (kredi düşer, hemen etkili). */
+  async hireStaff({ uid, guest = false, staff }) {
+    if (!STAFF[staff]) throw new AppError('invalid-argument', 'Geçersiz antrenör.');
+    const p = await this._club(uid, guest);
+    const levels = staffLevels(p.club);
+    const lvl = levels[staff];
+    if (lvl >= STAFF_MAX) throw new AppError('failed-precondition', `${STAFF[staff].name} en üst seviyede.`);
+    const cost = staffCost(lvl);
+    const balance = await this.store.changeCredits(uid, -cost, { earn: false });
+    const club = { ...p.club, staff: { ...levels, [staff]: lvl + 1 } };
+    await this.store.updateProfile(uid, { club });
+    p.club = club;
+    return { club: await this._view(uid, p), staff, level: lvl + 1, cost, balance };
   }
 
   async _refreshSquads(uid, p, cards) {
@@ -432,7 +495,15 @@ export class ClubService {
       const v = validateSquad(s, owned);
       if (!v.ok) continue;
       const clean = Object.fromEntries(slotsOf(s.formation).map((x) => [x.key, s.slots[x.key]]));
-      await this.store.saveSquad(uid, s.id, { name: s.name, formation: s.formation, slots: clean, chemistry: v.ev.chemistry, rating: v.ev.rating, power: Math.round(teamPower(v.ev) * 10) / 10 });
+      await this.store.saveSquad(uid, s.id, {
+        name: s.name,
+        formation: s.formation,
+        slots: clean,
+        chemistry: v.ev.chemistry,
+        rating: v.ev.rating,
+        power: Math.round(teamPower(v.ev) * 10) / 10,
+        ...(s.plan ? { plan: s.plan } : {}),
+      });
     }
     await this.game._duelSummary(uid, p, await this.store.listSquads(uid), cards).catch(() => {});
   }

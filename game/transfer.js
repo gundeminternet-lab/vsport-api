@@ -113,6 +113,8 @@ export class TransferService {
     }
     const card = await this.store.getCard(uid, cardId);
     if (!card) throw new AppError('not-found', 'Kart bulunamadı.');
+    // Altyapıdan yetişen oyuncu kulübün kendi oyuncusudur: pazara çıkmaz (hızlı satılabilir)
+    if (card.youth === true) throw new AppError('failed-precondition', 'Altyapıdan yetişen oyuncular Transfer Pazarı\'na konamaz.');
     const tier = card.tier ?? tierOf(card.r ?? 50);
     const range = priceRange(tier);
     if (p < range.min || p > range.max) throw new AppError('invalid-argument', `Fiyat ${range.min} ile ${range.max} kredi arasında olmalı.`);

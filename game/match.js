@@ -35,18 +35,41 @@ export const TACTIC_EDGE = 1.15;
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 const r1 = (x) => Math.round(x * 10) / 10;
 const r2 = (x) => Math.round(x * 100) / 100;
+const r3 = (x) => Math.round(x * 1000) / 1000;
 
 export const tacticOf = (id) => TACTICS[id] ?? TACTICS.dengeli;
 
-/** Bir kadronun (a) rakibe (b) karşı gol beklentisi: güç farkı + taktikler. */
-function lambdaOf(pa, pb, ta, tb) {
-  const base = clamp(1.35 * Math.exp(0.07 * (pa - pb)), 0.25, 4);
-  const edge = TACTIC_BEATS[ta] === tb ? TACTIC_EDGE : 1;
-  return clamp(base * tacticOf(ta).att * tacticOf(tb).open * edge, 0.2, 4.2);
+/**
+ * Taktik planı (Benim 11'im › Taktik): pres, savunma çizgisi, genişlik ve tempo 1-5 (3 dengeli). Her biri hücumu
+ * artırırken savunmada açık da verir: { att: kendi gol beklentisi çarpanı, open: rakibin gol beklentisi çarpanı }.
+ */
+export const PLAN_KEYS = ['press', 'line', 'width', 'tempo'];
+const PLAN_STEP = { press: [0.025, 0.02], line: [0.015, 0.025], width: [0.012, 0.006], tempo: [0.02, 0.012] };
+
+export function planMods(plan) {
+  let att = 1;
+  let open = 1;
+  if (plan && typeof plan === 'object') {
+    for (const k of PLAN_KEYS) {
+      const v = Number(plan[k]);
+      if (!Number.isFinite(v)) continue;
+      const d = Math.max(1, Math.min(5, Math.round(v))) - 3;
+      att *= 1 + PLAN_STEP[k][0] * d;
+      open *= 1 + PLAN_STEP[k][1] * d;
+    }
+  }
+  return { att: r3(att), open: r3(open) };
 }
 
-export function duelLambdas(pHome, pAway, tHome, tAway) {
-  return { home: lambdaOf(pHome, pAway, tHome, tAway), away: lambdaOf(pAway, pHome, tAway, tHome) };
+/** Bir kadronun (a) rakibe (b) karşı gol beklentisi: güç farkı + taktikler + taktik planları (ma, mb: planMods). */
+function lambdaOf(pa, pb, ta, tb, ma = null, mb = null) {
+  const base = clamp(1.35 * Math.exp(0.07 * (pa - pb)), 0.25, 4);
+  const edge = TACTIC_BEATS[ta] === tb ? TACTIC_EDGE : 1;
+  return clamp(base * tacticOf(ta).att * tacticOf(tb).open * edge * (ma?.att ?? 1) * (mb?.open ?? 1), 0.2, 4.2);
+}
+
+export function duelLambdas(pHome, pAway, tHome, tAway, mHome = null, mAway = null) {
+  return { home: lambdaOf(pHome, pAway, tHome, tAway, mHome, mAway), away: lambdaOf(pAway, pHome, tAway, tHome, mAway, mHome) };
 }
 
 /** Rakibin (bot ya da başka kullanıcının kadrosu) ilk yarı taktiği. */
@@ -123,8 +146,11 @@ export function compactCard(c) {
  * Döner: { timeline, choreo, players, feed (adlı), goals, reds, stats, ratings, motm, breakAt }.
  */
 export function playDuel({ me, opp, seed, tactics, durationSeconds = DUEL_SECONDS }) {
-  const l1 = duelLambdas(me.power, opp.power, tactics.me1, tactics.opp1);
-  const l2 = duelLambdas(me.power, opp.power, tactics.me2 ?? tactics.me1, tactics.opp2 ?? tactics.opp1);
+  // Taktik planı (varsa) iki yarıda da geçerli
+  const mMe = me.plan ? planMods(me.plan) : null;
+  const mOpp = opp.plan ? planMods(opp.plan) : null;
+  const l1 = duelLambdas(me.power, opp.power, tactics.me1, tactics.opp1, mMe, mOpp);
+  const l2 = duelLambdas(me.power, opp.power, tactics.me2 ?? tactics.me1, tactics.opp2 ?? tactics.opp1, mMe, mOpp);
   const analysis = {
     home: { id: 'me', name: me.name },
     away: { id: 'opp', name: opp.name },

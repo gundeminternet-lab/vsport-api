@@ -24,7 +24,18 @@ export const PACKS = {
   gumus: { id: 'gumus', name: 'Gümüş Paket', cost: 5000, count: 10, weights: { bronze: 0.2, silver: 0.65, gold: 0.15 }, desc: 'Gümüş ağırlıklı; altın kart çıkma şansı yüksek.' },
   altin: { id: 'altin', name: 'Altın Paket', cost: 10000, count: 12, weights: { bronze: 0.05, silver: 0.45, gold: 0.45, elite: 0.05 }, desc: 'Altın ağırlıklı; elit kart çıkabilir.' },
   vsport: { id: 'vsport', name: 'vSport Paket', cost: 20000, count: 8, weights: { silver: 0.3, gold: 0.55, elite: 0.15 }, guaranteed: 3, desc: '3 yıldız (80+) oyuncu garantili, en güçlü paket.' },
+  // Genç Yetenek: 21 yaş ve altı; biri potansiyeli 85+ (yıldız adayı) garantili. Genetiği güçlü gençler için.
+  genc: { id: 'genc', name: 'Genç Yetenek Paketi', cost: 6000, count: 6, weights: { bronze: 0.35, silver: 0.5, gold: 0.15 }, maxAge: 21, potGuaranteed: 85, desc: '21 yaş ve altı gençler; 1 yıldız aday (potansiyel 85+) garantili.' },
+  // Mevki: seçilen mevki grubundan (kaleci, defans, orta saha, forvet) oyuncular
+  mevki: { id: 'mevki', name: 'Mevki Paketi', cost: 4500, count: 6, weights: { bronze: 0.15, silver: 0.55, gold: 0.27, elite: 0.03 }, group: true, desc: 'Seçtiğin mevkiden 6 oyuncu: kadrondaki eksiği kapat.' },
 };
+
+/** Paket sırası (market ekranında). */
+export const PACK_ORDER = ['gunluk', 'bronz', 'mevki', 'gumus', 'genc', 'altin', 'vsport'];
+
+/** Elit şans sayacı: ücretli paketlerde elit (85+) kart çıkmadan geçen her paket +1; sayaç dolunca sıradaki ücretli
+ * pakette bir elit kart garantili (elit çıkınca sayaç sıfırlanır). */
+export const PITY = { every: 10 };
 
 /** Hızlı satış: kadroda olmayan kart krediye çevrilir. */
 export const SELL_PRICE = { bronze: 100, silver: 250, gold: 600, elite: 1500 };
