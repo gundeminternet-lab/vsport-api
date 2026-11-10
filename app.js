@@ -144,6 +144,24 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
           clubUpgrade: (d) => game.club.upgrade(d),
           clubCollect: (d) => game.club.collect(d),
           clubTrain: (d) => game.club.train(d),
+          // Menajer modu: teknik ekip, kariyer ligi, altyapı, taktik planı
+          clubStaff: (d) => game.club.hireStaff(d),
+          careerState: (d) => game.manager.state(d),
+          careerStart: (d) => game.manager.start(d),
+          youthState: (d) => game.manager.youthState(d),
+          youthScout: (d) => game.manager.youthScout(d),
+          youthPromote: (d) => game.manager.youthPromote(d),
+          youthRelease: (d) => game.manager.youthRelease(d),
+          squadPlan: (d) => game.manager.setPlan(d),
+          // Kulüp yönetimi: ilişkiler, mesajlar (SMS), bilet, kararlar, basın toplantısı, talepler
+          // Enerji: mağazadan oyun kredisiyle
+          energyBuy: (d) => game.energyBuy(d),
+          officeState: (d) => game.office.state(d),
+          officeRead: (d) => game.office.read(d),
+          officeTicket: (d) => game.office.setTicket(d),
+          officeAct: (d) => game.office.act(d),
+          officePress: (d) => game.office.press(d),
+          officeAsk: (d) => game.office.ask(d),
           creditLeaders: (d) => game.leaders(d),
         }
       : {}),
