@@ -155,6 +155,14 @@ export function simulateMatch(analysis, { seed, rng: external } = {}) {
   const half1 = rates(lam);
   const sh = analysis.secondHalf;
   const half2 = sh && Number.isFinite(sh.lambdaHome) && Number.isFinite(sh.lambdaAway) ? rates({ home: sh.lambdaHome, away: sh.lambdaAway }) : half1;
+  // Maç içi kritik an (oyun): belirli dakikadan sonra farklı λ (ör. 70'te "son 20 dakika" kararı). Önceki dakikaların
+  // çekilişleri aynı kaldığından o ana kadarki maç birebir aynıdır.
+  const ph3 = analysis.phase3;
+  const phase3 = ph3 && Number.isFinite(ph3.fromMinute) && Number.isFinite(ph3.lambdaHome) && Number.isFinite(ph3.lambdaAway) ? { from: ph3.fromMinute, rates: rates({ home: ph3.lambdaHome, away: ph3.lambdaAway }) } : null;
+  // İkinci yarı penaltıları (oyun): sonucu ve yönü dışarıdan verilebilir (oyuncunun seçimi). Çekilişler yine yapılır.
+  const penOut = analysis.penaltyOutcome ?? null;
+  const penDir = analysis.penaltyDir ?? null;
+  let pen2 = 0;
   const { slots, total, firstHalfClock } = buildClock(rng);
   const tempo = normalise(slots.map(tempoOf));
   const cardTempo = normalise(slots.map(cardTempoOf));
@@ -195,7 +203,7 @@ export function simulateMatch(analysis, { seed, rng: external } = {}) {
 
   for (let i = 0; i < total; i++) {
     const slot = slots[i];
-    const { penRate, shotsPerMatch, scale, pBase } = slot.half === 2 ? half2 : half1;
+    const { penRate, shotsPerMatch, scale, pBase } = phase3 && slot.half === 2 && slot.minute >= phase3.from ? phase3.rates : slot.half === 2 ? half2 : half1;
     const cands = [];
     const slotShots = { home: 0, away: 0 };
 
@@ -255,13 +263,18 @@ export function simulateMatch(analysis, { seed, rng: external } = {}) {
       } else if (c.kind === 'penalty') {
         stats[side].shots++;
         stats[side].xg += SIM.penaltyConversion;
-        emit('penalty_awarded', side, slot, c.sec, 3, `Penaltı! ${team}`);
-        if (rng.chance(SIM.penaltyConversion)) {
+        const pn = slot.half === 2 ? pen2++ : null;
+        const ov = pn != null ? penOut?.[pn] : undefined;
+        const dir = pn != null ? penDir?.[pn] : undefined;
+        emit('penalty_awarded', side, slot, c.sec, 3, `Penaltı! ${team}`, pn != null ? { n: pn, ...(dir ? { dir } : {}) } : {});
+        const conv = rng.chance(SIM.penaltyConversion);
+        if (ov ? ov === 'goal' : conv) {
           stats[side].onTarget++;
           score[side]++;
           emit('goal', side, slot, c.sec + 0.4, 3, `GOL! ${team} penaltıdan buldu — ${scoreLine()}`, { kind: 'penalty', xg: SIM.penaltyConversion });
         } else {
-          const saved = rng.chance(0.6);
+          const savedDraw = rng.chance(0.6);
+          const saved = ov ? ov === 'saved' : savedDraw;
           if (saved) stats[side].onTarget++;
           emit('penalty_missed', side, slot, c.sec + 0.4, 3, saved ? `Penaltı kurtarıldı! ${team}` : `Penaltı kaçtı! ${team}`, { saved });
         }

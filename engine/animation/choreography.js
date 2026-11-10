@@ -158,7 +158,9 @@ function collectPlays(timeline, clockToReal) {
 // ---------------------------------------------------------------------------
 // Ana fonksiyon
 // ---------------------------------------------------------------------------
-export function buildChoreography(timeline, { durationSeconds = SIM.durationSeconds, halftimeSeconds = SIM.halftimeSeconds, seed } = {}) {
+// pauses: oyunun durduğu anlar (maç saati; oyun: teknik direktörün kararı). Top taça çıkar, oyun bekler, taçla başlar.
+// O ana kadarki animasyon sonrasındaki olaylardan bağımsızdır (kesin eşleşme noktası). syncAnchors: penaltıda saat çapası.
+export function buildChoreography(timeline, { durationSeconds = SIM.durationSeconds, halftimeSeconds = SIM.halftimeSeconds, seed, pauses = [], syncAnchors = false } = {}) {
   const D = durationSeconds;
   const rng = createRng(seed ?? `anim-${timeline.seed}`);
   const clockMap = makeClockMap(timeline, D, halftimeSeconds);
@@ -175,8 +177,10 @@ export function buildChoreography(timeline, { durationSeconds = SIM.durationSeco
   const anchors = [{ t: 0, clock: 0 }];
   let firstHalfOut = firstHalfSec;
 
-  const possHome = (t) => ms[clamp(Math.floor(realToClock(t)), 0, ms.length - 1)].possession.home / 100;
-  const pressureAt = (t) => ms[clamp(Math.floor(realToClock(t)), 0, ms.length - 1)].pressure;
+  // Kritik an modunda boşluk doldurma biten dakikanın verisini kullanır (o dakikanın ilerisindeki olaylardan bağımsız)
+  const lag = syncAnchors ? 1 : 0;
+  const possHome = (t) => ms[clamp(Math.floor(realToClock(t)) - lag, 0, ms.length - 1)].possession.home / 100;
+  const pressureAt = (t) => ms[clamp(Math.floor(realToClock(t)) - lag, 0, ms.length - 1)].pressure;
 
   const pushFeed = (e, t, extra = {}) =>
     feed.push({ t, type: e.type, side: e.side, label: e.label, text: e.text, importance: e.importance, score: e.score, ...extra });
@@ -381,19 +385,33 @@ export function buildChoreography(timeline, { durationSeconds = SIM.durationSeco
   const doPenalty = (p, nextT) => {
     const side = p.side;
     const spot = { x: worldX(side, 1 - 0.105), y: 0.5 };
-    const target = shotTarget(p.outcome, side, spot);
+    // Kritik an modunda atış hedefi penaltı verildikten SONRA çekilir: öncesindeki oyun sonuçtan bağımsız kalır
+    let target = syncAnchors ? null : shotTarget(p.outcome, side, spot);
     const flight = 0.22;
     const setup = 0.8;
     const tAward = Math.max(p.t, track.t + 0.1);
     ambient(tAward);
+    if (!target) target = shotTarget(p.outcome, side, spot);
+    // Oyuncunun seçtiği yön (oyun: maç içi kritik an). Atanın bakışına göre sol/orta/sağ; çekilişler yine yapıldı.
+    const dir = p.e?.dir;
+    if (dir === 'sol' || dir === 'orta' || dir === 'sag') {
+      const left = side === 'home' ? GOAL_MOUTH.y0 + 0.015 : GOAL_MOUTH.y1 - 0.015;
+      const right = side === 'home' ? GOAL_MOUTH.y1 - 0.015 : GOAL_MOUTH.y0 + 0.015;
+      const yy = dir === 'sol' ? left : dir === 'sag' ? right : 0.5;
+      if (p.outcome === 'off_target') target.y = dir === 'orta' ? target.y : yy + (yy < 0.5 ? -0.05 : 0.05);
+      else target.y = yy;
+    }
+    if (syncAnchors) anchors.push({ t: tAward, clock: p.e.clock });
     track.place(spot.x, spot.y, side);
     const tStart = track.t;
     track.hold('penalty_wait', setup, side);
     const tShot = track.t;
+    // Atış anına kadar saat penaltının dakikasında kalır (kritik an: seçimden bağımsız)
+    if (syncAnchors) anchors.push({ t: tShot, clock: p.e.clock + 0.02 });
     track.seg('shot', target.x, target.y, flight, { arc: target.arc, ease: 'shot', owner: side });
     const tC = track.t;
     const k = tailScale(tC, Math.min(nextT, D - 0.25), p.outcome === 'goal' ? 1.25 : 0.7);
-    const moment = { kind: 'penalty', outcome: p.outcome, side, tStart, tShot, tC, shotPos: spot, target, celebEnd: tC };
+    const moment = { kind: 'penalty', outcome: p.outcome, side, tStart, tShot, tC, shotPos: spot, target, celebEnd: tC, n: p.e?.n ?? null };
     afterShot(p, target, k, moment);
     moment.tEnd = track.t;
     moments.push(moment);
@@ -407,6 +425,25 @@ export function buildChoreography(timeline, { durationSeconds = SIM.durationSeco
       scoreChanges.push({ t: tC, score: src.score });
       anchors.push({ t: tC, clock: src.clock });
     }
+  };
+
+  // ---- Oyun durur (teknik direktör kararı): top taça çıkar, bekler, taçla başlar ---------------
+  const doPause = (p) => {
+    if (track.t < p.t) ambient(p.t);
+    const tStart = track.t;
+    const top = track.y < 0.5;
+    const ox = clamp(track.x, 0.1, 0.9);
+    const out = track.owner ?? 'home';
+    const thrower = other(out);
+    track.seg('out', ox, top ? 0 : 1, 0.3, { owner: out, arc: 0.15 });
+    const tC = track.t;
+    anchors.push({ t: tC, clock: p.clock });
+    track.hold('dead', 1.3, thrower);
+    const tResume = track.t;
+    anchors.push({ t: tResume, clock: p.clock + 0.3 });
+    track.seg('pass', clamp(ox + dirOf(thrower) * 0.07, 0.06, 0.94), top ? 0.2 : 0.8, 0.5, { owner: thrower, arc: 0.35 });
+    moments.push({ kind: 'pause', id: p.id, side: thrower, tStart, tC, tResume, tEnd: track.t });
+    fx.push({ type: 'pause', t: tC, dur: 1.3, side: thrower });
   };
 
   // ---- Korner -------------------------------------------------------------
@@ -470,7 +507,8 @@ export function buildChoreography(timeline, { durationSeconds = SIM.durationSeco
   // ---- Akış ---------------------------------------------------------------
   const plays = collectPlays(timeline, clockToReal);
   plays.push({ kind: 'break', t: firstHalfSec });
-  plays.sort((a, b) => a.t - b.t || (a.kind === 'break' ? -1 : 0));
+  for (const pz of pauses ?? []) if (Number.isFinite(pz?.clock)) plays.push({ kind: 'pause', t: clockToReal(pz.clock), clock: pz.clock, id: pz.id ?? 'pause' });
+  plays.sort((a, b) => a.t - b.t || (a.kind === 'break' ? -1 : 0) || (a.kind === 'pause' ? -1 : 0));
 
   track.place(0.5, 0.5, 'home');
   track.hold('kickoff', 0.45, 'home');
@@ -486,6 +524,7 @@ export function buildChoreography(timeline, { durationSeconds = SIM.durationSeco
     else if (p.kind === 'penalty') doPenalty(p, nextT);
     else if (p.kind === 'corner') doCorner(p, nextT);
     else if (p.kind === 'card') doCard(p, nextT);
+    else if (p.kind === 'pause') doPause(p);
   }
   void secondHalfStart;
 
@@ -499,7 +538,7 @@ export function buildChoreography(timeline, { durationSeconds = SIM.durationSeco
       s.t1 *= f;
       s.tp *= f;
     }
-    for (const m of moments) for (const k of ['tStart', 'tShot', 'tC', 'tEnd', 'celebEnd']) if (Number.isFinite(m[k])) m[k] *= f;
+    for (const m of moments) for (const k of ['tStart', 'tShot', 'tC', 'tEnd', 'celebEnd', 'tResume']) if (Number.isFinite(m[k])) m[k] *= f;
     for (const list of [fx, feed, scoreChanges, anchors]) for (const x of list) x.t *= f;
     track.t *= f;
     firstHalfOut *= f;
