@@ -145,12 +145,22 @@ export function compactCard(c) {
  * me / opp: { name, formation, power, lineup: { s0: kart, ... } }. tactics: { me1, opp1, me2?, opp2? } (2: ikinci yarı).
  * Döner: { timeline, choreo, players, feed (adlı), goals, reds, stats, ratings, motm, breakAt }.
  */
-export function playDuel({ me, opp, seed, tactics, durationSeconds = DUEL_SECONDS }) {
+/** Maç saatinde verilen dakikanın başladığı an (ikinci yarı; uzatmalar dahil sürekli saat). */
+export function pauseClockOf(timeline, minute) {
+  const ms = timeline.minuteStats ?? [];
+  const half = timeline.events.find((e) => e.type === 'halftime')?.clock ?? 45;
+  for (let i = Math.ceil(half); i < ms.length; i++) if ((parseInt(String(ms[i]?.label ?? ''), 10) || 0) >= minute) return i;
+  return null;
+}
+
+export function playDuel({ me, opp, seed, tactics, durationSeconds = DUEL_SECONDS, moments = null }) {
   // Taktik planı (varsa) iki yarıda da geçerli
   const mMe = me.plan ? planMods(me.plan) : null;
   const mOpp = opp.plan ? planMods(opp.plan) : null;
-  const l1 = duelLambdas(me.power, opp.power, tactics.me1, tactics.opp1, mMe, mOpp);
-  const l2 = duelLambdas(me.power, opp.power, tactics.me2 ?? tactics.me1, tactics.opp2 ?? tactics.opp1, mMe, mOpp);
+  // Saha avantajı (ev sahibinin stadyumu ve seyircisi): gol beklentisi çarpanı
+  const adv = (l) => ({ home: clamp(l.home * (Number(me.adv) || 1), 0.2, 4.4), away: clamp(l.away * (Number(opp.adv) || 1), 0.2, 4.4) });
+  const l1 = adv(duelLambdas(me.power, opp.power, tactics.me1, tactics.opp1, mMe, mOpp));
+  const l2 = adv(duelLambdas(me.power, opp.power, tactics.me2 ?? tactics.me1, tactics.opp2 ?? tactics.opp1, mMe, mOpp));
   const analysis = {
     home: { id: 'me', name: me.name },
     away: { id: 'opp', name: opp.name },
@@ -158,8 +168,17 @@ export function playDuel({ me, opp, seed, tactics, durationSeconds = DUEL_SECOND
     lambdaAway: l1.away,
     secondHalf: { lambdaHome: l2.home, lambdaAway: l2.away },
   };
+  // Maç içi kritik anlar: "son dakikalar" kararı (o dakikadan sonra yeni taktik) ve ikinci yarı penaltı seçimleri
+  if (moments?.phase3) {
+    const l3 = adv(duelLambdas(me.power, opp.power, moments.phase3.me ?? tactics.me2 ?? tactics.me1, moments.phase3.opp ?? tactics.opp2 ?? tactics.opp1, mMe, mOpp));
+    analysis.phase3 = { fromMinute: moments.phase3.fromMinute, lambdaHome: l3.home, lambdaAway: l3.away };
+  }
+  if (moments?.penaltyOutcome) analysis.penaltyOutcome = moments.penaltyOutcome;
+  if (moments?.penaltyDir) analysis.penaltyDir = moments.penaltyDir;
   const timeline = simulateMatch(analysis, { seed });
-  const choreo = buildChoreography(timeline, { durationSeconds, halftimeSeconds: DUEL_HALFTIME, seed: `${seed}|anim` });
+  // Kritik an modu: 70. dakikada oyun durur (teknik direktör kararı); o ana kadarki animasyon seçimden bağımsızdır
+  const pauses = moments?.pauseMinute ? [{ id: 'late', clock: pauseClockOf(timeline, moments.pauseMinute) }].filter((x) => Number.isFinite(x.clock)) : [];
+  const choreo = buildChoreography(timeline, { durationSeconds, halftimeSeconds: DUEL_HALFTIME, seed: `${seed}|anim`, pauses, syncAnchors: !!moments });
   const forms = { home: animFormation(me.formation), away: animFormation(opp.formation) };
   const players = buildPlayers(choreo, { homeFormation: forms.home, awayFormation: forms.away });
 
@@ -344,9 +363,11 @@ const showInTicker = (f) => !f.skipped || /card|penalty|var|goal/.test(f.type);
  * firstHalf: true → paket devre arasında biter (devre arası düdüğünden hemen sonra); ikinci yarı taktiği seçilince
  * bütün maçın paketi gönderilir ve uygulama ikinci yarıyı resumeAt'ten oynatır.
  */
-export function packOf(match, { firstHalf = false } = {}) {
+export function packOf(match, { firstHalf = false, cutAt = null, resumeAt = undefined } = {}) {
   const { players, choreo, timeline, durationSeconds } = match;
-  const cut = firstHalf && match.breakAt ? Math.min(durationSeconds, match.breakAt.start + 0.35) : durationSeconds;
+  // cutAt: maç içi kritik anda paket o saniyede biter (uygulama orada durup oyuncuya sorar)
+  const cut = Number.isFinite(cutAt) ? Math.min(durationSeconds, Math.max(0, cutAt)) : firstHalf && match.breakAt ? Math.min(durationSeconds, match.breakAt.start + 0.35) : durationSeconds;
+  const partial = firstHalf || (Number.isFinite(cutAt) && cutAt < durationSeconds);
   const D = r2(cut);
   const frames = Math.round(D * DUEL_FPS) + 1;
   const buf = Buffer.alloc(frames * VALUES_PER_FRAME * 2);
@@ -401,10 +422,10 @@ export function packOf(match, { firstHalf = false } = {}) {
       .filter((f) => showInTicker(f) && inCut(f.t))
       .map((f) => ({ t: r2(f.t), type: f.type, side: f.side ?? null, label: f.label ?? '', text: f.text ?? '', player: f.player ?? null })),
     stats,
-    finalScore: firstHalf ? { ...timeline.halftimeScore } : { ...timeline.score },
+    finalScore: firstHalf ? { ...timeline.halftimeScore } : partial ? { ...choreo.scoreAt(D) } : { ...timeline.score },
     halftimeScore: { ...timeline.halftimeScore },
-    partial: firstHalf,
+    partial,
     breakAt: match.breakAt,
-    resumeAt: !firstHalf && match.breakAt ? match.breakAt.end : null,
+    resumeAt: resumeAt !== undefined ? resumeAt : !firstHalf && match.breakAt ? match.breakAt.end : null,
   };
 }

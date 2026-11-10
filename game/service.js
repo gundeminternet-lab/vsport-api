@@ -36,6 +36,14 @@ import { ManagerService, SEASON, checkPlan } from './manager.js';
 import { OfficeService } from './office.js';
 import { potentialOf } from './staff.js';
 import { ENERGY, addEnergy, energyNow, energyPrice, energyView, matchesLeft, spendEnergy } from './energy.js';
+import { DIRS, LATE, LATE_MINUTE, momentInputs, momentView, nextMoment, resolvePenalty, syncTime } from './moments.js';
+import { awayStadium, homeAdvantage, homeFor, homeStadium } from './venue.js';
+import { FOG, maskedGenetics, revealOne } from './fog.js';
+import { duoPower, findDuos } from './duos.js';
+import { liveCard } from './form.js';
+import { ROAD, WIN_STREAK, packCost, streakPct } from './road.js';
+import { ProgressionService } from './progression.js';
+import { START_DIV } from './divisions.js';
 
 const DAY = 86400e3;
 
@@ -43,7 +51,7 @@ const DAY = 86400e3;
 const PENDING_TTL = 30 * 60e3;
 
 /** Maç türleri: haftalık lig maçı, Günün Meydan Okuması, kariyer ligi. */
-const MODES = ['normal', 'boss', 'season'];
+const MODES = ['normal', 'boss', 'season', 'friend'];
 
 /** Günün Meydan Okuması dizilişleri (güne göre). */
 const BOSS_FORMATIONS = ['4-3-3', '4-2-3-1', '4-4-2', '3-5-2', '4-1-4-1', '3-4-3', '5-3-2'];
@@ -112,7 +120,19 @@ export class GameService {
     this.manager = new ManagerService({ game: this });
     // Kulüp yönetimi: ilişkiler, maç günü gelirleri, olaylar, mesajlar, basın toplantısı (office.js)
     this.office = new OfficeService({ game: this });
+    // İlerleme: Sezon Yolu, takvim, özel haftalar, lig kümeleri, albüm, takas, tahmin ödülü (progression.js)
+    this.progress = new ProgressionService({ game: this });
     this._quiz = new Map(); // oturum → { uid, day, questions, index, askedAt, score, pro }
+  }
+
+  /** Bu haftanın özel teması (road.js THEMES). */
+  theme() {
+    return this.progress.theme();
+  }
+
+  /** Kartların canlı hali: gerçek maçlardaki formuyla güç (form.js). */
+  _live(cards) {
+    return cards.map((c) => liveCard(c, this.pool));
   }
 
   _member(uid, guest) {
@@ -197,6 +217,9 @@ export class GameService {
     if (p.club) await this.club.settle(uid, p).catch((e) => this.log.warn?.('[game] inşaat işlenemedi', e?.message ?? e));
     const week = this._week(this.now());
     const board = await this.store.duelBoardEntry(week, uid).catch(() => null);
+    // Kapışma Ligi kümesi (yeni haftada geçen hafta sonuçlanır)
+    const league = p.club ? await this.progress.league(uid, p).catch((e) => (this.log.warn?.('[game] küme işlenemedi', e?.message ?? e), null)) : null;
+    const theme = this.progress.theme();
     const yesterday = trDay(this.now() - DAY);
     const streakAlive = p.streak?.lastDay === day || p.streak?.lastDay === yesterday;
     const allClaimed = MISSIONS.every((m) => daily?.claimed?.[m.id] === true);
@@ -225,7 +248,9 @@ export class GameService {
       packs: PACK_ORDER.map((id) => PACKS[id]).map((k) => ({
         id: k.id,
         name: k.name,
-        cost: k.cost,
+        cost: packCost(k, theme),
+        base: k.cost,
+        tokens: Number(p.packTokens?.[k.id] ?? 0),
         count: k.count,
         desc: k.desc,
         daily: k.daily === true,
@@ -238,6 +263,16 @@ export class GameService {
       })),
       // Elit şans sayacı: dolunca sıradaki ücretli pakette elit (85+) garantili
       pity: { value: Number(p.packPity ?? 0), every: PITY.every },
+      // İlerleme: Sezon Yolu, menajer takvimi, özel hafta, lig kümesi, galibiyet serisi, takas görevleri
+      road: this.progress.roadView(p, pro),
+      calendar: this.progress.calendarView(p),
+      theme: this.progress.themeView(),
+      league,
+      winStreak: { count: Number(p.winStreak?.n ?? 0), best: Number(p.winStreak?.best ?? 0), pct: streakPct(Number(p.winStreak?.n ?? 0) + 1), gifts: WIN_STREAK.gifts },
+      tokens: p.packTokens ?? {},
+      exchanges: this.progress.exchangesView(p),
+      duos: (p.duos ?? []).slice(0, 20),
+      challenges: (p.challenges ?? []).slice(0, 10),
       formations: FORMATIONS,
       maxSquads: MAX_SQUADS,
       club: this.club.view(p.club ?? null, { trainingToday: Number(daily?.training ?? 0), wins: Number(p.duelTotals?.w ?? 0) }),
@@ -522,7 +557,7 @@ export class GameService {
     return out.sort((a, b) => a.r - b.r);
   }
 
-  async openPack({ uid, guest = false, pack, group = null }) {
+  async openPack({ uid, guest = false, pack, group = null, token = false }) {
     this._member(uid, guest);
     const def = PACKS[pack];
     if (!def) throw new AppError('invalid-argument', 'Geçersiz paket.');
@@ -538,13 +573,20 @@ export class GameService {
     const pityNow = Number(p.packPity ?? 0);
     const pity = def.cost > 0 && pityNow >= PITY.every;
     const cards = this._drawPack(def, this.random(`pack:${pack}`), { group: def.group ? group : null, pity });
-    const { balance, ids } = await this.store.purchase(uid, def.cost, cards);
+    // Paket jetonu (Sezon Yolu, takvim, takas ödülü) kredisiz açar; özel haftada indirimli fiyat
+    const haveToken = Number(p.packTokens?.[def.id] ?? 0);
+    if (token && haveToken < 1) throw new AppError('failed-precondition', 'Bu paket için jetonun yok.');
+    const useToken = token && haveToken >= 1;
+    const cost = def.daily || useToken ? 0 : packCost(def, this.theme());
+    const { balance, ids } = await this.store.purchase(uid, cost, cards);
+    if (useToken) await this.store.updateProfile(uid, { packTokens: { ...(p.packTokens ?? {}), [def.id]: haveToken - 1 } });
     await this.store.updateDaily(uid, day, def.daily ? { freePack: true } : {});
     await this.store.incrementDaily(uid, day, 'packs', 1);
     const elite = cards.some((c) => c.r >= 85);
     const packPity = def.cost > 0 ? (elite ? 0 : pityNow + 1) : pityNow;
     if (packPity !== pityNow) await this.store.updateProfile(uid, { packPity });
-    return { pack: def.id, balance, cards: cards.map((c, i) => ({ id: ids[i], ...c })), pity: { value: packPity, every: PITY.every, used: pity } };
+    const xp = await this.progress.xp(uid, ROAD.xp.pack).catch(() => null);
+    return { pack: def.id, balance, cost, token: useToken, cards: cards.map((c, i) => ({ id: ids[i], ...c })), pity: { value: packPity, every: PITY.every, used: pity }, xp };
   }
 
   /** Hoşgeldin paketi: seçilen bölgenin liginde oynayanlar ve milli takımından 18 oyuncu (2 KL, 6 DEF, 6 OS, 4 FV). */
@@ -592,6 +634,9 @@ export class GameService {
       if (inSquad.has(id)) throw new AppError('failed-precondition', `${c.s ?? c.n} bir kadroda; önce kadrodan çıkar.`);
       total += SELL_PRICE[c.tier ?? tierOf(c.r)] ?? 100;
     }
+    // Özel hafta (Transfer Dönemi): hızlı satış artar
+    const sellPct = Number(this.theme()?.sellPct ?? 0);
+    if (sellPct) total = Math.round((total * (100 + sellPct)) / 100);
     await this.store.deleteCards(uid, ids);
     // Satıştan gelen kredi liderlik tablosuna yazılmaz (oyunla kazanılmadı)
     const balance = await this.store.changeCredits(uid, total, { earn: false });
@@ -628,7 +673,10 @@ export class GameService {
       rating: best.v.ev.rating,
       chemistry: best.v.ev.chemistry,
       power: Math.round(best.power * 10) / 10,
-      lineup: Object.fromEntries(Object.entries(best.v.lineup).map(([k, c]) => [k, { g: c.g, r: c.r, s: c.s, ci: c.ci, na: c.na, l: c.l }])),
+      lineup: Object.fromEntries(Object.entries(best.v.lineup).map(([k, c]) => [k, { g: c.g, r: c.r, s: c.s, ci: c.ci, na: c.na, l: c.l, pid: c.pid ?? null }])),
+      // Deplasmanda rakip bu kulübün stadyumuna gelir
+      stadium: p.club ? { level: Number(p.club.levels?.stadium ?? 1), capacity: effectsOf(p.club.levels).stadium.capacity, name: `${p.club.name} Stadyumu`, short: p.club.short ?? null } : null,
+      div: Number(p.league?.div ?? START_DIV),
     });
   }
 
@@ -688,7 +736,7 @@ export class GameService {
       const o = list[rng.int(0, list.length - 1)];
       const lineup = fillLineup({ formation: o.formation, lineup: o.lineup, target: Math.round(power), pool: this.pool, rng });
       const crest = o.crest ?? null;
-      return { name: o.name, username: o.username ?? null, formation: o.formation, lineup, bot: false, crest, kits: o.kits?.home ? o.kits : crest ? defaultKits(crest) : null, fans: o.fans ?? null };
+      return { name: o.name, username: o.username ?? null, formation: o.formation, lineup, bot: false, crest, kits: o.kits?.home ? o.kits : crest ? defaultKits(crest) : null, fans: o.fans ?? null, stadium: o.stadium ?? null };
     }
     const target = Math.round(power - 1);
     const cands = this.pool.pick((p) => Math.abs(p.r - target) <= 5, rng, 40);
@@ -798,7 +846,8 @@ export class GameService {
       }
     }
     const opp = await this._opponent(uid, power, this.random('duel'));
-    const compact = { ...opp, lineup: Object.fromEntries(Object.entries(opp.lineup).filter(([, c]) => c).map(([k, c]) => [k, compactCard(c)])) };
+    // İç saha / deplasman rakip belirlenirken bir kez seçilir (maç öncesi ekranı ile maç aynı stadyumda)
+    const compact = { ...opp, home: homeFor(`${uid}:${this.now()}:${opp.name}`), lineup: Object.fromEntries(Object.entries(opp.lineup).filter(([, c]) => c).map(([k, c]) => [k, compactCard(c)])) };
     await this.store.updateProfile(uid, { nextDuel: { day, at: this.now(), opp: JSON.stringify(compact) } });
     p.nextDuel = { day, opp: JSON.stringify(compact) };
     return compact;
@@ -808,22 +857,24 @@ export class GameService {
    * Sıradaki maç (maç öncesi ekranı): rakip, stadyum ve ödüller. Normal maçta rakip önceden belirlenir ve maç
    * başlayınca aynı rakiple oynanır; Günün Meydan Okuması güne bağlıdır.
    */
-  async duelNext({ uid, guest = false, mode = 'normal' }) {
+  async duelNext({ uid, guest = false, mode = 'normal', friend = null }) {
     this._member(uid, guest);
     if (!MODES.includes(mode)) throw new AppError('invalid-argument', 'Geçersiz maç türü.');
     const day = trDay(this.now());
     const p = await this._profile(uid);
     this._needClub(p);
     const [cards, squads, daily] = await Promise.all([this.store.listCards(uid), this.store.listSquads(uid), this.store.getDaily(uid, day)]);
-    const best = this._bestSquad(squads, cards);
-    if (!best) throw new AppError('failed-precondition', 'Maça çıkmak için önce 11 kişilik bir kadro kur.');
     await this.pool.ensure?.();
-    const opp = await this._modeOpponent(uid, p, day, best.power, mode);
+    const best = this._bestSquad(squads, this._live(cards));
+    if (!best) throw new AppError('failed-precondition', 'Maça çıkmak için önce 11 kişilik bir kadro kur.');
+    const opp = await this._modeOpponent(uid, p, day, best.power, mode, friend);
     const oe = evaluate(opp.formation, opp.lineup);
     const eff = effectsOf(p.club?.levels);
+    const ven = this._venue(p, opp, mode, teamPower(oe), `next:${uid}:${day}:${opp.name}`);
     const R = mode === 'boss' ? BOSS : mode === 'season' ? SEASON : DUEL;
     return {
       mode,
+      friend: mode === 'friend' ? opp.username ?? friend : null,
       opponent: {
         name: opp.name,
         username: opp.username ?? null,
@@ -839,11 +890,16 @@ export class GameService {
         kits: opp.kits ?? null,
         fans: opp.fans ?? null,
       },
-      venue: { name: `${p.club.name} Stadyumu`, capacity: eff.stadium.capacity, incomePct: eff.stadium.incomePct },
+      venue: { name: ven.stadium.name, capacity: ven.stadium.capacity, incomePct: ven.home ? eff.stadium.incomePct : 0 },
+      // Ev sahibi kim, stadyum (maç ekranı bu stadyumda oynanır) ve saha avantajı
+      home: ven.home,
+      stadium: ven.stadium,
+      advantage: ven.home ? ven.adv.me : ven.adv.opp,
+      theme: this.progress.themeView(),
       rewards: [R.win, R.draw, R.loss],
       left: this._left(mode, daily, p),
       energy: energyView(p.energy, this.now(), daily?.energyBuys ?? 0),
-      energyCost: ENERGY.cost[mode] ?? 0,
+      energyCost: mode === 'friend' ? ENERGY.cost.normal : (ENERGY.cost[mode] ?? 0),
       // Kariyer maçı: hafta ve ev sahibi/deplasman
       fixture: opp.fixture ? { week: opp.fixture.week, weeks: SEASON.weeks, home: opp.fixture.meHome, league: opp.league } : null,
       // Kariyer maçında oynayamayacaklar (sakat, cezalı, kadro dışı)
@@ -858,10 +914,37 @@ export class GameService {
   }
 
   /** Maç türünün rakibi: normal (sıradaki rakip), boss (günün yıldızları), season (kariyer ligi fikstürü). */
-  async _modeOpponent(uid, p, day, power, mode) {
+  async _modeOpponent(uid, p, day, power, mode, friend = null) {
     if (mode === 'boss') return this._boss(day, power);
     if (mode === 'season') return this.manager.opponentFor(uid, p);
+    if (mode === 'friend') return this._friendOpponent(uid, friend, power);
     return this._nextOpponent(uid, p, day, power);
+  }
+
+  /** Arkadaşa meydan okuma: arkadaşın en güçlü kadrosu (kendi stadyumunda). */
+  async _friendOpponent(uid, friend, power) {
+    const fid = await this.store.uidByUsername(friend);
+    if (!fid) throw new AppError('not-found', 'Bu kullanıcı adıyla bir oyuncu bulunamadı.');
+    if (fid === uid) throw new AppError('invalid-argument', 'Kendine meydan okuyamazsın.');
+    const o = await this.store.getDuelPoolEntry(fid);
+    if (!o?.lineup) throw new AppError('failed-precondition', 'Arkadaşının hazır bir kadrosu yok.');
+    const rng = createRng(`friend:${fid}:${trDay(this.now())}`);
+    const lineup = fillLineup({ formation: o.formation, lineup: o.lineup, target: Math.round(o.power ?? power), pool: this.pool, rng });
+    const crest = o.crest ?? null;
+    return { name: o.name, username: o.username ?? null, uid: fid, formation: o.formation, lineup, bot: false, crest, kits: o.kits?.home ? o.kits : crest ? defaultKits(crest) : null, fans: o.fans ?? null, stadium: o.stadium ?? null, home: false };
+  }
+
+  /** Maçın stadyumu: ev sahibinin stadyumu ve saha avantajı. */
+  _venue(p, opp, mode, power, seed) {
+    let home = true;
+    if (mode === 'season') home = opp.fixture?.meHome !== false;
+    else if (mode === 'boss' || mode === 'friend') home = false;
+    else if (opp.home === false) home = false;
+    const stadium = home
+      ? homeStadium(p, this.office.homeCrowd(p))
+      : awayStadium(mode === 'boss' ? { ...opp, stadium: { level: 10, name: 'Yıldızlar Arenası' } } : opp, power, seed);
+    const adv = homeAdvantage(stadium.level, stadium.fill);
+    return { home, stadium, adv: { me: home ? adv : 1, opp: home ? 1 : adv } };
   }
 
   /** Kurgusal takım (kariyer ligi rakibi): adı, arması ve gücü verilen, aynı tohumla hep aynı 11. */
@@ -894,7 +977,7 @@ export class GameService {
    * Kapışmayı başlatır: rakip bulunur, ilk yarı oynanır. Döner: ilk yarının paketi (devre arasında biter), iki takım ve
    * rakibin ikinci yarı planı. Hak maç başlarken düşer. Yarım kalmış kapışma varsa önce o biter (ödülü verilir).
    */
-  async duelStart({ uid, guest = false, squadId, tactic = 'dengeli', mode = 'normal', kit = null }) {
+  async duelStart({ uid, guest = false, squadId, tactic = 'dengeli', mode = 'normal', kit = null, friend = null }) {
     this._member(uid, guest);
     if (!TACTICS[tactic]) throw new AppError('invalid-argument', 'Geçersiz taktik.');
     if (!MODES.includes(mode)) throw new AppError('invalid-argument', 'Geçersiz maç türü.');
@@ -909,23 +992,28 @@ export class GameService {
     const [daily, cards, squads] = await Promise.all([this.store.getDaily(uid, day), this.store.listCards(uid), this.store.listSquads(uid)]);
     if (mode === 'boss' && daily?.boss === true) throw new AppError('resource-exhausted', 'Günün Meydan Okuması bugün oynandı; yarın yeni rakip seni bekliyor.');
     // Günlük maç sınırı yok: normal ve kariyer maçı enerji harcar (önce yetip yetmediğine bakılır)
-    const energyCost = ENERGY.cost[mode] ?? 0;
+    const energyCost = mode === 'friend' ? ENERGY.cost.normal : (ENERGY.cost[mode] ?? 0);
     if (energyCost) spendEnergy(p.energy, energyCost, this.now());
     const squad = squads.find((x) => x.id === squadId);
     if (!squad) throw new AppError('not-found', 'Kadro bulunamadı.');
-    const v = validateSquad(squad, new Map(cards.map((c) => [c.id, c])));
+    await this.pool.ensure?.();
+    // Canlı kartlar: gerçek maçlardaki formuyla güçlenmiş kartlar sahaya çıkar
+    const v = validateSquad(squad, new Map(this._live(cards).map((c) => [c.id, c])));
     if (!v.ok) throw new AppError('failed-precondition', v.error);
     // Kariyer maçında sakat, cezalı ve kadro dışı oyuncular oynayamaz
     if (mode === 'season') {
       const out = this.office.unavailableIn(p, squad.slots);
       if (out.length) throw new AppError('failed-precondition', `Kariyer maçında oynayamazlar: ${out.map((a) => `${a.name} (${a.label.toLocaleLowerCase('tr')}${a.type === 'dropped' ? '' : `, ${a.left} maç`})`).join(', ')}. Kadroyu düzenle.`);
     }
-    await this.pool.ensure?.();
     const rng = this.random('duel');
-    const power = teamPower(v.ev);
+    // Gizli ikililer: uyumlu çiftler takımın gücünü artırır (maçtan sonra keşfedilir)
+    const duos = findDuos(v.lineup);
+    const power = teamPower(v.ev) + duoPower(duos);
     // Normal maçta sıradaki maçın rakibi (maç öncesi ekranında gösterilen), kariyerde fikstürdeki rakip sahaya çıkar
-    const opp = await this._modeOpponent(uid, p, day, power, mode);
+    const opp = await this._modeOpponent(uid, p, day, power, mode, friend);
     const oe = evaluate(opp.formation, opp.lineup);
+    // Stadyum: ev sahibinin stadyumu (maç ekranında görünür) ve saha avantajı
+    const ven = this._venue(p, opp, mode, teamPower(oe), `next:${uid}:${day}:${opp.name}`);
     const kitOk = (k) => (Number.isInteger(k) && k >= 0 && k < 32 ? k : null);
     const me = {
       // Takım sahada kulübün adıyla çıkar; taraftar grubu ve arma maç ekranında görünür
@@ -944,6 +1032,7 @@ export class GameService {
       kit: kitOk(kit),
       // Kadronun taktik planı (pres, savunma çizgisi, genişlik, tempo)
       plan: squad.plan ? checkPlan(squad.plan) : null,
+      adv: ven.adv.me,
       lineup: Object.fromEntries(Object.entries(v.lineup).map(([k, c]) => [k, compactCard(c)])),
       // Yuva → kart kimliği (kariyer maçında sakatlık ve kırmızı kart cezası için)
       ids: Object.fromEntries(Object.entries(v.lineup).map(([k, c]) => [k, c?.id ?? null])),
@@ -964,6 +1053,7 @@ export class GameService {
       crest: opp.crest ?? null,
       kits: opp.kits ?? null,
       fans: opp.fans ?? null,
+      adv: ven.adv.opp,
       lineup: Object.fromEntries(Object.entries(opp.lineup).filter(([, c]) => c).map(([k, c]) => [k, compactCard(c)])),
     };
     const seed = `duel-${this.now()}-${rng.int(0, 1e9)}`;
@@ -981,8 +1071,12 @@ export class GameService {
       opp: { ...them, tactic: oppT1, tacticHT: oppT2 },
       // Kariyer maçı: hafta, iç saha/deplasman ve lig
       fixture: opp.fixture ? { week: opp.fixture.week, home: opp.fixture.meHome === true, div: Number(p.career?.season?.div ?? 0) } : null,
+      home: ven.home,
+      stadium: ven.stadium,
+      duos,
+      friend: mode === 'friend' ? { uid: opp.uid, username: opp.username ?? null } : null,
     };
-    if (mode === 'normal') await this.store.incrementDaily(uid, day, 'duels', 1);
+    if (mode === 'normal' || mode === 'friend') await this.store.incrementDaily(uid, day, 'duels', 1);
     else if (mode === 'season') await this.store.incrementDaily(uid, day, 'season', 1);
     else await this.store.updateDaily(uid, day, { boss: true });
     // Enerji düşer (normal ve kariyer maçı)
@@ -995,7 +1089,9 @@ export class GameService {
       duelId: pending.id,
       mode,
       seconds: DUEL_SECONDS,
-      venue: p.club ? `${p.club.name} Stadyumu` : null,
+      venue: ven.stadium.name,
+      home: ven.home,
+      stadium: ven.stadium,
       pack: packOf(first, { firstHalf: true }),
       me: this._teamView(me, tactic),
       opponent: this._teamView(them, oppT1),
@@ -1011,39 +1107,148 @@ export class GameService {
   }
 
   /** Devre arasında seçilen taktikle ikinci yarıyı oynar; ödülü verir. tactic yoksa ilk yarının taktiği sürer. */
-  async duelFinish({ uid, guest = false, duelId, tactic = null }) {
+  /**
+   * Devre arasında seçilen taktikle ikinci yarıyı oynar; ödülü verir. tactic yoksa ilk yarının taktiği sürer.
+   * moments: true ise maç ikinci yarının kritik anında (penaltı, 70. dakika) durur; seçim duelMoment ile yapılır.
+   */
+  async duelFinish({ uid, guest = false, duelId, tactic = null, moments = false }) {
     this._member(uid, guest);
     if (tactic != null && !TACTICS[tactic]) throw new AppError('invalid-argument', 'Geçersiz taktik.');
     const p = await this._profile(uid);
-    if (!p.pendingDuel || p.pendingDuel.id !== duelId) throw new AppError('not-found', 'Bu maç bitmiş ya da bulunamadı.');
+    const pd = p.pendingDuel;
+    if (!pd || pd.id !== duelId) throw new AppError('not-found', 'Bu maç bitmiş ya da bulunamadı.');
+    if (moments === true) {
+      // Daha önce durmuş maç: aynı anı yeniden gösterir (bağlantı koptuysa)
+      const mo = pd.moments ?? { tactic2: tactic && TACTICS[tactic] ? tactic : pd.me.tactic, choices: {}, pending: null, last: null };
+      const match = this._replay(pd, mo);
+      const m = nextMoment(match, { after: this._resumeAt(match, mo) ?? 0, state: mo });
+      if (m) {
+        const next = { ...mo, pending: m };
+        if (!pd.moments?.pending) await this.store.updateProfile(uid, { pendingDuel: { ...pd, moments: next } });
+        return this._pausedView(pd, match, next);
+      }
+      return this._finishDuel(uid, p, duelId, null, mo);
+    }
     return this._finishDuel(uid, p, duelId, tactic);
   }
 
-  async _finishDuel(uid, p, duelId, tactic) {
+  /** Kritik anda seçim: maç seçime göre sürer; sıradaki an varsa orada yeniden durur, yoksa biter. */
+  async duelMoment({ uid, guest = false, duelId, choice }) {
+    this._member(uid, guest);
+    const p = await this._profile(uid);
+    const pd = p.pendingDuel;
+    if (!pd || pd.id !== duelId) throw new AppError('not-found', 'Bu maç bitmiş ya da bulunamadı.');
+    const mo = pd.moments;
+    const m = mo?.pending;
+    if (!m) throw new AppError('failed-precondition', 'Şu an verilecek bir karar yok.');
+    let picked;
+    let penalty = null;
+    if (m.type === 'late') {
+      if (!LATE[choice]) throw new AppError('invalid-argument', 'Geçersiz seçim.');
+      picked = { id: choice, from: m.from ?? LATE_MINUTE };
+    } else {
+      if (!DIRS.includes(choice)) throw new AppError('invalid-argument', 'Geçersiz yön.');
+      penalty = resolvePenalty({ seed: pd.seed, n: m.n, type: m.type, choice });
+      picked = { ...penalty, choice };
+    }
+    const state = { ...mo, choices: { ...(mo.choices ?? {}), [m.id]: picked }, pending: null, last: m.id };
+    const match = this._replay(pd, state);
+    const nm = nextMoment(match, { after: this._resumeAt(match, state) ?? m.cut, state });
+    const answered = { id: m.id, type: m.type, choice, ...(penalty ? { outcome: penalty.outcome, dir: penalty.dir, keeper: penalty.keeper } : { plan: LATE[choice].name }) };
+    if (nm) {
+      const next = { ...state, pending: nm };
+      await this.store.updateProfile(uid, { pendingDuel: { ...pd, moments: next } });
+      return { ...this._pausedView(pd, match, next), answered };
+    }
+    const fin = await this._finishDuel(uid, p, duelId, null, state);
+    return { ...fin, answered };
+  }
+
+  /** Bekleyen maçı seçimlerle yeniden oynatır (aynı tohum). mo yoksa kritik an modu kapalı. */
+  _replay(pd, mo, me2 = mo?.tactic2 ?? pd.me.tactic) {
+    return playDuel({ me: pd.me, opp: pd.opp, seed: pd.seed, tactics: { me1: pd.me.tactic, opp1: pd.opp.tactic, me2, opp2: pd.opp.tacticHT }, moments: mo ? momentInputs(mo, pd.opp.tacticHT) : null });
+  }
+
+  /** Uygulamanın bu pakette oynatmaya başlayacağı saniye: son cevaplanan anın bu maçtaki yeri (yoksa devre arası sonu). */
+  _resumeAt(match, mo) {
+    return mo?.last ? syncTime(match, mo.last) : (match.breakAt?.end ?? null);
+  }
+
+  /** Kritik anda durmuş maç: o ana kadarki paket ve soru. */
+  _pausedView(pd, match, mo) {
+    const m = mo.pending;
+    const pack = packOf(match, { cutAt: m.cut, resumeAt: this._resumeAt(match, mo) });
+    return {
+      duelId: pd.id,
+      mode: pd.mode,
+      paused: true,
+      pack,
+      moment: momentView(m, [pack.finalScore.home, pack.finalScore.away]),
+      tactics: { me: [pd.me.tactic, mo.tactic2] },
+      // Yarım kalan maç sürdürülürken sahneyi kurmak için takımlar ve stadyum
+      me: this._teamView(pd.me, mo.tactic2),
+      opponent: this._teamView(pd.opp, pd.opp.tacticHT),
+      home: pd.home !== false,
+      stadium: pd.stadium ?? null,
+    };
+  }
+
+  async _finishDuel(uid, p, duelId, tactic, moState = undefined) {
     const pd = await this.store.takePendingDuel(uid, duelId);
     if (!pd) throw new AppError('not-found', 'Bu maç bitmiş ya da bulunamadı.');
-    const me2 = tactic && TACTICS[tactic] ? tactic : pd.me.tactic;
-    const match = playDuel({ me: pd.me, opp: pd.opp, seed: pd.seed, tactics: { me1: pd.me.tactic, opp1: pd.opp.tactic, me2, opp2: pd.opp.tacticHT } });
+    // Kritik anlar: verilen seçimler maça işlenir (cevaplanmamış an motorun kendi sonucuyla oynanır)
+    const mo = moState !== undefined ? moState : (pd.moments ?? null);
+    const me2 = mo?.tactic2 ?? (tactic && TACTICS[tactic] ? tactic : pd.me.tactic);
+    const match = this._replay(pd, mo, me2);
     const sc = match.timeline.score;
     const result = sc.home > sc.away ? 'W' : sc.home === sc.away ? 'D' : 'L';
+    const friendly = pd.mode === 'friend';
     const R = pd.mode === 'boss' ? BOSS : pd.mode === 'season' ? SEASON : DUEL;
     const baseReward = result === 'W' ? R.win : result === 'D' ? R.draw : R.loss;
-    // Stadyum geliri: stadyum seviyesine göre maç ödülüne yüzde eklenir
-    const incomePct = p.club ? effectsOf(p.club.levels).stadium.incomePct : 0;
+    // Stadyum geliri: iç saha maçında stadyum seviyesine göre maç ödülüne yüzde eklenir
+    const home = pd.home !== false;
+    const incomePct = p.club && home ? effectsOf(p.club.levels).stadium.incomePct : 0;
     const stadiumBonus = Math.round((baseReward * incomePct) / 100);
-    const reward = baseReward + stadiumBonus;
+    // Özel hafta: gol haftası (atılan gol başına), derbi haftası (galibiyete yüzde)
+    const theme = this.theme();
+    const goalBonus = pd.mode !== 'season' && theme.goalBonus ? sc.home * theme.goalBonus : 0;
+    const themeBonus = result === 'W' && theme.winPct ? Math.round((baseReward * theme.winPct) / 100) : 0;
+    // Galibiyet serisi (dostluk maçı seriyi etkilemez): art arda galibiyet ödülü artırır, 3/5/10'da hediye
+    const ws = { n: Number(p.winStreak?.n ?? 0), best: Number(p.winStreak?.best ?? 0) };
+    const streakN = friendly ? ws.n : result === 'W' ? ws.n + 1 : 0;
+    const streakBonus = !friendly && result === 'W' ? Math.round((baseReward * streakPct(streakN)) / 100) : 0;
+    const gift = !friendly && result === 'W' ? (WIN_STREAK.gifts[streakN] ?? null) : null;
+    const winStreak = { n: streakN, best: Math.max(ws.best, streakN) };
+    const reward = baseReward + stadiumBonus + goalBonus + themeBonus + streakBonus;
     const totals = { w: Number(p.duelTotals?.w ?? 0), d: Number(p.duelTotals?.d ?? 0), l: Number(p.duelTotals?.l ?? 0) };
     totals[result === 'W' ? 'w' : result === 'D' ? 'd' : 'l']++;
-    const record = { at: this.now(), squad: pd.me.squad ?? pd.me.name, opponent: pd.opp.name, opponentUser: pd.opp.username ?? null, score: [sc.home, sc.away], result, reward, mode: pd.mode };
-    await this.store.updateProfile(uid, { duels: [record, ...(p.duels ?? [])].slice(0, 10), duelTotals: totals });
+    const record = { at: this.now(), squad: pd.me.squad ?? pd.me.name, opponent: pd.opp.name, opponentUser: pd.opp.username ?? null, score: [sc.home, sc.away], result, reward, mode: pd.mode, home };
+    // Gizli ikililer: bu maçta birlikte oynayan uyumlu çiftler keşfedilir
+    const known = new Set((p.duos ?? []).map((d) => d.key));
+    const found = (pd.duos ?? []).filter((d) => !known.has(d.key)).map((d) => ({ ...d, at: this.now() }));
+    await this.store.updateProfile(uid, {
+      duels: [record, ...(p.duels ?? [])].slice(0, 10),
+      duelTotals: totals,
+      winStreak,
+      ...(found.length ? { duos: [...found, ...(p.duos ?? [])].slice(0, 40) } : {}),
+    });
     if (result === 'W') await this.store.incrementDaily(uid, pd.day, 'duelWins', 1);
     const week = this._week(Number(pd.at ?? this.now()));
     // Kariyer maçı haftalık Kapışma Ligi'ne değil, kariyer ligine yazılır
-    const pts = pd.mode === 'season' ? 0 : LEAGUE_POINTS[result];
-    if (pd.mode !== 'season') {
+    // Dostluk maçı da lige yazılmaz (arkadaşa meydan okuma)
+    const pts = pd.mode === 'season' || friendly ? 0 : LEAGUE_POINTS[result];
+    if (pd.mode !== 'season' && !friendly) {
       await this.store
-        .addDuelBoard(week, uid, { points: pts, played: 1, w: result === 'W' ? 1 : 0, d: result === 'D' ? 1 : 0, l: result === 'L' ? 1 : 0, gf: sc.home, ga: sc.away }, { username: p.username, photoURL: p.photoURL })
+        .addDuelBoard(week, uid, { points: pts, played: 1, w: result === 'W' ? 1 : 0, d: result === 'D' ? 1 : 0, l: result === 'L' ? 1 : 0, gf: sc.home, ga: sc.away }, { username: p.username, photoURL: p.photoURL, div: Number(p.league?.div ?? START_DIV) })
         .catch((e) => this.log.warn?.('[game] lig tablosu yazılamadı', e?.message ?? e));
+    }
+    // Arkadaşa meydan okuma: sonuç arkadaşın gelen kutusuna düşer (rövanş için)
+    if (friendly && pd.friend?.uid) {
+      const fp = await this.store.getProfile(pd.friend.uid).catch(() => null);
+      if (fp) {
+        const ch = { at: this.now(), from: p.username ?? null, club: p.club?.name ?? null, score: [sc.away, sc.home], result: result === 'W' ? 'L' : result === 'L' ? 'W' : 'D' };
+        await this.store.updateProfile(pd.friend.uid, { challenges: [ch, ...(fp.challenges ?? [])].slice(0, 10) }).catch(() => null);
+      }
     }
     const season = pd.mode === 'season' ? await this.manager.record(uid, p, sc.home, sc.away).catch((e) => (this.log.warn?.('[game] kariyer sonucu yazılamadı', e?.message ?? e), null)) : null;
     // Kulüp yönetimi: maç günü gelirleri, ilişkiler, sakatlık/ceza, mesajlar, basın toplantısı
@@ -1051,14 +1256,35 @@ export class GameService {
       pd.mode === 'season' && p.club
         ? await this.office.afterMatch(uid, p, { pd, match, my: sc.home, opp: sc.away, season }).catch((e) => (this.log.warn?.('[game] kulüp yönetimi işlenemedi', e?.message ?? e), null))
         : null;
-    const balance = await this._earn(uid, p, reward, await this._pro(uid));
+    const pro = await this._pro(uid);
+    let balance = await this._earn(uid, p, reward, pro);
+    // Galibiyet serisi hediyesi (enerji ya da paket jetonu)
+    const giftApplied = gift ? await this.progress.grant(uid, p, gift, pro).catch(() => null) : null;
+    // Genetik sisi: maçta oynayan oyuncuların genetiğinden bir parça açılabilir
+    const reveals = await this._matchReveals(uid, pd).catch((e) => (this.log.warn?.('[game] genetik açılamadı', e?.message ?? e), []));
+    // Sezon Yolu XP'si
+    const xp = await this.progress.xp(uid, ROAD.xp.match + (result === 'W' ? ROAD.xp.win : 0)).catch(() => null);
     const entry = await this.store.duelBoardEntry(week, uid).catch(() => null);
     const rank = entry ? await this.store.duelBoardRank(week, Number(entry.points ?? 0)).catch(() => null) : null;
     const daily = await this.store.getDaily(uid, trDay(this.now()));
+    const after = (await this.store.getProfile(uid)) ?? p;
+    if (giftApplied?.balance != null) balance = giftApplied.balance;
     return {
       duelId,
       mode: pd.mode,
-      pack: packOf(match),
+      pack: packOf(match, mo?.last ? { resumeAt: this._resumeAt(match, mo) } : {}),
+      // Maçın oynandığı stadyum (ev sahibinin) ve iç saha/deplasman
+      home,
+      stadium: pd.stadium ?? null,
+      venue: pd.stadium?.name ?? null,
+      friendly,
+      bonuses: { stadium: stadiumBonus, goals: goalBonus, theme: themeBonus, streak: streakBonus },
+      theme: this.progress.themeView(),
+      streak: { count: winStreak.n, best: winStreak.best, pct: !friendly && result === 'W' ? streakPct(streakN) : 0, gift: giftApplied ? { type: gift.type, amount: gift.amount ?? 1, pack: gift.pack ?? null } : null },
+      reveals,
+      duos: { found: found.map(({ key, a, b }) => ({ key, a, b })), active: (pd.duos ?? []).length },
+      xp,
+      moments: Object.entries(mo?.choices ?? {}).map(([id, v]) => (id === 'late' ? { id, choice: v?.id ?? v, plan: LATE[v?.id ?? v]?.name ?? null } : { id, choice: v.choice ?? v.dir, outcome: v.outcome, dir: v.dir, keeper: v.keeper })),
       score: [sc.home, sc.away],
       halftimeScore: [match.timeline.halftimeScore.home, match.timeline.halftimeScore.away],
       result,
@@ -1075,14 +1301,58 @@ export class GameService {
       tactics: { me: [pd.me.tactic, me2], opponent: [pd.opp.tactic, pd.opp.tacticHT] },
       week: { id: week, points: Number(entry?.points ?? 0), played: Number(entry?.played ?? 0), w: Number(entry?.w ?? 0), d: Number(entry?.d ?? 0), l: Number(entry?.l ?? 0), rank, gained: pts },
       career: totals,
-      left: matchesLeft(p.energy, this.now(), 'normal'),
-      energy: energyView(p.energy, this.now(), daily?.energyBuys ?? 0),
+      left: matchesLeft(after.energy, this.now(), 'normal'),
+      energy: energyView(after.energy, this.now(), daily?.energyBuys ?? 0),
       bossDone: daily?.boss === true,
       // Kariyer maçı: lig tablosu, hafta ve (sezon bittiyse) sezon sonucu
       season: season ? { final: season.final, prize: season.prize, managerXp: season.managerXp, career: season.view } : null,
       // Kariyer maçı: maç günü gelirleri, ilişkiler, olaylar ve basın toplantısı
       office,
     };
+  }
+
+  /** Maçta oynayan kartların genetiğinden parça açar (her oyuncu için FOG.matchChance). */
+  async _matchReveals(uid, pd) {
+    const ids = Object.values(pd.me?.ids ?? {}).filter(Boolean);
+    if (!ids.length) return [];
+    const cards = new Map((await this.store.listCards(uid)).map((c) => [c.id, c]));
+    const rng = this.random('fog');
+    const out = [];
+    for (const id of ids) {
+      const c = cards.get(id);
+      if (!c || !rng.chance(FOG.matchChance)) continue;
+      const rev = revealOne(c, rng);
+      if (!rev) continue;
+      await this.store.updateCard(uid, id, { gx: rev.gx });
+      out.push({ cardId: id, name: c.s ?? c.n ?? '', part: rev.part, gx: rev.gx, genetics: maskedGenetics({ ...c, gx: rev.gx }, rev.gx) });
+    }
+    return out;
+  }
+
+  /** Gözlemci raporu: kartın bütün genetiğini açar (oyun kredisiyle). */
+  async geneScout({ uid, guest = false, cardId }) {
+    this._member(uid, guest);
+    const p = await this._profile(uid);
+    this._needClub(p);
+    const cards = await this.store.listCards(uid);
+    const c = cards.find((x) => x.id === cardId);
+    if (!c) throw new AppError('not-found', 'Kart bulunamadı.');
+    if ((Number(c.gx ?? 0) & FOG.all) === FOG.all) throw new AppError('failed-precondition', 'Bu oyuncunun genetiği zaten açık.');
+    const balance = await this.store.changeCredits(uid, -FOG.scoutCost, { earn: false });
+    await this.store.updateCard(uid, cardId, { gx: FOG.all });
+    return { cardId, cost: FOG.scoutCost, balance, genetics: maskedGenetics({ ...c, gx: FOG.all }, FOG.all) };
+  }
+
+  /** Canlı form: gerçek maçlarda formda olan oyuncular (havuzdan) ve kullanıcının formdaki kartları. */
+  async liveForm({ uid, guest = false, limit = 20 }) {
+    this._member(uid, guest);
+    await this.pool.ensure?.();
+    const players = (this.pool.all?.() ?? []).filter((x) => Number(x.fm ?? 0) > 0);
+    players.sort((a, b) => Number(b.fm) - Number(a.fm) || Number(b.r ?? 0) - Number(a.r ?? 0));
+    const cards = uid ? await this.store.listCards(uid) : [];
+    const mine = this._live(cards).filter((c) => c.form).map((c) => ({ cardId: c.id, pid: c.pid ?? null, name: c.s ?? c.n ?? '', form: c.form, r: c.r }));
+    const n = Math.min(50, Math.max(1, Number(limit) || 20));
+    return { top: players.slice(0, n).map((x) => ({ pid: x.id, name: x.s ?? x.n ?? '', team: x.c ?? null, g: x.g ?? null, r: x.r, form: x.fm })), mine };
   }
 
   /** Mağaza: oyun kredisiyle enerji (fiyat o gün her alımda artar). */
@@ -1110,7 +1380,11 @@ export class GameService {
   async duelBoard({ uid, guest = false }) {
     this._member(uid, guest);
     const week = this._week(this.now());
-    const [top, mine] = await Promise.all([this.store.duelBoardTop(week, 50), this.store.duelBoardEntry(week, uid)]);
+    // Küme ligi: kullanıcı yalnızca kendi kümesindeki rakiplerle sıralanır
+    const p = await this._profile(uid);
+    const division = await this.progress.league(uid, p);
+    const [all, mine] = await Promise.all([this.store.duelBoardTop(week, 500), this.store.duelBoardEntry(week, uid)]);
+    const top = all.filter((e) => Number(e.div ?? START_DIV) === Number(division.div));
     const row = (e, rank) => ({
       rank,
       uid: e.uid,
@@ -1125,10 +1399,15 @@ export class GameService {
       ga: Number(e.ga ?? 0),
       me: e.uid === uid,
     });
-    const me = mine ? row(mine, await this.store.duelBoardRank(week, Number(mine.points ?? 0))) : null;
-    // Saniyelik sıralama: eşit puanda averaj, sonra atılan gol
+    // Sıralama: eşit puanda averaj, sonra atılan gol
     const sorted = [...top].sort((a, b) => Number(b.points ?? 0) - Number(a.points ?? 0) || Number(b.gf ?? 0) - Number(b.ga ?? 0) - (Number(a.gf ?? 0) - Number(a.ga ?? 0)) || Number(b.gf ?? 0) - Number(a.gf ?? 0));
-    return { week, top: sorted.map((e, i) => row(e, i + 1)), me, resetsAt: this._weekEnd() };
+    const myIdx = sorted.findIndex((e) => e.uid === uid);
+    const me = mine ? row(mine, myIdx >= 0 ? myIdx + 1 : null) : null;
+    const size = sorted.length;
+    // Bölge (settleWeek ile aynı kural): ilk RULES.up yükselir (en az minPlayed maç), son RULES.down düşer (küme kalabalıksa)
+    const R = division.rules;
+    const zone = (rank, played) => (rank <= R.up && division.div > 1 && played >= R.minPlayed ? 'up' : size >= R.minSize && rank > size - R.down && division.div < START_DIV ? 'down' : null);
+    return { week, top: sorted.slice(0, 50).map((e, i) => { const r = row(e, i + 1); return { ...r, zone: zone(r.rank, r.played) }; }), me: me ? { ...me, zone: me.rank ? zone(me.rank, me.played) : null } : null, size, division, resetsAt: this._weekEnd() };
   }
 
   /** Bu haftanın bittiği an (Türkiye saatiyle pazartesi 00:00). */

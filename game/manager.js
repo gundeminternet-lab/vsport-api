@@ -20,7 +20,7 @@
 
 import { AppError } from '../errors.js';
 import { ENERGY, matchesLeft } from './energy.js';
-import { geneticsView } from './genetics.js';
+import { maskedGenetics, youthBits } from './fog.js';
 import { trDay } from '../progress.js';
 import { createRng } from '../engine/rng.js';
 import { cardStats, subPosition, tierOf } from './pool.js';
@@ -285,7 +285,8 @@ export function makeProspect({ seed, id, academyLevel, scoutLevel, now }) {
 /** Gencin görünümü (bugünkü güç ve özelliklerle). */
 export function prospectView(y, now, academyLevel) {
   const r = youthRating(y, now, academyLevel);
-  const gen = geneticsView({ pid: y.gk ?? `youth-?-${y.id}`, youth: true, g: y.g });
+  // Genetik sisi: akademinin gözlemcisi seviyesine göre genetiğin bir kısmını görür
+  const gen = maskedGenetics({ pid: y.gk ?? `youth-?-${y.id}`, youth: true, g: y.g }, youthBits(academyLevel));
   return { id: y.id, gk: y.gk ?? null, name: y.n, short: y.s, pos: y.pos, g: y.g, age: y.age, r, pot: y.pot, st: cardStats(y.g, r, createRng(`ys:${y.id}`)), star: y.pot >= 85, days: Math.max(0, Math.floor((now - Number(y.at ?? now)) / 86400e3)), gen };
 }
 
@@ -500,6 +501,8 @@ export class ManagerService {
     const ac = Number(p.club.levels?.academy ?? 1);
     const v = prospectView(x, now, ac);
     const card = {
+      // Genetiğin akademide görülen kısmı kartta açık kalır
+      gx: youthBits(ac),
       pid: x.gk ?? `youth-${hashStr(uid)}-${x.id}`,
       n: x.n,
       s: x.s,

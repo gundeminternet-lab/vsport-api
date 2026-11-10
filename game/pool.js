@@ -6,6 +6,7 @@
 // Kompakt oyuncu: { id, n: ad, s: kısa ad, pos: mevki, g: grup, r: puan, st: [6 özellik], c: kulüp, ci: kulüp kimliği,
 //                   cl: kulüp logosu, l: lig, na: uyruk, ni: ISO, a: yaş, ph: fotoğraf }
 
+import { applyForm } from './form.js';
 import { LEAGUES } from '../engine/config.js';
 import { createRng } from '../engine/rng.js';
 import { nation, POOL_LEAGUES } from './nations.js';
@@ -174,6 +175,10 @@ export function teamCards(players, team, ctx) {
       ni: nat.iso,
       a: p.age,
       ph: p.photo,
+      // Sezon istatistikleri: bir sonraki yenilemede haftanın formu bunlardan hesaplanır (canlı kartlar)
+      sg: p.goals ?? 0,
+      sa: p.assists ?? 0,
+      sp: p.apps ?? 0,
     };
   });
 }
@@ -298,6 +303,8 @@ export class PlayerPool {
     };
     await Promise.all(Array.from({ length: 3 }, worker));
     if (!out.length) throw new Error('kadro bulunamadı');
+    // Canlı kartlar: önceki yenilemeden bu yana gerçek maçlardaki gol, asist ve maç sayısı → haftanın formu
+    applyForm(out, this.league(league));
     const builtAt = this.now();
     this._set(league, out);
     this._builtAt = { ...(this._builtAt ?? {}), [league]: builtAt };

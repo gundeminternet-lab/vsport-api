@@ -13,8 +13,9 @@
 //   club.staff   { kl, def, os, fv, fit, scout }   teknik ekip seviyeleri (0-5; staff.js)
 //   Antrenmanda oyuncu potansiyelini (staff.js → potentialOf) aşamaz; grubun antrenörü gelişimi ve sınırı artırır.
 
+import { FOG, maskedGenetics, revealOne, revealedBits } from './fog.js';
 import { AppError } from '../errors.js';
-import { geneticsView, trainFactor, traitStats } from './genetics.js';
+import { trainFactor, traitStats } from './genetics.js';
 import { trDay } from '../progress.js';
 import { tierOf } from './pool.js';
 import { slotsOf, teamPower, validateSquad } from './squad.js';
@@ -437,7 +438,9 @@ export class ClubService {
     await this.store.incrementDaily(uid, day, 'training', 1);
     // Genetik: gelişim hızı × yaş × (antrenman doğuştan yeteneğe uyuyorsa +%10)
     const tf = trainFactor(card, card.g === 'KL' ? d.keeper : d.field);
-    const gain = Math.round(TRAIN.baseXp * d.xp * (1 + (eff.training.xpPct + (se.xpPct[card.g] ?? 0)) / 100) * tf.k);
+    // Özel hafta (Gençlik Haftası): antrenman gelişimi artar
+    const themePct = Number(this.game.theme?.()?.trainPct ?? 0);
+    const gain = Math.round(TRAIN.baseXp * d.xp * (1 + (eff.training.xpPct + (se.xpPct[card.g] ?? 0) + themePct) / 100) * tf.k);
     let xp = dev.xp + gain;
     let r = Number(card.r);
     let plus = dev.plus;
@@ -458,6 +461,10 @@ export class ClubService {
     }
     if (plus >= cap || r >= pot) xp = 0;
     const patch = { r, st, tier: tierOf(r), pot, dev: { xp, plus, base: dev.base } };
+    // Genetik sisi: antrenmanda genetiğin bir parçası açılabilir
+    const rng = this.game.random ? this.game.random('fog') : null;
+    const rev = rng && rng.chance(FOG.trainChance) ? revealOne(card, rng) : null;
+    if (rev) patch.gx = rev.gx;
     await this.store.updateCard(uid, cardId, patch);
     // Güç arttıysa oyuncunun bulunduğu kadroların gücü yenilenir
     if (raised.length) await this._refreshSquads(uid, p, cards.map((c) => (c.id === cardId ? { ...c, ...patch } : c)));
@@ -465,7 +472,8 @@ export class ClubService {
       card: { id: cardId, r, st, tier: tierOf(r), pot, dev: patch.dev, need: xpNeed(r) },
       gain,
       // Genetik etkisi (uygulama kart üstünde gösterir)
-      genetics: { ...geneticsView(card), factor: tf.k, fits: tf.fits, age: tf.age.text },
+      genetics: { ...maskedGenetics(card, rev ? rev.gx : revealedBits(card)), factor: tf.k, fits: tf.fits, age: tf.age.text },
+      reveal: rev ? { part: rev.part, gx: rev.gx } : null,
       levelUp: raised.length,
       cost,
       balance,

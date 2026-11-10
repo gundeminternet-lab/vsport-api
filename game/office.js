@@ -21,7 +21,7 @@ import { createRng } from '../engine/rng.js';
 import { effectsOf, fanCount } from './club.js';
 import { SELL_PRICE } from './economy.js';
 import { tierOf } from './pool.js';
-import { staffLevels } from './staff.js';
+import { hashStr, staffLevels } from './staff.js';
 import { geneticsOf } from './genetics.js';
 
 export const REL_KEYS = ['board', 'fans', 'media'];
@@ -193,6 +193,8 @@ export const PRESS = {
 
 /** Haber kaynakları (kurgusal). */
 export const OUTLETS = ['Spor Manşet', 'Tribün Gazetesi', 'Saha Kenarı TV'];
+/** Soruyu soran muhabir (kurgusal). */
+export const REPORTERS = ['Selin Aydın', 'Murat Kaya', 'Deniz Yalçın', 'Emre Koç', 'Ayşe Demir', 'Burak Şahin', 'Ece Arslan', 'Kerem Öztürk'];
 
 /** Basın toplantısı (saf): soru ve seçenekler. */
 export function makePress({ id, at, my, opp, oppName, week, seed }) {
@@ -209,6 +211,7 @@ export function makePress({ id, at, my, opp, oppName, week, seed }) {
     score: `${my}-${opp}`,
     opp: oppName,
     outlet: OUTLETS[rng.int(0, OUTLETS.length - 1)],
+    reporter: REPORTERS[rng.int(0, REPORTERS.length - 1)],
     q,
     options: P.options.map((o) => ({ id: o.id, text: o.text, d: o.d })),
   };
@@ -248,6 +251,9 @@ export function headlinesFor(press, optionId, clubName) {
 // ---------------------------------------------------------------------------------------------------------------
 
 const INJURIES = ['arka adale zorlanması', 'ayak bileği burkulması', 'diz bağı zorlanması', 'kas yorgunluğu', 'kasık ağrısı', 'darbeye bağlı ödem'];
+/** Sakatlığın vücuttaki yeri (uygulamada sakatlık raporundaki vücut haritası için), INJURIES ile aynı sırada. */
+export const INJURY_PARTS = ['hamstring', 'ankle', 'knee', 'calf', 'groin', 'thigh'];
+export const PART_LABELS = { hamstring: 'Arka adale', ankle: 'Ayak bileği', knee: 'Diz', calf: 'Baldır', groin: 'Kasık', thigh: 'Uyluk' };
 const DISCIPLINE = ['antrenmana geç kaldı ve yardımcı antrenörle tartıştı', 'kamp kurallarını çiğnedi', 'oyundan alınınca kulübeye gitmeden soyunma odasına girdi', 'sosyal medyada takım arkadaşlarını eleştirdi'];
 const BUYERS = ['Kartal Birlik', 'Liman FK', 'Başkent Gücü', 'Sahil Spor', 'Boğaz SK', 'Anadolu Yıldızı', 'Ege Gençlik', 'Karadeniz FK'];
 
@@ -278,7 +284,10 @@ export function matchEvents({ seed, lineup, reds = [], plan = null, fit = 0, car
     const body = geneticsOf(c).body;
     if (rng.chance(pInj * body.injury) && !out.reds.some((r) => r.id === c.id)) {
       const left = rng.pickWeighted([1, 2, 3], [5, 3, 2]) + body.extra;
-      out.injuries.push({ id: c.id, name: nameOf(c), left, note: INJURIES[rng.int(0, INJURIES.length - 1)], body: body.id });
+      const k = rng.int(0, INJURIES.length - 1);
+      // Yer, taraf ve dakika (animasyon için) tohumdan: olay çekilişlerini değiştirmez
+      const h = hashStr(`inj:${seed}:${c.id}`);
+      out.injuries.push({ id: c.id, name: nameOf(c), left, note: INJURIES[k], body: body.id, part: INJURY_PARTS[k], side: h % 2 ? 'sag' : 'sol', minute: 12 + (h % 74), g: c.g ?? null });
     }
   }
   // Disiplin olayı
@@ -400,6 +409,15 @@ export class OfficeService {
       press: o.press && !o.press.answered ? { id: o.press.id, opp: o.press.opp, score: o.press.score } : null,
       matchday: o.matchday,
     };
+  }
+
+  /** İç saha maçında tribün: güncel bilet fiyatıyla beklenen seyirci ve doluluk (maç ekranındaki stadyum için). */
+  homeCrowd(p) {
+    if (!p?.club) return { attendance: 0, capacity: 0, fill: 0 };
+    const o = this.office(p.club);
+    const price = o.ticket ?? fairTicket(this._div(p));
+    const f = this.forecast(p, o, price);
+    return { attendance: f.attendance, capacity: f.capacity, fill: f.fill, price };
   }
 
   /** Bilet tahmini: fiyata göre seyirci ve gelir (Finans ekranındaki kaydırıcı için birkaç nokta). */
@@ -684,7 +702,7 @@ export class OfficeService {
       this._push(o, { from: 'disiplin', text: `Disiplin Kurulu: ${r.name} gördüğü kırmızı kart nedeniyle 1 maç cezalandırıldı.` });
     }
     for (const i of ev.injuries) {
-      o.absent[i.id] = { type: 'injury', left: i.left, name: i.name, note: i.note };
+      o.absent[i.id] = { type: 'injury', left: i.left, name: i.name, note: i.note, part: i.part ?? null, side: i.side ?? null };
       this._push(o, { from: 'medical', text: `Sağlık ekibi: ${i.name} maçta sakatlandı (${i.note}). Tahmini dönüş: ${i.left} maç sonra.` });
     }
     if (ev.discipline) {
@@ -735,7 +753,7 @@ export class OfficeService {
       matchday,
       events: [
         ...ev.reds.map((r) => ({ type: 'red', text: `${r.name}: kırmızı kart, 1 maç ceza` })),
-        ...ev.injuries.map((i) => ({ type: 'injury', text: `${i.name} sakatlandı (${i.note}), ${i.left} maç yok` })),
+        ...ev.injuries.map((i) => ({ type: 'injury', text: `${i.name} sakatlandı (${i.note}), ${i.left} maç yok`, injury: { id: i.id, name: i.name, note: i.note, part: i.part, partName: PART_LABELS[i.part] ?? null, side: i.side, minute: i.minute, left: i.left, g: i.g } })),
         ...(ev.discipline ? [{ type: 'discipline', text: `${ev.discipline.name}: disiplin sorunu, kararını bekliyor` }] : []),
         ...(ev.offer ? [{ type: 'offer', text: `${ev.offer.buyer}, ${ev.offer.name} için ${ev.offer.price.toLocaleString('tr-TR')} kredi teklif etti` }] : []),
       ],

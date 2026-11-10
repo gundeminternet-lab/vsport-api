@@ -179,7 +179,7 @@ export function createGameStore(db, FieldValue) {
       const inc = {};
       for (const [k, v] of Object.entries(delta)) inc[k] = FieldValue.increment(v);
       await db.doc(`duel_boards/${week}/entries/${uid}`).set(
-        { ...inc, username: user.username ?? null, photoURL: user.photoURL ?? null, updatedAt: FieldValue.serverTimestamp() },
+        { ...inc, username: user.username ?? null, photoURL: user.photoURL ?? null, ...(user.div != null ? { div: user.div } : {}), updatedAt: FieldValue.serverTimestamp() },
         { merge: true },
       );
     },
@@ -194,6 +194,17 @@ export function createGameStore(db, FieldValue) {
     async duelBoardRank(week, points) {
       const c = await db.collection(`duel_boards/${week}/entries`).where('points', '>', points).count().get();
       return c.data().count + 1;
+    },
+    /** Kullanıcı adından kimlik (arkadaşa meydan okuma). */
+    async uidByUsername(name) {
+      const key = String(name ?? '').replaceAll('@', '').trim().toLowerCase();
+      if (!key) return null;
+      const s = await db.doc(`usernames/${key}`).get();
+      return s.exists ? (s.get('uid') ?? null) : null;
+    },
+    async getDuelPoolEntry(uid) {
+      const s = await db.doc(`duel_pool/${uid}`).get();
+      return s.exists ? { uid, ...s.data() } : null;
     },
     async upsertDuelPool(uid, summary) {
       await db.doc(`duel_pool/${uid}`).set({ ...summary, updatedAt: FieldValue.serverTimestamp() });
