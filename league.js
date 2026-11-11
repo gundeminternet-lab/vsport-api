@@ -51,7 +51,8 @@ export function previousWeekId(nowMs) {
 
 /** Firestore'a yazan kısım. db: Admin Firestore, FieldValue: firebase-admin/firestore. */
 /** onScored: doğru tahmin sonrası (oyun kredisi ödülü); hata puanlamayı bozmaz. */
-export function createLeagueStore(db, FieldValue, progress = null, onScored = null) {
+/** onPredicted: her geçerli (zamanında yapılmış) tahmin için ({ uid, points, exact }) — topluluk isabeti. */
+export function createLeagueStore(db, FieldValue, progress = null, onScored = null, onPredicted = null) {
   return {
     /** Biten maçın tahminlerini puanlar. Maç başladıktan sonra değiştirilen tahminler 0 puan alır (geçersiz). */
     async scoreMatch({ key, homeGoals, awayGoals, kickoffMs }) {
@@ -87,7 +88,7 @@ export function createLeagueStore(db, FieldValue, progress = null, onScored = nu
         }
         await batch.commit();
         // Seviye/rozet ilerlemesi ve oyun kredisi (başarısız olsa da puanlama geçerli kalır)
-        if (progress || onScored) {
+        if (progress || onScored || onPredicted) {
           for (const doc of q.docs) {
             const p = doc.data();
             const at = p.updatedAt?.toMillis?.() ?? 0;
@@ -101,6 +102,11 @@ export function createLeagueStore(db, FieldValue, progress = null, onScored = nu
             if (onScored && points > 0) {
               try {
                 await onScored({ uid: doc.id, points, exact });
+              } catch {}
+            }
+            if (onPredicted) {
+              try {
+                await onPredicted({ uid: doc.id, points, exact });
               } catch {}
             }
           }

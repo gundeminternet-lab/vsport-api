@@ -29,7 +29,7 @@ import { MatchWatcher } from './watcher.js';
 import { channelFor, fcmMessage } from './notify.js';
 import { RadarService, createRadarStore } from './radar_service.js';
 import { createLeagueStore, previousWeekId } from './league.js';
-import { createProgressStore, XP } from './progress.js';
+import { createProgressStore, trDay, XP } from './progress.js';
 import { createPollStore } from './polls.js';
 import { CouponSettler, createSettleStore } from './settle.js';
 import { TrackService, createTrackStore } from './track.js';
@@ -56,6 +56,11 @@ import { GameService } from './game/service.js';
 import { createGameStore } from './game/store.js';
 import { PlayerPool } from './game/pool.js';
 import { SocialService, createSocialStore } from './social.js';
+import { MissionService, createMissionStore } from './social_missions.js';
+import { CommunityService, RatingService, createCommunityStore } from './social_community.js';
+import { DmService, createDmStore } from './social_dm.js';
+import { DIVISIONS } from './game/divisions.js';
+import { readSummary } from './notify.js';
 import { NewsService, createNewsStore, feedsFromEnv, DEFAULT_FEEDS } from './news.js';
 import { TransferService, createTransferStore } from './game/transfer.js';
 
@@ -162,10 +167,36 @@ const playerPool = new PlayerPool({ store: gameStore, espn });
 const game = new GameService({ store: gameStore, pool: playerPool, access });
 // Benim 11'im Transfer Pazarı: kartlar kullanıcılar arasında kredi karşılığı el değiştirir
 const transfer = new TransferService({ store: createTransferStore(db, FieldValue), game });
+// Sosyal ödülleri (görev, düello, Taraftar Savaşı) oyun kredisi ya da paket jetonu olarak verilir; satın alınmaz.
+const socialReward = async (uid, reward) => game.progress.grant(uid, await game._profile(uid), reward);
+const missions = new MissionService({ store: createMissionStore(db), reward: socialReward });
+const community = new CommunityService({ store: createCommunityStore(db, FieldValue), reward: socialReward });
 const social = new SocialService({
   store: createSocialStore(db, FieldValue),
   isAdmin: async (uid) => (await db.doc(`users/${uid}`).get()).get('role') === 'admin',
+  missions,
+  community,
+  reward: socialReward,
+  // Profilde Benim 11'im kulübü ve kredi sırası
+  brief: async (uid) => {
+    const p = await gameStore.getProfile(uid);
+    if (!p) return null;
+    const all = await gameStore.boardEntry('all', uid).catch(() => null);
+    const div = DIVISIONS.find((d) => d.id === Number(p.league?.div ?? 0));
+    return {
+      club: p.club
+        ? { name: p.club.name, short: p.club.short ?? null, crest: p.club.crest ?? null, div: div?.id ?? null, divName: div?.name ?? null, streak: Number(p.winStreak?.n ?? 0), wins: Number(p.duelTotals?.w ?? 0) }
+        : null,
+      creditRank: all?.earned > 0 ? await gameStore.boardRank('all', all.earned).catch(() => null) : null,
+    };
+  },
 });
+const ratings = new RatingService({
+  store: createCommunityStore(db, FieldValue),
+  missions,
+  matchState: async (league, eventId) => readSummary(await espn.getSummary(league, eventId)).state ?? null,
+});
+const dm = new DmService({ store: createDmStore(db, FieldValue) });
 // Sosyal → Haberler: ücretsiz RSS beslemelerinden günlük futbol haberleri; yorum yazan Sosyal'deki kullanıcı adıyla görünür
 const news = new NewsService({
   store: createNewsStore(db, FieldValue),
@@ -230,6 +261,10 @@ const api = createApi({
   game,
   transfer,
   social,
+  missions,
+  community,
+  ratings,
+  dm,
   news,
   progress,
   track: trackService,
@@ -279,7 +314,8 @@ http.createServer(api).listen(port, () => console.log(`vSport API ${port} portun
 // ---- Canlı maç bildirimleri ----
 const messaging = getMessaging();
 // Doğru skor tahmini oyunda kredi kazandırır (günlük sınırlı)
-const league = createLeagueStore(db, FieldValue, progress, (r) => game.progress.predictionReward(r));
+// Her geçerli tahmin topluluk isabetine ve Taraftar Savaşı'na işlenir
+const league = createLeagueStore(db, FieldValue, progress, (r) => game.progress.predictionReward(r), (r) => community.recordPrediction(r));
 const polls = createPollStore(db, FieldValue, Timestamp);
 const settler = new CouponSettler({ store: createSettleStore(db, FieldValue), espn });
 let lastSettle = 0;
@@ -288,10 +324,16 @@ let awardedWeek = null; // bellekte: aynı hafta için her dakika işlem açılm
 const watcher = new MatchWatcher({
   store,
   espn,
-  // Penaltı, kırmızı kart, VAR, gol iptali: maç sohbetinde otomatik anket
-  onNote: (n) => polls.autoPoll(n),
-  // Tahmin ligi: biten maçın tahminleri puanlanır
-  onFinished: (m) => league.scoreMatch(m),
+  // Penaltı, kırmızı kart, VAR, gol iptali: maç sohbetinde otomatik anket; büyük liglerde gol ve maç sonu Sosyal akışa kart olarak düşer
+  onNote: async (n) => {
+    await social.autoNote(n).catch((e) => console.error('[social] kart', e?.message ?? e));
+    return polls.autoPoll(n);
+  },
+  // Tahmin ligi: biten maçın tahminleri puanlanır; o maçın skor düelloları sonuçlanır
+  onFinished: async (m) => {
+    await social.settleMatch(m).catch((e) => console.error('[social] düello', e?.message ?? e));
+    return league.scoreMatch(m);
+  },
   // Pazartesi (Türkiye saati) geçen haftanın ilk üçüne token ödülü; tekrar dağıtılmaz
   onTick: async (now) => {
     // Tahmin karnesi: bitmiş maçların bekleyen tahminleri sonuçlanır (10 dakikada bir)
@@ -355,6 +397,22 @@ setTimeout(() => {
   pull();
   setInterval(pull, 15 * 60e3);
 }, 25e3);
+
+// Sosyal akış: günün AI maçı kartı günde bir kez (09:00'dan sonra, 10 dakikada bir denenir)
+let socialPickDay = null;
+setTimeout(() => {
+  const pick = async () => {
+    const day = trDay(Date.now());
+    const hour = new Date(Date.now() + 3 * 3600e3).getUTCHours();
+    if (socialPickDay === day || hour < 9) return;
+    const id = await social.dailyPick(await daily._rows(day));
+    if (id !== null || hour >= 12) socialPickDay = day;
+    if (id) console.log(`[social] günün AI maçı kartı: ${id}`);
+  };
+  const run = () => pick().catch((e) => console.error('[social] AI kartı', e?.message ?? e));
+  run();
+  setInterval(run, 10 * 60e3);
+}, 90e3);
 
 // Dış tahmin verisi: günlük tahmin hattıyla aynı fikstür planını kullanır, dakikada en fazla 8 maç okur
 if (market) {

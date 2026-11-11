@@ -44,6 +44,11 @@ export const GUEST_ROUTES = new Set([
   'communityStats',
   'gameSearchPlayers',
   'presence',
+  // Sosyal: misafir profilleri, oda sayılarını ve toplulukları görür (yazmak için giriş gerekir)
+  'socialUser',
+  'socialRooms',
+  'communityState',
+  'communityList',
 ]);
 
 const STATUS = {
@@ -59,7 +64,7 @@ const STATUS = {
   unavailable: 503,
 };
 
-export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, daily = null, aiCoupons = null, market = null, game = null, transfer = null, social = null, news = null, radar = null, capture = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
+export function createApi({ verifyToken, service, coupons, progress = null, checker = null, rewards = null, admin = null, tts = null, assistant = null, featured = null, track = null, lineup = null, liveForecast = null, bulletin = null, reader = null, storyReview = null, account = null, billing = null, access = null, wheel = null, daily = null, aiCoupons = null, market = null, game = null, transfer = null, social = null, missions = null, community = null, ratings = null, dm = null, news = null, radar = null, capture = null, info = null, maxBodyBytes = 16 * 1024, rateLimit = 40, log = console }) {
   const routes = {
     unlockContent: (d) => service.unlock(d),
     getContent: (d) => service.get(d),
@@ -182,8 +187,38 @@ export function createApi({ verifyToken, service, coupons, progress = null, chec
           socialComment: (d) => social.comment(d),
           socialDelete: (d) => social.remove(d),
           socialFollow: (d) => social.follow(d),
+          socialReact: (d) => social.react(d),
+          socialVote: (d) => social.vote(d),
+          socialDuelJoin: (d) => social.duelJoin(d),
+          socialNotifRead: (d) => social.notifRead(d),
+          socialProfileSave: (d) => social.profileSave(d),
+          socialUser: (d) => social.user(d),
+          socialRoomPing: (d) => social.roomPing(d),
+          socialRooms: (d) => social.rooms(d),
           presence: (d) => social.presence(d),
           communityStats: (d) => social.stats(d),
+        }
+      : {}),
+    // Sosyal görevler, taraftar toplulukları ve Taraftar Savaşı, oyuncu puanlama, özel mesajlar
+    ...(missions ? { socialMissions: (d) => missions.state(d), socialMissionClaim: (d) => missions.claim(d) } : {}),
+    ...(community
+      ? {
+          communityJoin: (d) => community.join(d),
+          communityLeave: (d) => community.leave(d),
+          communityState: (d) => community.state(d),
+          communityList: (d) => community.list(d),
+          communityClaim: (d) => community.claim(d),
+        }
+      : {}),
+    ...(ratings ? { socialRate: (d) => ratings.rate(d) } : {}),
+    ...(dm
+      ? {
+          dmSend: (d) => dm.send(d),
+          dmAccept: (d) => dm.accept(d),
+          dmDecline: (d) => dm.decline(d),
+          dmRead: (d) => dm.read(d),
+          socialBlock: (d) => dm.block(d),
+          socialReport: (d) => dm.report(d),
         }
       : {}),
     // Benim 11'im → Transfer Pazarı

@@ -89,7 +89,7 @@ export class MatchWatcher {
       }
       if (this.onNote) {
         try {
-          await this.onNote({ key: w.key, note: n });
+          await this.onNote({ key: w.key, note: n, league: w.league, eventId: w.eventId, summary: readSummary(summary), raw: summary });
         } catch (e) {
           this.log.error?.(`[watcher] ${w.key} anket açılamadı: ${e?.message ?? e}`);
         }
