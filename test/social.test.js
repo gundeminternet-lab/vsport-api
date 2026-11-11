@@ -3,92 +3,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { SocialService, extractTags, cleanMatch, POST_MAX } from '../social.js';
-
-function memStore(users) {
-  const s = {
-    users,
-    posts: new Map(),
-    likes: new Map(),
-    comments: new Map(),
-    tags: new Map(),
-    profiles: new Map(),
-    follows: new Map(),
-    presence: new Map(),
-    seq: 0,
-    async getUser(uid) {
-      return s.users[uid] ?? null;
-    },
-    async addPost(doc) {
-      const id = `p${++s.seq}`;
-      s.posts.set(id, { ...doc });
-      return id;
-    },
-    async getPost(id) {
-      return s.posts.get(id) ?? null;
-    },
-    async deletePost(id) {
-      s.posts.delete(id);
-    },
-    async setLike(postId, uid, like) {
-      const p = s.posts.get(postId);
-      if (!p) return null;
-      const k = `${postId}/${uid}`;
-      if (like === s.likes.has(k)) return { liked: like, likeCount: p.likeCount };
-      if (like) s.likes.set(k, true);
-      else s.likes.delete(k);
-      p.likeCount = Math.max(0, p.likeCount + (like ? 1 : -1));
-      return { liked: like, likeCount: p.likeCount };
-    },
-    async addComment(postId, c) {
-      const p = s.posts.get(postId);
-      if (!p) return null;
-      const list = s.comments.get(postId) ?? [];
-      list.push(c);
-      s.comments.set(postId, list);
-      p.commentCount++;
-      return { id: `c${list.length}`, commentCount: p.commentCount };
-    },
-    async countTags(day, tags) {
-      const m = s.tags.get(day) ?? {};
-      for (const t of tags) m[t.key] = { n: (m[t.key]?.n ?? 0) + 1, label: t.label };
-      s.tags.set(day, m);
-    },
-    async bumpProfile(uid, inc) {
-      const p = s.profiles.get(uid) ?? {};
-      for (const [k, v] of Object.entries(inc)) p[k] = (p[k] ?? 0) + v;
-      s.profiles.set(uid, p);
-    },
-    async setFollow(uid, target, follow, max) {
-      const list = s.follows.get(uid) ?? [];
-      const has = list.includes(target);
-      if (has === follow) return 'same';
-      if (follow && list.length >= max) return 'limit';
-      s.follows.set(uid, follow ? [...list, target] : list.filter((x) => x !== target));
-      await s.bumpProfile(target, { followers: follow ? 1 : -1 });
-      return 'changed';
-    },
-    async setPresence(uid, at, day) {
-      s.presence.set(uid, { at, day });
-    },
-    async countUsers() {
-      return Object.keys(s.users).length;
-    },
-    async countActiveDay(day) {
-      return [...s.presence.values()].filter((p) => p.day === day).length;
-    },
-    async countOnline(since) {
-      return [...s.presence.values()].filter((p) => p.at >= since).length;
-    },
-  };
-  return s;
-}
+import { memSocial } from './social_fakes.js';
 
 const NOW = Date.UTC(2026, 9, 28, 9);
 const users = { u1: { username: 'tostcu23', photoURL: 'p' }, u2: { username: 'rakip' }, u3: { username: null }, bad: { username: 'kotu', banned: true } };
 
 function make() {
   let now = NOW;
-  const store = memStore(users);
+  const store = memSocial(users);
   const s = new SocialService({ store, now: () => now, isAdmin: async (uid) => uid === 'admin' });
   return { s, store, tick: (ms) => (now += ms) };
 }
